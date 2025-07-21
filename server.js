@@ -9,6 +9,7 @@ require("dotenv").config();
 const { setupUnifiedVoiceServer } = require("./websocket/aitota");
 
 // Environment configuration
+
 const PORT = process.env.PORT;
 const NODE_ENV = process.env.NODE_ENV;
 
