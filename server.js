@@ -17,7 +17,6 @@ const NODE_ENV = process.env.NODE_ENV;
 const app = express();
 const server = http.createServer(app);
 
-// Middleware
 app.use(cors());
 
 app.use(express.json({ limit: "10mb" }));
