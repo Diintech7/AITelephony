@@ -610,7 +610,7 @@ const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
     const BYTES_PER_SAMPLE = 2;
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
     
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
     const alignToSample = (size) => Math.floor(size / 2) * 2;
     const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
     
