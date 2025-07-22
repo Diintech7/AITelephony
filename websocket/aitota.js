@@ -1,4 +1,5 @@
 const WebSocket = require("ws");
+const fs = require("fs"); // Added for saving audio chunk
 require("dotenv").config();
 
 // Load API keys from environment variables
@@ -294,7 +295,8 @@ class OptimizedLMNTTTSProcessor {
     
     // Sentence-based processing settings
     this.sentenceBuffer = "";
-    this.processingTimeout = 200; // Increased to allow more buffering
+    this.processingTimeout = 200;
+    this.sentenceTimer = null;
     
     // Audio streaming stats
     this.totalChunks = 0;
@@ -304,6 +306,7 @@ class OptimizedLMNTTTSProcessor {
     this.lmntWs = null;
     this.lmntReady = false;
     this.audioBuffer = [];
+    this.firstChunkSaved = false; // Flag to save first audio chunk
     
     // Initialize LMNT WebSocket connection
     this.connectToLMNT();
@@ -348,7 +351,6 @@ class OptimizedLMNTTTSProcessor {
               console.error(`❌ [LMNT] Error: ${data.error}`);
               this.lmntReady = false;
               this.lmntWs.close();
-              // Attempt reconnection
               setTimeout(() => this.connectToLMNT(), 1000);
             } else if (data.buffer_empty) {
               console.log(`📤 [LMNT] Buffer empty, synthesis complete for current text`);
@@ -358,6 +360,14 @@ class OptimizedLMNTTTSProcessor {
           }
         } else if (event.data instanceof Buffer) {
           console.log(`📥 [LMNT] Received audio chunk: ${event.data.length} bytes`);
+          
+          // Save first audio chunk for debugging
+          if (!this.firstChunkSaved) {
+            fs.writeFileSync("test_audio.ulaw", event.data);
+            console.log(`💾 [LMNT] Saved first audio chunk to test_audio.ulaw`);
+            this.firstChunkSaved = true;
+          }
+          
           this.audioBuffer.push(event.data);
           await this.streamAudioOptimizedForSIP(event.data);
         }
@@ -366,14 +376,12 @@ class OptimizedLMNTTTSProcessor {
       this.lmntWs.onerror = (error) => {
         console.error(`❌ [LMNT] WebSocket Error: ${error.message}`);
         this.lmntReady = false;
-        // Attempt reconnection
         setTimeout(() => this.connectToLMNT(), 1000);
       };
 
       this.lmntWs.onclose = () => {
         console.log("🔌 [LMNT] WebSocket Connection closed");
         this.lmntReady = false;
-        // Attempt reconnection
         setTimeout(() => this.connectToLMNT(), 1000);
       };
     } catch (error) {
@@ -394,12 +402,12 @@ class OptimizedLMNTTTSProcessor {
     }
     
     if (this.lmntWs?.readyState === WebSocket.OPEN) {
-      this.lmntWs.send(JSON.stringify({ flush: true })); // Flush before closing
+      this.lmntWs.send(JSON.stringify({ flush: true }));
       this.lmntWs.close();
     }
     
     console.log(`🛑 [LMNT-TTS] Processing interrupted and cleaned up`);
-    this.isInterrupted = false; // Reset for next use
+    this.isInterrupted = false;
   }
 
   reset(newLanguage) {
@@ -415,6 +423,7 @@ class OptimizedLMNTTTSProcessor {
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
     this.audioBuffer = [];
+    this.firstChunkSaved = false;
     
     this.connectToLMNT();
   }
@@ -531,7 +540,7 @@ class OptimizedLMNTTTSProcessor {
       console.log(`🎵 [LMNT-TTS] Synthesizing: "${text}" (${this.lmntLanguage})`);
       
       this.lmntWs.send(JSON.stringify({ text }));
-      this.lmntWs.send(JSON.stringify({ flush: true })); // Ensure immediate synthesis
+      this.lmntWs.send(JSON.stringify({ flush: true }));
       
       console.log(`⚡ [LMNT-TTS] Synthesis initiated in ${timer.end()}ms`);
       
@@ -552,7 +561,7 @@ class OptimizedLMNTTTSProcessor {
     const SAMPLE_RATE = 8000;
     const BYTES_PER_SAMPLE = 1;
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS); // Reduced chunk size for smoother streaming
+    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
     
     console.log(`📦 [LMNT-SIP] Streaming ${audioBuffer.length} bytes`);
     
@@ -564,23 +573,27 @@ class OptimizedLMNTTTSProcessor {
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining);
       const chunk = audioBuffer.slice(position, position + chunkSize);
       
-      console.log(`📤 [LMNT-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`);
+      const base64Payload = chunk.toString("base64");
+      console.log(`📤 [LMNT-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes, base64 sample: ${base64Payload.substring(0, 20)}...`);
       
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
         media: {
-          payload: chunk.toString("base64"),
+          payload: base64Payload,
         },
       };
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         this.ws.send(JSON.stringify(mediaMessage));
+      } else {
+        console.error(`❌ [LMNT-SIP] WebSocket not open, cannot send chunk ${chunkIndex + 1}`);
       }
       
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-        const delayMs = Math.max(chunkDurationMs - 1, 5); // Reduced delay for smoother streaming
+        const delayMs = Math.max(chunkDurationMs - 1, 5);
+        console.log(`⏳ [LMNT-SIP] Waiting ${delayMs}ms before next chunk`);
         await new Promise(resolve => setTimeout(resolve, delayMs));
       }
       
@@ -797,14 +810,16 @@ const setupUnifiedVoiceServer = (wss) => {
           if (tts.lmntReady) {
             resolve();
           } else {
+            console.log("⏳ [GREETING] Waiting for LMNT WebSocket to connect...");
             setTimeout(checkReady, 100);
           }
         };
         checkReady();
       });
       
+      console.log("📤 [GREETING] Sending greeting message");
       await tts.synthesizeAndStream(DEFAULT_CONFIG.firstMessage);
-      tts.complete(); // Ensure greeting is flushed
+      tts.complete();
     };
 
     ws.on("message", async (message) => {
