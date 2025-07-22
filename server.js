@@ -293,7 +293,6 @@ const startServer = async () => {
   }
 };
 
-// Start the server
 startServer();
 
 // Export server for testing purposes
