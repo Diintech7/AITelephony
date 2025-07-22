@@ -83,21 +83,96 @@ const getApiKeys = async (tenantId) => {
       return {};
     }
     
+    // Display all API keys retrieved from database
+    console.log(`📋 [DB] Found ${apiKeys.length} API key(s) for tenant ${tenantId}:`);
+    apiKeys.forEach((apiKey, index) => {
+      console.log(`   ${index + 1}. Provider: ${apiKey.provider}, Active: ${apiKey.isActive}, Created: ${apiKey.createdAt || 'N/A'}`);
+    });
+    
     const keys = {};
+    const successfulKeys = [];
+    const failedKeys = [];
+    
     for (const apiKey of apiKeys) {
       try {
         const decryptedKey = apiKey.getDecryptedKey();
         keys[apiKey.provider] = decryptedKey;
-        console.log(`✅ [DB] Loaded ${apiKey.provider} API key`);
+        successfulKeys.push(apiKey.provider);
+        console.log(`✅ [DB] Successfully loaded ${apiKey.provider} API key`);
+        
+        // Display partial key for verification (first 8 and last 4 characters)
+        if (decryptedKey && decryptedKey.length > 12) {
+          const maskedKey = decryptedKey.substring(0, 8) + '...' + decryptedKey.substring(decryptedKey.length - 4);
+          console.log(`   🔐 [DB] ${apiKey.provider} key: ${maskedKey}`);
+        } else {
+          console.log(`   🔐 [DB] ${apiKey.provider} key: [SHORT_KEY]`);
+        }
+        
       } catch (error) {
+        failedKeys.push(apiKey.provider);
         console.error(`❌ [DB] Failed to decrypt ${apiKey.provider} key: ${error.message}`);
       }
+    }
+    
+    // Summary of API keys loaded
+    console.log(`📊 [DB] API Keys Summary for tenant ${tenantId}:`);
+    console.log(`   ✅ Successfully loaded: ${successfulKeys.length} keys [${successfulKeys.join(', ')}]`);
+    if (failedKeys.length > 0) {
+      console.log(`   ❌ Failed to load: ${failedKeys.length} keys [${failedKeys.join(', ')}]`);
+    }
+    console.log(`   📦 Total keys in response object: ${Object.keys(keys).length}`);
+    
+    // Display all available providers in the keys object
+    if (Object.keys(keys).length > 0) {
+      console.log(`🗝️  [DB] Available API providers: ${Object.keys(keys).join(', ')}`);
     }
     
     return keys;
   } catch (error) {
     console.error(`❌ [DB] Error fetching API keys: ${error.message}`);
+    console.error(`❌ [DB] Error stack: ${error.stack}`);
     return {};
+  }
+};
+
+// Enhanced loadAgentConfiguration function with API key logging
+const loadAgentConfiguration = async (accountSid) => {
+  try {
+    console.log(`🔧 [CONFIG] Loading configuration for accountSid: ${accountSid}`);
+    
+    // Get agent configuration
+    agentConfig = await getAgentByAccountSid(accountSid);
+    if (!agentConfig) {
+      console.error(`❌ [CONFIG] No agent found for accountSid: ${accountSid}`);
+      return false;
+    }
+    
+    // Get API keys for this tenant
+    apiKeys = await getApiKeys(agentConfig.tenantId);
+    
+    // Enhanced API keys validation and logging
+    const requiredKeys = ['openai', 'deepgram', 'sarvam'];
+    const availableKeys = Object.keys(apiKeys);
+    const missingKeys = requiredKeys.filter(key => !apiKeys[key]);
+    
+    console.log(`🔍 [CONFIG] API Keys validation for tenant ${agentConfig.tenantId}:`);
+    console.log(`   📋 Required keys: ${requiredKeys.join(', ')}`);
+    console.log(`   ✅ Available keys: ${availableKeys.join(', ')}`);
+    
+    if (missingKeys.length > 0) {
+      console.error(`   ❌ Missing keys: ${missingKeys.join(', ')}`);
+      console.error(`❌ [CONFIG] Missing required API keys for tenant: ${agentConfig.tenantId}`);
+      return false;
+    }
+    
+    console.log(`   ✅ All required API keys are available!`);
+    console.log(`✅ [CONFIG] Configuration loaded successfully`);
+    console.log(`🤖 [AGENT] Name: ${agentConfig.agentName}, Language: ${agentConfig.language}, Voice: ${agentConfig.voiceSelection}`);
+    
+    return true;
+  } catch (error) {
+    console.error(`❌ [CONFIG] Error loading configuration: ${error.message}`);
+    return false;
   }
 };
 
@@ -210,8 +285,8 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with sentence-based optimization and SIP streaming
-class OptimizedSarvamTTSProcessor {
+// Enhanced WebSocket-based Sarvam TTS Processor
+class WebSocketSarvamTTSProcessor {
   constructor(language, ws, streamSid, apiKeys, voiceSelection) {
     this.language = language;
     this.ws = ws;
@@ -228,6 +303,191 @@ class OptimizedSarvamTTSProcessor {
     
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
+    
+    // WebSocket connection to Sarvam
+    this.sarvamWs = null;
+    this.sarvamReady = false;
+    this.audioQueue = [];
+    this.pendingTexts = [];
+    
+    this.initializeSarvamWebSocket();
+  }
+
+  async initializeSarvamWebSocket() {
+    try {
+      if (!this.apiKeys.sarvam) {
+        throw new Error("Sarvam API key not found");
+      }
+
+      console.log(`🔌 [SARVAM-WS] Connecting to Sarvam WebSocket...`);
+      
+      // Create WebSocket connection to Sarvam
+      const sarvamUrl = 'wss://api.sarvam.ai/text-to-speech-streaming';
+      
+      this.sarvamWs = new WebSocket(sarvamUrl, {
+        headers: {
+          'API-Subscription-Key': this.apiKeys.sarvam,
+        }
+      });
+
+      this.sarvamWs.onopen = () => {
+        console.log(`✅ [SARVAM-WS] Connected to Sarvam WebSocket`);
+        this.sarvamReady = true;
+        
+        // Send configuration message first
+        const configMessage = {
+          type: "config",
+          data: {
+            speaker: this.voice,
+            target_language_code: this.sarvamLanguage,
+            pitch: 0,
+            pace: 1.0,
+            min_buffer_size: 20,
+            max_chunk_length: 200,
+            output_audio_codec: "mp3",
+            output_audio_bitrate: "64k"
+          }
+        };
+        
+        this.sarvamWs.send(JSON.stringify(configMessage));
+        console.log(`🔧 [SARVAM-WS] Configuration sent: ${this.voice}, ${this.sarvamLanguage}`);
+        
+        // Process any pending texts
+        this.pendingTexts.forEach(text => this.sendTextToSarvam(text));
+        this.pendingTexts = [];
+      };
+
+      this.sarvamWs.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          this.handleSarvamMessage(message);
+        } catch (error) {
+          console.error(`❌ [SARVAM-WS] Message parse error: ${error.message}`);
+        }
+      };
+
+      this.sarvamWs.onerror = (error) => {
+        console.error(`❌ [SARVAM-WS] WebSocket error:`, error);
+        this.sarvamReady = false;
+      };
+
+      this.sarvamWs.onclose = (event) => {
+        console.log(`🔌 [SARVAM-WS] Connection closed: ${event.code} - ${event.reason}`);
+        this.sarvamReady = false;
+      };
+
+    } catch (error) {
+      console.error(`❌ [SARVAM-WS] Initialization error: ${error.message}`);
+    }
+  }
+
+  handleSarvamMessage(message) {
+    if (message.type === "audio" && message.data?.audio) {
+      const audioBase64 = message.data.audio;
+      console.log(`🎵 [SARVAM-WS] Received audio chunk: ${audioBase64.length} characters`);
+      
+      // Stream the audio to the client immediately
+      this.streamAudioToClient(audioBase64);
+      
+      this.totalChunks++;
+      const audioBuffer = Buffer.from(audioBase64, "base64");
+      this.totalAudioBytes += audioBuffer.length;
+    } else if (message.type === "error") {
+      console.error(`❌ [SARVAM-WS] Error from Sarvam: ${message.message}`);
+    } else {
+      console.log(`📨 [SARVAM-WS] Received message: ${message.type}`);
+    }
+  }
+
+  sendTextToSarvam(text) {
+    if (!text.trim()) return;
+    
+    if (this.sarvamWs && this.sarvamReady && this.sarvamWs.readyState === WebSocket.OPEN) {
+      const textMessage = {
+        type: "text",
+        data: {
+          text: text
+        }
+      };
+      
+      this.sarvamWs.send(JSON.stringify(textMessage));
+      console.log(`📤 [SARVAM-WS] Sent text: "${text}"`);
+    } else {
+      console.log(`⏳ [SARVAM-WS] Queuing text (not ready): "${text}"`);
+      this.pendingTexts.push(text);
+    }
+  }
+
+  async streamAudioToClient(audioBase64) {
+    try {
+      const audioBuffer = Buffer.from(audioBase64, "base64");
+      
+      const SAMPLE_RATE = 8000;
+      const BYTES_PER_SAMPLE = 2;
+      const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
+      
+      const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+      const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);
+      const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+      
+      const alignToSample = (size) => Math.floor(size / 2) * 2;
+      
+      const minChunk = alignToSample(MIN_CHUNK_SIZE);
+      const maxChunk = alignToSample(MAX_CHUNK_SIZE);
+      const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
+      
+      console.log(`📦 [SARVAM-STREAM] Streaming ${audioBuffer.length} bytes to client`);
+      
+      let position = 0;
+      let chunkIndex = 0;
+      
+      while (position < audioBuffer.length) {
+        const remaining = audioBuffer.length - position;
+        let chunkSize;
+        
+        if (remaining <= maxChunk) {
+          chunkSize = remaining >= minChunk ? remaining : minChunk;
+        } else {
+          chunkSize = optimalChunk;
+        }
+        
+        chunkSize = Math.min(chunkSize, remaining);
+        const chunk = audioBuffer.slice(position, position + chunkSize);
+        
+        if (chunk.length >= minChunk) {
+          const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
+          
+          console.log(`📤 [CLIENT-STREAM] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
+          
+          const mediaMessage = {
+            event: "media",
+            streamSid: this.streamSid,
+            media: {
+              payload: chunk.toString("base64")
+            }
+          };
+
+          if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(mediaMessage));
+          }
+          
+          const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+          const networkBufferMs = 2;
+          const delayMs = Math.max(chunkDurationMs - networkBufferMs, 10);
+          
+          if (position + chunkSize < audioBuffer.length) {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+          }
+          
+          chunkIndex++;
+        }
+        
+        position += chunkSize;
+      }
+      
+    } catch (error) {
+      console.error(`❌ [STREAM-CLIENT] Error: ${error.message}`);
+    }
   }
 
   addPhrase(phrase) {
@@ -278,9 +538,8 @@ class OptimizedSarvamTTSProcessor {
     const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
     
     if (complete) {
-      this.queue.push(complete);
+      this.sendTextToSarvam(complete);
       this.sentenceBuffer = remaining;
-      this.processQueue();
     }
   }
 
@@ -289,173 +548,46 @@ class OptimizedSarvamTTSProcessor {
     
     this.sentenceTimer = setTimeout(() => {
       if (this.sentenceBuffer.trim()) {
-        this.queue.push(this.sentenceBuffer.trim());
+        this.sendTextToSarvam(this.sentenceBuffer.trim());
         this.sentenceBuffer = "";
-        this.processQueue();
       }
     }, this.processingTimeout);
   }
 
-  async processQueue() {
-    if (this.isProcessing || this.queue.length === 0) return;
-
-    this.isProcessing = true;
-    const textToProcess = this.queue.shift();
-
-    try {
-      await this.synthesizeAndStream(textToProcess);
-    } catch (error) {
-      console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
-    } finally {
-      this.isProcessing = false;
-      
-      if (this.queue.length > 0) {
-        setTimeout(() => this.processQueue(), 10);
-      }
-    }
-  }
-
-  async synthesizeAndStream(text) {
-    const timer = createTimer("SARVAM_TTS_SENTENCE");
-    
-    try {
-      if (!this.apiKeys.sarvam) {
-        throw new Error("Sarvam API key not found");
-      }
-
-      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
-
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "API-Subscription-Key": this.apiKeys.sarvam,
-        },
-        body: JSON.stringify({
-          inputs: [text],
-          target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
-          model: "bulbul:v1",
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
-      }
-
-      const responseData = await response.json();
-      const audioBase64 = responseData.audios?.[0];
-      
-      if (!audioBase64) {
-        throw new Error("No audio data received from Sarvam API");
-      }
-
-      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
-      
-      await this.streamAudioOptimizedForSIP(audioBase64);
-      
-      const audioBuffer = Buffer.from(audioBase64, "base64");
-      this.totalAudioBytes += audioBuffer.length;
-      this.totalChunks++;
-      
-    } catch (error) {
-      console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
-      throw error;
-    }
-  }
-
-  async streamAudioOptimizedForSIP(audioBase64) {
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    
-    const SAMPLE_RATE = 8000;
-    const BYTES_PER_SAMPLE = 2;
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
-    
-    const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
-    const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
-    
-    const alignToSample = (size) => Math.floor(size / 2) * 2;
-    
-    const minChunk = alignToSample(MIN_CHUNK_SIZE);
-    const maxChunk = alignToSample(MAX_CHUNK_SIZE);
-    const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
-    
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
-    
-    let position = 0;
-    let chunkIndex = 0;
-    
-    while (position < audioBuffer.length) {
-      const remaining = audioBuffer.length - position;
-      let chunkSize;
-      
-      if (remaining <= maxChunk) {
-        chunkSize = remaining >= minChunk ? remaining : minChunk;
-      } else {
-        chunkSize = optimalChunk;
-      }
-      
-      chunkSize = Math.min(chunkSize, remaining);
-      const chunk = audioBuffer.slice(position, position + chunkSize);
-      
-      if (chunk.length >= minChunk) {
-        const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
-        
-        console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
-        
-        const mediaMessage = {
-          event: "media",
-          streamSid: this.streamSid,
-          media: {
-            payload: chunk.toString("base64")
-          }
-        };
-
-        if (this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify(mediaMessage));
-        }
-        
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-        const networkBufferMs = 2;
-        const delayMs = Math.max(chunkDurationMs - networkBufferMs, 10);
-        
-        if (position + chunkSize < audioBuffer.length) {
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-        }
-        
-        chunkIndex++;
-      }
-      
-      position += chunkSize;
-    }
-    
-    console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
-  }
-
   complete() {
+    // Send any remaining text
     if (this.sentenceBuffer.trim()) {
-      this.queue.push(this.sentenceBuffer.trim());
+      this.sendTextToSarvam(this.sentenceBuffer.trim());
       this.sentenceBuffer = "";
     }
     
-    if (this.queue.length > 0) {
-      this.processQueue();
+    // Send flush message to Sarvam to process remaining buffer
+    if (this.sarvamWs && this.sarvamReady && this.sarvamWs.readyState === WebSocket.OPEN) {
+      const flushMessage = { type: "flush" };
+      this.sarvamWs.send(JSON.stringify(flushMessage));
+      console.log(`🔄 [SARVAM-WS] Sent flush message`);
     }
     
-    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
+    console.log(`📊 [SARVAM-WS-STATS] Total: ${this.totalChunks} chunks, ${this.totalAudioBytes} bytes`);
+  }
+
+  close() {
+    if (this.sentenceTimer) {
+      clearTimeout(this.sentenceTimer);
+    }
+    
+    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
+      this.sarvamWs.close();
+      console.log(`🔌 [SARVAM-WS] Closed connection`);
+    }
   }
 
   getStats() {
     return {
       totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
-      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
+      isReady: this.sarvamReady
     };
   }
 }
@@ -527,7 +659,7 @@ const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [DB-INTEGRATED] Voice Server started");
+  console.log("🚀 [DB-INTEGRATED-WS] Voice Server started with WebSocket Sarvam TTS");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New database-integrated WebSocket connection");
@@ -645,7 +777,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized utterance processing
+    // Optimized utterance processing with WebSocket TTS
     const processUserUtterance = async (text) => {
       if (!text.trim() || isProcessing || text === lastProcessedText) return;
 
@@ -656,7 +788,7 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        optimizedTTS = new OptimizedSarvamTTSProcessor(
+        optimizedTTS = new WebSocketSarvamTTSProcessor(
           agentConfig.language, 
           ws, 
           streamSid, 
@@ -678,7 +810,7 @@ const setupUnifiedVoiceServer = (wss) => {
             optimizedTTS.complete();
             
             const stats = optimizedTTS.getStats();
-            console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
+            console.log(`📊 [TTS-WS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk, Ready: ${stats.isReady}`);
             
             conversationHistory.push(
               { role: "user", content: text },
@@ -700,23 +832,28 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Send initial greeting using stored audioBytes
+    // Send initial greeting using stored audioBytes or WebSocket TTS
     const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting from database");
+      console.log("👋 [GREETING] Sending initial greeting");
       
       if (agentConfig.audioBytes) {
         console.log("🎵 [GREETING] Using stored audio from database");
         await streamPreRecordedAudio(agentConfig.audioBytes, ws, streamSid);
       } else {
-        console.log("🎵 [GREETING] No stored audio, using TTS for first message");
-        const tts = new OptimizedSarvamTTSProcessor(
+        console.log("🎵 [GREETING] Using WebSocket TTS for first message");
+        const tts = new WebSocketSarvamTTSProcessor(
           agentConfig.language, 
           ws, 
           streamSid, 
           apiKeys, 
           agentConfig.voiceSelection
         );
-        await tts.synthesizeAndStream(agentConfig.firstMessage);
+        
+        // Wait a moment for WebSocket to be ready
+        setTimeout(() => {
+          tts.addPhrase(agentConfig.firstMessage);
+          tts.complete();
+        }, 1000);
       }
     };
 
@@ -727,7 +864,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [DB-INTEGRATED] Connected - Protocol: ${data.protocol}`);
+            console.log(`🔗 [DB-INTEGRATED-WS] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start":
