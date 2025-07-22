@@ -58,7 +58,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
 // Valid LMNT voice options (example voice IDs, replace with actual LMNT voice IDs)
 const VALID_LMNT_VOICES = ["elowen", "morgan", "other-voice-id"]; // Update with actual LMNT voice IDs
 
-const getValidLMNTVoice = (voice,width: 3600px; voiceSelection = "elowen") => {
+const getValidLMNTVoice = (voiceSelection = "elowen") => {
   if (VALID_LMNT_VOICES.includes(voiceSelection)) {
     return voiceSelection;
   }
