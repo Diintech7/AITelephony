@@ -460,7 +460,7 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// Function to stream pre-recorded audio from database
+// Function to stream pre-recorded audio from database - FIXED VERSION
 const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
   const timer = createTimer("PRERECORDED_AUDIO_STREAM");
   
@@ -478,22 +478,21 @@ const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
     const BYTES_PER_SAMPLE = 2;
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
     
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+    // Smaller chunks for smoother streaming (10ms instead of 20ms)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(10 * BYTES_PER_MS);
     const alignToSample = (size) => Math.floor(size / 2) * 2;
     const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
     
-    console.log(`📦 [PRERECORDED] Streaming ${audioBuffer.length} bytes`);
+    console.log(`📦 [PRERECORDED] Streaming ${audioBuffer.length} bytes in ${optimalChunk}-byte chunks`);
     
     let position = 0;
     let chunkIndex = 0;
     
+    // Send all chunks rapidly without artificial delays
     while (position < audioBuffer.length) {
       const remaining = audioBuffer.length - position;
       const chunkSize = Math.min(optimalChunk, remaining);
       const chunk = audioBuffer.slice(position, position + chunkSize);
-      
-      const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
-      console.log(`📤 [PRERECORDED] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
       
       const mediaMessage = {
         event: "media",
@@ -507,21 +506,76 @@ const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
         ws.send(JSON.stringify(mediaMessage));
       }
       
-      const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-      const delayMs = Math.max(chunkDurationMs - 2, 10);
-      
-      if (position + chunkSize < audioBuffer.length) {
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-      }
-      
       chunkIndex++;
       position += chunkSize;
+      
+      // Minimal delay only to prevent overwhelming the WebSocket (1ms)
+      if (position < audioBuffer.length) {
+        await new Promise(resolve => setTimeout(resolve, 1));
+      }
     }
     
     console.log(`✅ [PRERECORDED] Completed streaming ${chunkIndex} chunks in ${timer.end()}ms`);
     
   } catch (error) {
     console.error(`❌ [PRERECORDED] Error streaming audio: ${error.message}`);
+  }
+};
+
+// Alternative: Send entire audio as one message (if your system supports it)
+const streamPreRecordedAudioAsSingleMessage = async (audioBase64, ws, streamSid) => {
+  const timer = createTimer("PRERECORDED_AUDIO_SINGLE");
+  
+  try {
+    if (!audioBase64) {
+      console.log(`❌ [PRERECORDED] No audio data provided`);
+      return;
+    }
+
+    console.log(`🎵 [PRERECORDED] Streaming stored audio as single message`);
+    
+    const mediaMessage = {
+      event: "media",
+      streamSid: streamSid,
+      media: {
+        payload: audioBase64
+      }
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(mediaMessage));
+      console.log(`✅ [PRERECORDED] Sent complete audio in ${timer.end()}ms`);
+    }
+    
+  } catch (error) {
+    console.error(`❌ [PRERECORDED] Error streaming audio: ${error.message}`);
+  }
+};
+
+// Updated sendInitialGreeting function
+const sendInitialGreeting = async () => {
+  console.log("👋 [GREETING] Sending initial greeting from database");
+  
+  if (agentConfig.audioBytes) {
+    console.log("🎵 [GREETING] Using stored audio from database");
+    
+    // Try sending as single message first (recommended for greetings)
+    try {
+      await streamPreRecordedAudioAsSingleMessage(agentConfig.audioBytes, ws, streamSid);
+    } catch (error) {
+      console.log("🎵 [GREETING] Single message failed, falling back to chunked streaming");
+      await streamPreRecordedAudio(agentConfig.audioBytes, ws, streamSid);
+    }
+  } else {
+    console.log("🎵 [GREETING] No stored audio, using TTS for first message");
+    const tts = new OptimizedSarvamTTSProcessor(
+      agentConfig.language, 
+      ws, 
+      streamSid, 
+      apiKeys, 
+      agentConfig.voiceSelection
+    );
+    await tts.synthesizeAndStream(agentConfig.firstMessage);
   }
 };
 
