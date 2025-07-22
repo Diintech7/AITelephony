@@ -426,7 +426,7 @@ class WebSocketSarvamTTSProcessor {
       const BYTES_PER_SAMPLE = 2;
       const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
       
-      const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+      const MIN_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
       const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);
       const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
       
