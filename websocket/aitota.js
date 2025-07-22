@@ -56,6 +56,7 @@ const getAgentByAccountSid = async (accountSid) => {
   try {
     console.log(`🔍 [DB] Looking for agent with accountSid: ${accountSid}`);
     
+    // Find agent by accountSid (you might need to adjust the field name based on your schema)
     const agent = await Agent.findOne({ accountSid: accountSid });
     
     if (!agent) {
@@ -82,89 +83,21 @@ const getApiKeys = async (tenantId) => {
       return {};
     }
     
-    console.log(`📋 [DB] Found ${apiKeys.length} API key(s) for tenant ${tenantId}:`);
-    apiKeys.forEach((apiKey, index) => {
-      console.log(`   ${index + 1}. Provider: ${apiKey.provider}, Active: ${apiKey.isActive}, Created: ${apiKey.createdAt || 'N/A'}`);
-    });
-    
     const keys = {};
-    const successfulKeys = [];
-    const failedKeys = [];
-    
     for (const apiKey of apiKeys) {
       try {
         const decryptedKey = apiKey.getDecryptedKey();
         keys[apiKey.provider] = decryptedKey;
-        successfulKeys.push(apiKey.provider);
-        console.log(`✅ [DB] Successfully loaded ${apiKey.provider} API key`);
-        
-        if (decryptedKey && decryptedKey.length > 12) {
-          const maskedKey = decryptedKey.substring(0, 8) + '...' + decryptedKey.substring(decryptedKey.length - 4);
-          console.log(`   🔐 [DB] ${apiKey.provider} key: ${maskedKey}`);
-        } else {
-          console.log(`   🔐 [DB] ${apiKey.provider} key: [SHORT_KEY]`);
-        }
-        
+        console.log(`✅ [DB] Loaded ${apiKey.provider} API key`);
       } catch (error) {
-        failedKeys.push(apiKey.provider);
         console.error(`❌ [DB] Failed to decrypt ${apiKey.provider} key: ${error.message}`);
       }
-    }
-    
-    console.log(`📊 [DB] API Keys Summary for tenant ${tenantId}:`);
-    console.log(`   ✅ Successfully loaded: ${successfulKeys.length} keys [${successfulKeys.join(', ')}]`);
-    if (failedKeys.length > 0) {
-      console.log(`   ❌ Failed to load: ${failedKeys.length} keys [${failedKeys.join(', ')}]`);
-    }
-    console.log(`   📦 Total keys in response object: ${Object.keys(keys).length}`);
-    
-    if (Object.keys(keys).length > 0) {
-      console.log(`🗝️  [DB] Available API providers: ${Object.keys(keys).join(', ')}`);
     }
     
     return keys;
   } catch (error) {
     console.error(`❌ [DB] Error fetching API keys: ${error.message}`);
-    console.error(`❌ [DB] Error stack: ${error.stack}`);
     return {};
-  }
-};
-
-// Enhanced loadAgentConfiguration function with API key logging
-const loadAgentConfiguration = async (accountSid) => {
-  try {
-    console.log(`🔧 [CONFIG] Loading configuration for accountSid: ${accountSid}`);
-    
-    agentConfig = await getAgentByAccountSid(accountSid);
-    if (!agentConfig) {
-      console.error(`❌ [CONFIG] No agent found for accountSid: ${accountSid}`);
-      return false;
-    }
-    
-    apiKeys = await getApiKeys(agentConfig.tenantId);
-    
-    const requiredKeys = ['openai', 'deepgram', 'sarvam'];
-    const availableKeys = Object.keys(apiKeys);
-    const missingKeys = requiredKeys.filter(key => !apiKeys[key]);
-    
-    console.log(`🔍 [CONFIG] API Keys validation for tenant ${agentConfig.tenantId}:`);
-    console.log(`   📋 Required keys: ${requiredKeys.join(', ')}`);
-    console.log(`   ✅ Available keys: ${availableKeys.join(', ')}`);
-    
-    if (missingKeys.length > 0) {
-      console.error(`   ❌ Missing keys: ${missingKeys.join(', ')}`);
-      console.error(`❌ [CONFIG] Missing required API keys for tenant: ${agentConfig.tenantId}`);
-      return false;
-    }
-    
-    console.log(`   ✅ All required API keys are available!`);
-    console.log(`✅ [CONFIG] Configuration loaded successfully`);
-    console.log(`🤖 [AGENT] Name: ${agentConfig.agentName}, Language: ${agentConfig.language}, Voice: ${agentConfig.voiceSelection}`);
-    
-    return true;
-  } catch (error) {
-    console.error(`❌ [CONFIG] Error loading configuration: ${error.message}`);
-    return false;
   }
 };
 
@@ -183,8 +116,6 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, syst
       { role: "user", content: userMessage }
     ];
 
-    console.log(`🤖 [OPENAI] Sending request with ${messages.length} messages`);
-
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -194,16 +125,15 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, syst
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 150, // Increased for better responses
+        max_tokens: 50,
         temperature: 0.3,
         stream: true,
       }),
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ [OPENAI] Error: ${response.status} - ${errorText}`);
-      throw new Error(`OpenAI API Error: ${response.status}`);
+      console.error(`❌ [OPENAI] Error: ${response.status}`);
+      return null;
     }
 
     let fullResponse = "";
@@ -254,7 +184,6 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, syst
             }
           } catch (e) {
             // Skip malformed JSON
-            console.warn(`⚠️ [OPENAI] Skipping malformed JSON: ${data.substring(0, 50)}...`);
           }
         }
       }
@@ -266,11 +195,7 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, syst
 
   } catch (error) {
     console.error(`❌ [OPENAI] Error: ${error.message}`);
-    // Return fallback response to avoid breaking the flow
-    const fallbackResponse = "I'm here to help. Could you please repeat that?";
-    onPhrase(fallbackResponse);
-    onComplete(fallbackResponse);
-    return fallbackResponse;
+    return null;
   }
 };
 
@@ -285,8 +210,8 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced WebSocket-based Sarvam TTS Processor with better error handling
-class WebSocketSarvamTTSProcessor {
+// Enhanced TTS processor with sentence-based optimization and SIP streaming
+class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, apiKeys, voiceSelection) {
     this.language = language;
     this.ws = ws;
@@ -298,248 +223,11 @@ class WebSocketSarvamTTSProcessor {
     this.voice = getValidSarvamVoice(voiceSelection);
     
     this.sentenceBuffer = "";
-    this.processingTimeout = 150; // Slightly increased timeout
+    this.processingTimeout = 100;
     this.sentenceTimer = null;
     
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
-    
-    // WebSocket connection to Sarvam
-    this.sarvamWs = null;
-    this.sarvamReady = false;
-    this.audioQueue = [];
-    this.pendingTexts = [];
-    this.connectionAttempts = 0;
-    this.maxRetries = 3;
-    
-    this.initializeSarvamWebSocket();
-  }
-
-  async initializeSarvamWebSocket() {
-    try {
-      if (!this.apiKeys.sarvam) {
-        throw new Error("Sarvam API key not found");
-      }
-
-      console.log(`🔌 [SARVAM-WS] Connecting to Sarvam WebSocket (attempt ${this.connectionAttempts + 1})...`);
-      
-      const sarvamUrl = 'wss://api.sarvam.ai/text-to-speech-streaming';
-      
-      this.sarvamWs = new WebSocket(sarvamUrl, {
-        headers: {
-          'API-Subscription-Key': this.apiKeys.sarvam,
-        }
-      });
-
-      // Set connection timeout
-      const connectionTimeout = setTimeout(() => {
-        if (this.sarvamWs.readyState === WebSocket.CONNECTING) {
-          console.error(`❌ [SARVAM-WS] Connection timeout`);
-          this.sarvamWs.close();
-          this.handleConnectionFailure();
-        }
-      }, 10000); // 10 second timeout
-
-      this.sarvamWs.onopen = () => {
-        clearTimeout(connectionTimeout);
-        console.log(`✅ [SARVAM-WS] Connected to Sarvam WebSocket`);
-        this.sarvamReady = true;
-        this.connectionAttempts = 0; // Reset on successful connection
-        
-        // Send configuration message first
-        const configMessage = {
-          type: "config",
-          data: {
-            speaker: this.voice,
-            target_language_code: this.sarvamLanguage,
-            pitch: 0,
-            pace: 1.0,
-            min_buffer_size: 40,
-            max_chunk_length: 200,
-            output_audio_codec: "mp3",
-            output_audio_bitrate: "64k"
-          }
-        };
-        
-        if (this.sarvamWs.readyState === WebSocket.OPEN) {
-          this.sarvamWs.send(JSON.stringify(configMessage));
-          console.log(`🔧 [SARVAM-WS] Configuration sent: ${this.voice}, ${this.sarvamLanguage}`);
-          
-          // Process any pending texts
-          this.pendingTexts.forEach(text => this.sendTextToSarvam(text));
-          this.pendingTexts = [];
-        }
-      };
-
-      this.sarvamWs.onmessage = (event) => {
-        try {
-          const message = JSON.parse(event.data);
-          this.handleSarvamMessage(message);
-        } catch (error) {
-          console.error(`❌ [SARVAM-WS] Message parse error: ${error.message}`);
-        }
-      };
-
-      this.sarvamWs.onerror = (error) => {
-        clearTimeout(connectionTimeout);
-        console.error(`❌ [SARVAM-WS] WebSocket error:`, error);
-        this.sarvamReady = false;
-        this.handleConnectionFailure();
-      };
-
-      this.sarvamWs.onclose = (event) => {
-        clearTimeout(connectionTimeout);
-        console.log(`🔌 [SARVAM-WS] Connection closed: ${event.code} - ${event.reason}`);
-        this.sarvamReady = false;
-        
-        if (event.code !== 1000 && this.connectionAttempts < this.maxRetries) {
-          this.handleConnectionFailure();
-        }
-      };
-
-    } catch (error) {
-      console.error(`❌ [SARVAM-WS] Initialization error: ${error.message}`);
-      this.handleConnectionFailure();
-    }
-  }
-
-  handleConnectionFailure() {
-    this.connectionAttempts++;
-    
-    if (this.connectionAttempts < this.maxRetries) {
-      const retryDelay = Math.min(1000 * Math.pow(2, this.connectionAttempts), 5000);
-      console.log(`🔄 [SARVAM-WS] Retrying connection in ${retryDelay}ms...`);
-      
-      setTimeout(() => {
-        this.initializeSarvamWebSocket();
-      }, retryDelay);
-    } else {
-      console.error(`❌ [SARVAM-WS] Max retry attempts reached. TTS will not work.`);
-    }
-  }
-
-  handleSarvamMessage(message) {
-    if (message.type === "audio" && message.data?.audio) {
-      const audioBase64 = message.data.audio;
-      console.log(`🎵 [SARVAM-WS] Received audio chunk: ${audioBase64.length} characters`);
-      
-      // Stream the audio to the client immediately
-      this.streamAudioToClient(audioBase64);
-      
-      this.totalChunks++;
-      const audioBuffer = Buffer.from(audioBase64, "base64");
-      this.totalAudioBytes += audioBuffer.length;
-    } else if (message.type === "error") {
-      console.error(`❌ [SARVAM-WS] Error from Sarvam: ${message.message}`);
-    } else if (message.type === "config") {
-      console.log(`✅ [SARVAM-WS] Configuration acknowledged`);
-    } else {
-      console.log(`📨 [SARVAM-WS] Received message: ${message.type}`);
-    }
-  }
-
-  sendTextToSarvam(text) {
-    if (!text.trim()) return;
-    
-    if (this.sarvamWs && this.sarvamReady && this.sarvamWs.readyState === WebSocket.OPEN) {
-      const textMessage = {
-        type: "text",
-        data: {
-          text: text
-        }
-      };
-      
-      try {
-        this.sarvamWs.send(JSON.stringify(textMessage));
-        console.log(`📤 [SARVAM-WS] Sent text: "${text}"`);
-      } catch (error) {
-        console.error(`❌ [SARVAM-WS] Error sending text: ${error.message}`);
-        this.pendingTexts.push(text);
-      }
-    } else {
-      console.log(`⏳ [SARVAM-WS] Queuing text (not ready): "${text}"`);
-      this.pendingTexts.push(text);
-    }
-  }
-
-  async streamAudioToClient(audioBase64) {
-    try {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        console.warn(`⚠️ [STREAM-CLIENT] WebSocket not ready, skipping audio chunk`);
-        return;
-      }
-
-      const audioBuffer = Buffer.from(audioBase64, "base64");
-      
-      const SAMPLE_RATE = 8000;
-      const BYTES_PER_SAMPLE = 2;
-      const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
-      
-      const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS); // Reduced minimum
-      const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);
-      const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
-      
-      const alignToSample = (size) => Math.floor(size / 2) * 2;
-      
-      const minChunk = alignToSample(MIN_CHUNK_SIZE);
-      const maxChunk = alignToSample(MAX_CHUNK_SIZE);
-      const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
-      
-      console.log(`📦 [SARVAM-STREAM] Streaming ${audioBuffer.length} bytes to client`);
-      
-      let position = 0;
-      let chunkIndex = 0;
-      
-      while (position < audioBuffer.length && this.ws.readyState === WebSocket.OPEN) {
-        const remaining = audioBuffer.length - position;
-        let chunkSize;
-        
-        if (remaining <= maxChunk) {
-          chunkSize = remaining >= minChunk ? remaining : minChunk;
-        } else {
-          chunkSize = optimalChunk;
-        }
-        
-        chunkSize = Math.min(chunkSize, remaining);
-        const chunk = audioBuffer.slice(position, position + chunkSize);
-        
-        if (chunk.length >= minChunk) {
-          const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
-          
-          console.log(`📤 [CLIENT-STREAM] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
-          
-          const mediaMessage = {
-            event: "media",
-            streamSid: this.streamSid,
-            media: {
-              payload: chunk.toString("base64")
-            }
-          };
-
-          try {
-            this.ws.send(JSON.stringify(mediaMessage));
-          } catch (error) {
-            console.error(`❌ [CLIENT-STREAM] Error sending chunk: ${error.message}`);
-            break;
-          }
-          
-          const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-          const networkBufferMs = 2;
-          const delayMs = Math.max(chunkDurationMs - networkBufferMs, 5); // Reduced minimum delay
-          
-          if (position + chunkSize < audioBuffer.length) {
-            await new Promise(resolve => setTimeout(resolve, delayMs));
-          }
-          
-          chunkIndex++;
-        }
-        
-        position += chunkSize;
-      }
-      
-    } catch (error) {
-      console.error(`❌ [STREAM-CLIENT] Error: ${error.message}`);
-    }
   }
 
   addPhrase(phrase) {
@@ -590,8 +278,9 @@ class WebSocketSarvamTTSProcessor {
     const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
     
     if (complete) {
-      this.sendTextToSarvam(complete);
+      this.queue.push(complete);
       this.sentenceBuffer = remaining;
+      this.processQueue();
     }
   }
 
@@ -600,74 +289,184 @@ class WebSocketSarvamTTSProcessor {
     
     this.sentenceTimer = setTimeout(() => {
       if (this.sentenceBuffer.trim()) {
-        this.sendTextToSarvam(this.sentenceBuffer.trim());
+        this.queue.push(this.sentenceBuffer.trim());
         this.sentenceBuffer = "";
+        this.processQueue();
       }
     }, this.processingTimeout);
   }
 
-  complete() {
-    // Clear any pending timeout
-    if (this.sentenceTimer) {
-      clearTimeout(this.sentenceTimer);
-      this.sentenceTimer = null;
+  async processQueue() {
+    if (this.isProcessing || this.queue.length === 0) return;
+
+    this.isProcessing = true;
+    const textToProcess = this.queue.shift();
+
+    try {
+      await this.synthesizeAndStream(textToProcess);
+    } catch (error) {
+      console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
+    } finally {
+      this.isProcessing = false;
+      
+      if (this.queue.length > 0) {
+        setTimeout(() => this.processQueue(), 10);
+      }
+    }
+  }
+
+  async synthesizeAndStream(text) {
+    const timer = createTimer("SARVAM_TTS_SENTENCE");
+    
+    try {
+      if (!this.apiKeys.sarvam) {
+        throw new Error("Sarvam API key not found");
+      }
+
+      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
+
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": this.apiKeys.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: this.sarvamLanguage,
+          speaker: this.voice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
+          model: "bulbul:v1",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
+      }
+
+      const responseData = await response.json();
+      const audioBase64 = responseData.audios?.[0];
+      
+      if (!audioBase64) {
+        throw new Error("No audio data received from Sarvam API");
+      }
+
+      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
+      
+      await this.streamAudioOptimizedForSIP(audioBase64);
+      
+      const audioBuffer = Buffer.from(audioBase64, "base64");
+      this.totalAudioBytes += audioBuffer.length;
+      this.totalChunks++;
+      
+    } catch (error) {
+      console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async streamAudioOptimizedForSIP(audioBase64) {
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    
+    const SAMPLE_RATE = 8000;
+    const BYTES_PER_SAMPLE = 2;
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
+    
+    const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+    const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);
+    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+    
+    const alignToSample = (size) => Math.floor(size / 2) * 2;
+    
+    const minChunk = alignToSample(MIN_CHUNK_SIZE);
+    const maxChunk = alignToSample(MAX_CHUNK_SIZE);
+    const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
+    
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
+    
+    let position = 0;
+    let chunkIndex = 0;
+    
+    while (position < audioBuffer.length) {
+      const remaining = audioBuffer.length - position;
+      let chunkSize;
+      
+      if (remaining <= maxChunk) {
+        chunkSize = remaining >= minChunk ? remaining : minChunk;
+      } else {
+        chunkSize = optimalChunk;
+      }
+      
+      chunkSize = Math.min(chunkSize, remaining);
+      const chunk = audioBuffer.slice(position, position + chunkSize);
+      
+      if (chunk.length >= minChunk) {
+        const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
+        
+        console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
+        
+        const mediaMessage = {
+          event: "media",
+          streamSid: this.streamSid,
+          media: {
+            payload: chunk.toString("base64")
+          }
+        };
+
+        if (this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify(mediaMessage));
+        }
+        
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        const networkBufferMs = 2;
+        const delayMs = Math.max(chunkDurationMs - networkBufferMs, 10);
+        
+        if (position + chunkSize < audioBuffer.length) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+        
+        chunkIndex++;
+      }
+      
+      position += chunkSize;
     }
     
-    // Send any remaining text
+    console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
+  }
+
+  complete() {
     if (this.sentenceBuffer.trim()) {
-      this.sendTextToSarvam(this.sentenceBuffer.trim());
+      this.queue.push(this.sentenceBuffer.trim());
       this.sentenceBuffer = "";
     }
     
-    // Send flush message to Sarvam to process remaining buffer
-    if (this.sarvamWs && this.sarvamReady && this.sarvamWs.readyState === WebSocket.OPEN) {
-      try {
-        const flushMessage = { type: "flush" };
-        this.sarvamWs.send(JSON.stringify(flushMessage));
-        console.log(`🔄 [SARVAM-WS] Sent flush message`);
-      } catch (error) {
-        console.error(`❌ [SARVAM-WS] Error sending flush: ${error.message}`);
-      }
+    if (this.queue.length > 0) {
+      this.processQueue();
     }
     
-    console.log(`📊 [SARVAM-WS-STATS] Total: ${this.totalChunks} chunks, ${this.totalAudioBytes} bytes`);
-  }
-
-  close() {
-    if (this.sentenceTimer) {
-      clearTimeout(this.sentenceTimer);
-      this.sentenceTimer = null;
-    }
-    
-    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
-      this.sarvamWs.close(1000, "Normal closure");
-      console.log(`🔌 [SARVAM-WS] Closed connection`);
-    }
+    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
   }
 
   getStats() {
     return {
       totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
-      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
-      isReady: this.sarvamReady,
-      connectionAttempts: this.connectionAttempts
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
     };
   }
 }
 
-// Enhanced function to stream pre-recorded audio from database
+// Function to stream pre-recorded audio from database
 const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
   const timer = createTimer("PRERECORDED_AUDIO_STREAM");
   
   try {
     if (!audioBase64) {
       console.log(`❌ [PRERECORDED] No audio data provided`);
-      return;
-    }
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error(`❌ [PRERECORDED] WebSocket not ready`);
       return;
     }
 
@@ -688,7 +487,7 @@ const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
     let position = 0;
     let chunkIndex = 0;
     
-    while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+    while (position < audioBuffer.length) {
       const remaining = audioBuffer.length - position;
       const chunkSize = Math.min(optimalChunk, remaining);
       const chunk = audioBuffer.slice(position, position + chunkSize);
@@ -704,15 +503,12 @@ const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
         }
       };
 
-      try {
+      if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(mediaMessage));
-      } catch (error) {
-        console.error(`❌ [PRERECORDED] Error sending chunk: ${error.message}`);
-        break;
       }
       
       const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-      const delayMs = Math.max(chunkDurationMs - 2, 5);
+      const delayMs = Math.max(chunkDurationMs - 2, 10);
       
       if (position + chunkSize < audioBuffer.length) {
         await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -729,9 +525,9 @@ const streamPreRecordedAudio = async (audioBase64, ws, streamSid) => {
   }
 };
 
-// Main WebSocket server setup with improved error handling
+// Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [DB-INTEGRATED-WS] Voice Server started with WebSocket Sarvam TTS");
+  console.log("🚀 [DB-INTEGRATED] Voice Server started");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New database-integrated WebSocket connection");
@@ -745,22 +541,44 @@ const setupUnifiedVoiceServer = (wss) => {
     let optimizedTTS = null;
     let agentConfig = null;
     let apiKeys = {};
-    let sessionActive = false;
 
     // Deepgram WebSocket connection
     let deepgramWs = null;
     let deepgramReady = false;
     let deepgramAudioQueue = [];
-    let deepgramReconnectAttempts = 0;
-    const MAX_DEEPGRAM_RETRIES = 3;
 
-    // Enhanced Deepgram connection with retry logic
+    // Load agent configuration and API keys
+    const loadAgentConfiguration = async (accountSid) => {
+      try {
+        console.log(`🔧 [CONFIG] Loading configuration for accountSid: ${accountSid}`);
+        
+        // Get agent configuration
+        agentConfig = await getAgentByAccountSid(accountSid);
+        if (!agentConfig) {
+          console.error(`❌ [CONFIG] No agent found for accountSid: ${accountSid}`);
+          return false;
+        }
+        
+        // Get API keys for this tenant
+        apiKeys = await getApiKeys(agentConfig.tenantId);
+        if (!apiKeys.openai || !apiKeys.deepgram || !apiKeys.sarvam) {
+          console.error(`❌ [CONFIG] Missing required API keys for tenant: ${agentConfig.tenantId}`);
+          return false;
+        }
+        
+        console.log(`✅ [CONFIG] Configuration loaded successfully`);
+        console.log(`🤖 [AGENT] Name: ${agentConfig.agentName}, Language: ${agentConfig.language}, Voice: ${agentConfig.voiceSelection}`);
+        
+        return true;
+      } catch (error) {
+        console.error(`❌ [CONFIG] Error loading configuration: ${error.message}`);
+        return false;
+      }
+    };
+
+    // Optimized Deepgram connection
     const connectToDeepgram = async () => {
       try {
-        if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-          return;
-        }
-
         console.log("🔌 [DEEPGRAM] Connecting...");
         const deepgramLanguage = getDeepgramLanguage(agentConfig.language);
         
@@ -773,33 +591,16 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("interim_results", "true");
         deepgramUrl.searchParams.append("smart_format", "true");
         deepgramUrl.searchParams.append("endpointing", "300");
-        deepgramUrl.searchParams.append("utterance_end_ms", "1000");
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${apiKeys.deepgram}` },
         });
 
-        // Set connection timeout
-        const connectionTimeout = setTimeout(() => {
-          if (deepgramWs.readyState === WebSocket.CONNECTING) {
-            console.error("❌ [DEEPGRAM] Connection timeout");
-            deepgramWs.close();
-            handleDeepgramConnectionFailure();
-          }
-        }, 10000);
-
         deepgramWs.onopen = () => {
-          clearTimeout(connectionTimeout);
           deepgramReady = true;
-          deepgramReconnectAttempts = 0;
           console.log("✅ [DEEPGRAM] Connected");
           
-          // Process any queued audio
-          deepgramAudioQueue.forEach(buffer => {
-            if (deepgramWs.readyState === WebSocket.OPEN) {
-              deepgramWs.send(buffer);
-            }
-          });
+          deepgramAudioQueue.forEach(buffer => deepgramWs.send(buffer));
           deepgramAudioQueue = [];
         };
 
@@ -809,85 +610,44 @@ const setupUnifiedVoiceServer = (wss) => {
         };
 
         deepgramWs.onerror = (error) => {
-          clearTimeout(connectionTimeout);
           console.error("❌ [DEEPGRAM] Error:", error);
           deepgramReady = false;
-          handleDeepgramConnectionFailure();
         };
 
-        deepgramWs.onclose = (event) => {
-          clearTimeout(connectionTimeout);
-          console.log(`🔌 [DEEPGRAM] Connection closed: ${event.code} - ${event.reason}`);
+        deepgramWs.onclose = () => {
+          console.log("🔌 [DEEPGRAM] Connection closed");
           deepgramReady = false;
-          
-          if (event.code !== 1000 && sessionActive) {
-            handleDeepgramConnectionFailure();
-          }
         };
 
       } catch (error) {
         console.error("❌ [DEEPGRAM] Setup error:", error.message);
-        handleDeepgramConnectionFailure();
       }
     };
 
-    const handleDeepgramConnectionFailure = () => {
-      deepgramReconnectAttempts++;
-      
-      if (deepgramReconnectAttempts < MAX_DEEPGRAM_RETRIES && sessionActive) {
-        const retryDelay = Math.min(1000 * Math.pow(2, deepgramReconnectAttempts), 5000);
-        console.log(`🔄 [DEEPGRAM] Retrying connection in ${retryDelay}ms...`);
-        
-        setTimeout(() => {
-          connectToDeepgram();
-        }, retryDelay);
-      } else {
-        console.error("❌ [DEEPGRAM] Max retry attempts reached. Speech recognition may not work.");
-      }
-    };
-
-    // Enhanced Deepgram response handling
+    // Handle Deepgram responses
     const handleDeepgramResponse = async (data) => {
-      try {
-        if (data.type === "Results") {
-          const transcript = data.channel?.alternatives?.[0]?.transcript;
-          const is_final = data.is_final;
-          
-          if (transcript?.trim()) {
-            console.log(`🎤 [DEEPGRAM] ${is_final ? "Final" : "Interim"}: "${transcript}"`);
-            
-            if (is_final) {
-              userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
-              await processUserUtterance(userUtteranceBuffer);
-              userUtteranceBuffer = "";
-            } else {
-              // For interim results, we can update the buffer but wait for final confirmation
-              userUtteranceBuffer = transcript.trim();
-            }
-          }
-        } else if (data.type === "UtteranceEnd") {
-          console.log("🔚 [DEEPGRAM] Utterance end detected");
-          if (userUtteranceBuffer.trim()) {
+      if (data.type === "Results") {
+        const transcript = data.channel?.alternatives?.[0]?.transcript;
+        const is_final = data.is_final;
+        
+        if (transcript?.trim()) {
+          if (is_final) {
+            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
             await processUserUtterance(userUtteranceBuffer);
             userUtteranceBuffer = "";
           }
-        } else if (data.type === "Metadata") {
-          console.log(`ℹ️ [DEEPGRAM] Metadata: ${JSON.stringify(data)}`);
         }
-      } catch (error) {
-        console.error(`❌ [DEEPGRAM] Response handling error: ${error.message}`);
+      } else if (data.type === "UtteranceEnd") {
+        if (userUtteranceBuffer.trim()) {
+          await processUserUtterance(userUtteranceBuffer);
+          userUtteranceBuffer = "";
+        }
       }
     };
 
-    // Enhanced utterance processing with better state management
+    // Optimized utterance processing
     const processUserUtterance = async (text) => {
-      if (!text.trim() || isProcessing || !sessionActive) return;
-
-      // Skip if the text is too similar to the last processed one
-      if (lastProcessedText && text.toLowerCase() === lastProcessedText.toLowerCase()) {
-        console.log("⏭️ [PROCESSING] Skipping duplicate utterance");
-        return;
-      }
+      if (!text.trim() || isProcessing || text === lastProcessedText) return;
 
       isProcessing = true;
       lastProcessedText = text;
@@ -896,16 +656,13 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        // Initialize TTS processor if not already done
-        if (!optimizedTTS) {
-          optimizedTTS = new WebSocketSarvamTTSProcessor(
-            agentConfig.language, 
-            ws, 
-            streamSid, 
-            apiKeys, 
-            agentConfig.voiceSelection
-          );
-        }
+        optimizedTTS = new OptimizedSarvamTTSProcessor(
+          agentConfig.language, 
+          ws, 
+          streamSid, 
+          apiKeys, 
+          agentConfig.voiceSelection
+        );
 
         const response = await processWithOpenAIStreaming(
           text,
@@ -921,18 +678,15 @@ const setupUnifiedVoiceServer = (wss) => {
             optimizedTTS.complete();
             
             const stats = optimizedTTS.getStats();
-            console.log(`📊 [TTS-WS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
+            console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
             
-            // Only add to history if the response was successful
-            if (fullResponse && !fullResponse.includes("I'm here to help")) {
-              conversationHistory.push(
-                { role: "user", content: text },
-                { role: "assistant", content: fullResponse }
-              );
+            conversationHistory.push(
+              { role: "user", content: text },
+              { role: "assistant", content: fullResponse }
+            );
 
-              if (conversationHistory.length > 10) {
-                conversationHistory = conversationHistory.slice(-10);
-              }
+            if (conversationHistory.length > 10) {
+              conversationHistory = conversationHistory.slice(-10);
             }
           }
         );
@@ -946,67 +700,50 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Enhanced initial greeting with fallback
+    // Send initial greeting using stored audioBytes
     const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting");
+      console.log("👋 [GREETING] Sending initial greeting from database");
       
-      try {
-        if (agentConfig.audioBytes) {
-          console.log("🎵 [GREETING] Using stored audio from database");
-          await streamPreRecordedAudio(agentConfig.audioBytes, ws, streamSid);
-        } else if (agentConfig.firstMessage) {
-          console.log("🎵 [GREETING] Using WebSocket TTS for first message");
-          optimizedTTS = new WebSocketSarvamTTSProcessor(
-            agentConfig.language, 
-            ws, 
-            streamSid, 
-            apiKeys, 
-            agentConfig.voiceSelection
-          );
-          
-          // Wait briefly for WebSocket to initialize
-          await new Promise(resolve => setTimeout(resolve, 300));
-          
-          optimizedTTS.addPhrase(agentConfig.firstMessage);
-          optimizedTTS.complete();
-          
-          // Add to conversation history
-          conversationHistory.push(
-            { role: "assistant", content: agentConfig.firstMessage }
-          );
-        }
-      } catch (error) {
-        console.error(`❌ [GREETING] Error: ${error.message}`);
+      if (agentConfig.audioBytes) {
+        console.log("🎵 [GREETING] Using stored audio from database");
+        await streamPreRecordedAudio(agentConfig.audioBytes, ws, streamSid);
+      } else {
+        console.log("🎵 [GREETING] No stored audio, using TTS for first message");
+        const tts = new OptimizedSarvamTTSProcessor(
+          agentConfig.language, 
+          ws, 
+          streamSid, 
+          apiKeys, 
+          agentConfig.voiceSelection
+        );
+        await tts.synthesizeAndStream(agentConfig.firstMessage);
       }
     };
 
-    // WebSocket message handling with better error handling
+    // WebSocket message handling
     ws.on("message", async (message) => {
       try {
         const data = JSON.parse(message.toString());
-        console.log(`📨 [MESSAGE] Received event: ${data.event}`);
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [CONNECTED] Protocol: ${data.protocol}`);
+            console.log(`🔗 [DB-INTEGRATED] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start":
-            sessionActive = true;
             streamSid = data.streamSid || data.start?.streamSid;
             const accountSid = data.start?.accountSid || data.accountSid;
             
-            console.log(`🎯 [START] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}`);
+            console.log(`🎯 [DB-INTEGRATED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}`);
             
-            // Load configuration
+            // Load configuration based on accountSid
             const configLoaded = await loadAgentConfiguration(accountSid);
             if (!configLoaded) {
-              console.error(`❌ [CONFIG] Failed to load configuration`);
+              console.error(`❌ [DB-INTEGRATED] Failed to load configuration, closing connection`);
               ws.close();
               return;
             }
             
-            // Connect to Deepgram and send greeting
             await connectToDeepgram();
             await sendInitialGreeting();
             break;
@@ -1016,12 +753,7 @@ const setupUnifiedVoiceServer = (wss) => {
               const audioBuffer = Buffer.from(data.media.payload, "base64");
               
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
-                try {
-                  deepgramWs.send(audioBuffer);
-                } catch (error) {
-                  console.error(`❌ [DEEPGRAM] Error sending audio: ${error.message}`);
-                  deepgramAudioQueue.push(audioBuffer);
-                }
+                deepgramWs.send(audioBuffer);
               } else {
                 deepgramAudioQueue.push(audioBuffer);
               }
@@ -1029,39 +761,26 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case "stop":
-            console.log(`📞 [STOP] Stream stopped`);
-            sessionActive = false;
+            console.log(`📞 [DB-INTEGRATED] Stream stopped`);
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
-            if (optimizedTTS) {
-              optimizedTTS.close();
-            }
-            break;
-
-          case "mark":
-            console.log(`📍 [MARK] Received mark: ${data.mark?.name}`);
             break;
 
           default:
-            console.log(`❓ [UNKNOWN] Unknown event: ${data.event}`);
+            console.log(`❓ [DB-INTEGRATED] Unknown event: ${data.event}`);
         }
       } catch (error) {
-        console.error(`❌ [MESSAGE-HANDLER] Error: ${error.message}`);
+        console.error(`❌ [DB-INTEGRATED] Message error: ${error.message}`);
       }
     });
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log("🔗 [CLOSE] Connection closed");
-      sessionActive = false;
+      console.log("🔗 [DB-INTEGRATED] Connection closed");
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
-      }
-
-      if (optimizedTTS) {
-        optimizedTTS.close();
       }
 
       // Reset state
@@ -1078,7 +797,7 @@ const setupUnifiedVoiceServer = (wss) => {
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [ERROR] WebSocket error: ${error.message}`);
+      console.error(`❌ [DB-INTEGRATED] WebSocket error: ${error.message}`);
     });
   });
 };
