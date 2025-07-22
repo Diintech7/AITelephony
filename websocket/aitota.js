@@ -4,12 +4,12 @@ require("dotenv").config();
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
-  sarvam: process.env.SARVAM_API_KEY,
+  lmnt: process.env.LMNT_API_KEY, // Changed from sarvam to lmnt
   openai: process.env.OPENAI_API_KEY,
 };
 
 // Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+if (!API_KEYS.deepgram || !API_KEYS.lmnt || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables");
   process.exit(1);
 }
@@ -26,43 +26,63 @@ const createTimer = (label) => {
   };
 };
 
-// Language mappings
-const LANGUAGE_MAPPING = {
-  hi: "hi-IN", en: "en-IN", bn: "bn-IN", te: "te-IN", ta: "ta-IN",
-  mr: "mr-IN", gu: "gu-IN", kn: "kn-IN", ml: "ml-IN", pa: "pa-IN",
-  or: "or-IN", as: "as-IN", ur: "ur-IN",
-};
-
-const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang;
-  return LANGUAGE_MAPPING[lang] || "hi-IN";
+// Language mappings for Deepgram
+const DEEPGRAM_LANGUAGE_MAPPING = {
+  hi: "hi", en: "en-IN", bn: "bn", te: "te", ta: "ta",
+  mr: "mr", gu: "gu", kn: "kn", ml: "ml", pa: "pa",
+  or: "or", as: "as", ur: "ur",
 };
 
 const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang;
-  if (lang === "hi") return "hi";
-  if (lang === "en") return "en-IN";
-  return lang;
+  return DEEPGRAM_LANGUAGE_MAPPING[lang] || "hi";
 };
 
-// Valid Sarvam voice options
-const VALID_SARVAM_VOICES = ["meera", "pavithra", "arvind", "amol", "maya"];
+// LMNT voice configurations
+const LMNT_VOICES = {
+  // English voices
+  en: {
+    default: "lily", // Default English voice
+    options: ["lily", "daniel", "sarah", "alex", "maya", "josh"]
+  },
+  // Hindi and other languages - LMNT supports multilingual voices
+  hi: {
+    default: "lily", // LMNT voices are multilingual
+    options: ["lily", "daniel", "sarah"]
+  },
+  // For other languages, we'll use the same voices as they're multilingual
+  default: {
+    default: "lily",
+    options: ["lily", "daniel", "sarah", "alex"]
+  }
+};
 
-const getValidSarvamVoice = (voiceSelection = "pavithra") => {
-  if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
-    return voiceSelection;
+const getLMNTVoice = (language = "en", voicePreference = "default") => {
+  const lang = language.toLowerCase();
+  const voiceConfig = LMNT_VOICES[lang] || LMNT_VOICES.default;
+  
+  if (voicePreference === "default" || voicePreference === "neutral") {
+    return voiceConfig.default;
   }
   
+  // Voice preference mapping
   const voiceMapping = {
-    "male-professional": "arvind",
-    "female-professional": "pavithra",
-    "male-friendly": "amol",
-    "female-friendly": "maya",
-    neutral: "pavithra",
-    default: "pavithra",
+    "male-professional": "daniel",
+    "female-professional": "lily",
+    "male-friendly": "alex",
+    "female-friendly": "sarah",
+    "energetic": "josh",
+    "calm": "maya"
   };
   
-  return voiceMapping[voiceSelection] || "pavithra";
+  const selectedVoice = voiceMapping[voicePreference] || voiceConfig.default;
+  
+  // Ensure the voice is available for the language
+  if (voiceConfig.options.includes(selectedVoice)) {
+    return selectedVoice;
+  }
+  
+  return voiceConfig.default;
 };
 
 // Language detection using OpenAI
@@ -107,7 +127,7 @@ Return only the language code, nothing else.`
     const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase();
     
     // Validate detected language
-    const validLanguages = Object.keys(LANGUAGE_MAPPING);
+    const validLanguages = Object.keys(DEEPGRAM_LANGUAGE_MAPPING);
     if (validLanguages.includes(detectedLang)) {
       console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`);
       return detectedLang;
@@ -126,7 +146,7 @@ Return only the language code, nothing else.`
 const DEFAULT_CONFIG = {
   agentName: "हिंदी सहायक",
   language: "hi",
-  voiceSelection: "pavithra",
+  voiceSelection: "default",
   firstMessage: "नमस्कार! एआई तोता में संपर्क करने के लिए धन्यवाद। बताइए, मैं आपकी किस प्रकार मदद कर सकता हूँ?",
   personality: "friendly",
   category: "customer service",
@@ -289,34 +309,133 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with interruption handling
-class OptimizedSarvamTTSProcessor {
+// Enhanced LMNT TTS processor with WebSocket streaming
+class OptimizedLMNTTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language;
     this.ws = ws;
     this.streamSid = streamSid;
     this.queue = [];
     this.isProcessing = false;
-    this.sarvamLanguage = getSarvamLanguage(language);
-    this.voice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
+    this.voice = getLMNTVoice(language, DEFAULT_CONFIG.voiceSelection);
     
     // Interruption handling
     this.isInterrupted = false;
     this.currentAudioStreaming = null;
     
+    // LMNT WebSocket connection
+    this.lmntWs = null;
+    this.lmntReady = false;
+    this.pendingRequests = new Map(); // Track pending synthesis requests
+    this.requestCounter = 0;
+    
     // Sentence-based processing settings
     this.sentenceBuffer = "";
-    this.processingTimeout = 100;
+    this.processingTimeout = 50; // Reduced timeout for faster response
     this.sentenceTimer = null;
     
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
+    
+    // Initialize LMNT connection
+    this.connectToLMNT();
+  }
+
+  // Connect to LMNT WebSocket
+  async connectToLMNT() {
+    try {
+      console.log(`🔌 [LMNT] Connecting with voice: ${this.voice}`);
+      
+      const lmntUrl = `wss://api.lmnt.com/speech/synthesis/v1/stream?voice=${this.voice}`;
+      
+      this.lmntWs = new WebSocket(lmntUrl, {
+        headers: {
+          'X-API-Key': API_KEYS.lmnt,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      this.lmntWs.onopen = () => {
+        this.lmntReady = true;
+        console.log(`✅ [LMNT] Connected with voice: ${this.voice}`);
+      };
+
+      this.lmntWs.onmessage = (event) => {
+        this.handleLMNTMessage(event.data);
+      };
+
+      this.lmntWs.onerror = (error) => {
+        console.error(`❌ [LMNT] WebSocket error:`, error);
+        this.lmntReady = false;
+      };
+
+      this.lmntWs.onclose = (code, reason) => {
+        console.log(`🔌 [LMNT] Connection closed: ${code} - ${reason}`);
+        this.lmntReady = false;
+        
+        // Attempt to reconnect if not interrupted
+        if (!this.isInterrupted) {
+          setTimeout(() => this.connectToLMNT(), 1000);
+        }
+      };
+
+    } catch (error) {
+      console.error(`❌ [LMNT] Connection error: ${error.message}`);
+    }
+  }
+
+  // Handle LMNT WebSocket messages
+  handleLMNTMessage(data) {
+    try {
+      const message = JSON.parse(data);
+      
+      switch (message.type) {
+        case 'audio':
+          this.handleAudioMessage(message);
+          break;
+        case 'done':
+          this.handleDoneMessage(message);
+          break;
+        case 'error':
+          console.error(`❌ [LMNT] Synthesis error:`, message.error);
+          break;
+        default:
+          console.log(`📦 [LMNT] Unknown message type: ${message.type}`);
+      }
+    } catch (error) {
+      console.error(`❌ [LMNT] Message parsing error: ${error.message}`);
+    }
+  }
+
+  // Handle audio chunks from LMNT
+  async handleAudioMessage(message) {
+    if (this.isInterrupted || !message.audio) return;
+    
+    const { request_id, audio } = message;
+    const audioBuffer = Buffer.from(audio, 'base64');
+    
+    // Stream audio immediately to reduce latency
+    await this.streamAudioChunk(audioBuffer);
+    
+    this.totalAudioBytes += audioBuffer.length;
+  }
+
+  // Handle completion message from LMNT
+  handleDoneMessage(message) {
+    const { request_id } = message;
+    
+    if (this.pendingRequests.has(request_id)) {
+      const requestInfo = this.pendingRequests.get(request_id);
+      console.log(`✅ [LMNT] Synthesis completed: "${requestInfo.text}" (${requestInfo.timer.end()}ms)`);
+      this.pendingRequests.delete(request_id);
+      this.totalChunks++;
+    }
   }
 
   // Method to interrupt current processing
   interrupt() {
-    console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`);
+    console.log(`⚠️ [LMNT-TTS] Interrupting current processing`);
     this.isInterrupted = true;
     
     // Clear queue and buffer
@@ -329,12 +448,15 @@ class OptimizedSarvamTTSProcessor {
       this.sentenceTimer = null;
     }
     
+    // Clear pending requests
+    this.pendingRequests.clear();
+    
     // Stop current audio streaming if active
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true;
     }
     
-    console.log(`🛑 [SARVAM-TTS] Processing interrupted and cleaned up`);
+    console.log(`🛑 [LMNT-TTS] Processing interrupted and cleaned up`);
   }
 
   // Reset for new processing
@@ -342,10 +464,16 @@ class OptimizedSarvamTTSProcessor {
     this.interrupt();
     
     // Update language settings
-    if (newLanguage) {
+    if (newLanguage && newLanguage !== this.language) {
       this.language = newLanguage;
-      this.sarvamLanguage = getSarvamLanguage(newLanguage);
-      console.log(`🔄 [SARVAM-TTS] Language updated to: ${this.sarvamLanguage}`);
+      this.voice = getLMNTVoice(newLanguage, DEFAULT_CONFIG.voiceSelection);
+      console.log(`🔄 [LMNT-TTS] Language updated to: ${newLanguage}, Voice: ${this.voice}`);
+      
+      // Reconnect with new voice if needed
+      if (this.lmntWs) {
+        this.lmntWs.close();
+        setTimeout(() => this.connectToLMNT(), 500);
+      }
     }
     
     // Reset state
@@ -353,6 +481,7 @@ class OptimizedSarvamTTSProcessor {
     this.isProcessing = false;
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
+    this.requestCounter = 0;
   }
 
   addPhrase(phrase, detectedLanguage) {
@@ -360,9 +489,9 @@ class OptimizedSarvamTTSProcessor {
     
     // Update language if different from current
     if (detectedLanguage && detectedLanguage !== this.language) {
-      console.log(`🔄 [SARVAM-TTS] Language change detected: ${this.language} → ${detectedLanguage}`);
-      this.language = detectedLanguage;
-      this.sarvamLanguage = getSarvamLanguage(detectedLanguage);
+      console.log(`🔄 [LMNT-TTS] Language change detected: ${this.language} → ${detectedLanguage}`);
+      this.reset(detectedLanguage);
+      return; // Reset will handle reconnection, phrase will be processed later
     }
     
     this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
@@ -440,11 +569,11 @@ class OptimizedSarvamTTSProcessor {
 
     try {
       if (!this.isInterrupted) {
-        await this.synthesizeAndStream(textToProcess);
+        await this.synthesizeWithLMNT(textToProcess);
       }
     } catch (error) {
       if (!this.isInterrupted) {
-        console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
+        console.error(`❌ [LMNT-TTS] Error: ${error.message}`);
       }
     } finally {
       this.isProcessing = false;
@@ -456,91 +585,61 @@ class OptimizedSarvamTTSProcessor {
     }
   }
 
-  async synthesizeAndStream(text) {
-    if (this.isInterrupted) return;
+  async synthesizeWithLMNT(text) {
+    if (this.isInterrupted || !this.lmntReady) return;
     
-    const timer = createTimer("SARVAM_TTS_SENTENCE");
+    const timer = createTimer("LMNT_TTS_SENTENCE");
+    const requestId = `req_${++this.requestCounter}`;
     
     try {
-      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
-
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
-        },
-        body: JSON.stringify({
-          inputs: [text],
-          target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
-          model: "bulbul:v1",
-        }),
+      console.log(`🎵 [LMNT] Synthesizing: "${text}" (${this.voice})`);
+      
+      // Store request info
+      this.pendingRequests.set(requestId, {
+        text,
+        timer,
+        timestamp: Date.now()
       });
 
-      if (!response.ok || this.isInterrupted) {
-        if (this.isInterrupted) return;
-        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
-      }
+      // Send synthesis request to LMNT WebSocket
+      const synthRequest = {
+        type: 'synthesis_request',
+        request_id: requestId,
+        text: text,
+        voice: this.voice,
+        format: 'pcm_16000', // 16kHz PCM for good quality
+        language: this.language === 'en' ? 'en' : 'auto' // LMNT auto-detects non-English
+      };
 
-      const responseData = await response.json();
-      const audioBase64 = responseData.audios?.[0];
-      
-      if (!audioBase64 || this.isInterrupted) {
-        if (!this.isInterrupted) {
-          throw new Error("No audio data received from Sarvam API");
-        }
-        return;
-      }
-
-      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
-      
-      // Stream audio if not interrupted
-      if (!this.isInterrupted) {
-        await this.streamAudioOptimizedForSIP(audioBase64);
-        
-        const audioBuffer = Buffer.from(audioBase64, "base64");
-        this.totalAudioBytes += audioBuffer.length;
-        this.totalChunks++;
+      if (this.lmntWs && this.lmntWs.readyState === WebSocket.OPEN) {
+        this.lmntWs.send(JSON.stringify(synthRequest));
+        console.log(`📤 [LMNT] Request sent: ${requestId}`);
+      } else {
+        console.error(`❌ [LMNT] WebSocket not ready for request: ${requestId}`);
+        this.pendingRequests.delete(requestId);
       }
       
     } catch (error) {
       if (!this.isInterrupted) {
-        console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
+        console.error(`❌ [LMNT] Synthesis error: ${error.message}`);
+        this.pendingRequests.delete(requestId);
         throw error;
       }
     }
   }
 
-  async streamAudioOptimizedForSIP(audioBase64) {
-    if (this.isInterrupted) return;
+  async streamAudioChunk(audioBuffer) {
+    if (this.isInterrupted || !audioBuffer || audioBuffer.length === 0) return;
     
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    const streamingSession = { interrupt: false };
-    this.currentAudioStreaming = streamingSession;
+    // Convert 16kHz PCM to 8kHz for SIP compatibility
+    const convertedBuffer = this.convertTo8kHz(audioBuffer);
     
-    // SIP audio specifications
-    const SAMPLE_RATE = 8000;
-    const BYTES_PER_SAMPLE = 2;
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
-    
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
-    
+    // Stream in smaller chunks for lower latency
+    const CHUNK_SIZE = 160; // 20ms of 8kHz audio
     let position = 0;
-    let chunkIndex = 0;
     
-    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = audioBuffer.length - position;
-      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining);
-      const chunk = audioBuffer.slice(position, position + chunkSize);
-      
-      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`);
+    while (position < convertedBuffer.length && !this.isInterrupted) {
+      const chunk = convertedBuffer.slice(position, position + CHUNK_SIZE);
       
       const mediaMessage = {
         event: "media",
@@ -554,24 +653,29 @@ class OptimizedSarvamTTSProcessor {
         this.ws.send(JSON.stringify(mediaMessage));
       }
       
-      // Delay between chunks
-      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-        const delayMs = Math.max(chunkDurationMs - 2, 10);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-      }
+      position += CHUNK_SIZE;
       
-      position += chunkSize;
-      chunkIndex++;
+      // Small delay between chunks for smooth audio
+      if (position < convertedBuffer.length) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    }
+  }
+
+  // Convert 16kHz PCM to 8kHz for SIP compatibility
+  convertTo8kHz(buffer) {
+    // Simple downsampling: take every other sample
+    const samples16 = buffer.length / 2;
+    const samples8 = Math.floor(samples16 / 2);
+    const result = Buffer.alloc(samples8 * 2);
+    
+    for (let i = 0; i < samples8; i++) {
+      const sourceIndex = i * 4; // Every other 16-bit sample
+      result[i * 2] = buffer[sourceIndex];
+      result[i * 2 + 1] = buffer[sourceIndex + 1];
     }
     
-    if (this.isInterrupted || streamingSession.interrupt) {
-      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
-    } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
-    }
-    
-    this.currentAudioStreaming = null;
+    return result;
   }
 
   complete() {
@@ -586,24 +690,39 @@ class OptimizedSarvamTTSProcessor {
       this.processQueue();
     }
     
-    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
+    console.log(`📊 [LMNT-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
   }
 
   getStats() {
     return {
       totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
-      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
+      pendingRequests: this.pendingRequests.size,
+      isConnected: this.lmntReady
     };
+  }
+
+  // Cleanup when connection ends
+  cleanup() {
+    this.interrupt();
+    
+    if (this.lmntWs) {
+      this.lmntWs.close();
+      this.lmntWs = null;
+    }
+    
+    this.pendingRequests.clear();
+    console.log(`🧹 [LMNT-TTS] Cleanup completed`);
   }
 }
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with language detection and interruption handling");
+  console.log("🚀 [ENHANCED] Voice Server started with LMNT WebSocket TTS and language detection");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
+    console.log("🔗 [CONNECTION] New enhanced WebSocket connection with LMNT");
 
     // Session state
     let streamSid = null;
@@ -662,7 +781,6 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("🔌 [DEEPGRAM] Connection closed");
           deepgramReady = false;
         };
-
       } catch (error) {
         console.error("❌ [DEEPGRAM] Setup error:", error.message);
       }
@@ -724,7 +842,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         // Create new TTS processor with detected language
-        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid);
+        optimizedTTS = new OptimizedLMNTTTSProcessor(detectedLanguage, ws, streamSid);
 
         // Step 3: Check for interruption function
         const checkInterruption = () => {
@@ -781,8 +899,8 @@ const setupUnifiedVoiceServer = (wss) => {
     // Optimized initial greeting with language detection
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
-      await tts.synthesizeAndStream(DEFAULT_CONFIG.firstMessage);
+      const tts = new OptimizedLMNTTTSProcessor(currentLanguage, ws, streamSid);
+      await tts.synthesizeWithLMNT(DEFAULT_CONFIG.firstMessage);
     };
 
     // WebSocket message handling
@@ -820,6 +938,9 @@ const setupUnifiedVoiceServer = (wss) => {
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
+            if (optimizedTTS) {
+              optimizedTTS.cleanup();
+            }
             break;
 
           default:
@@ -836,6 +957,10 @@ const setupUnifiedVoiceServer = (wss) => {
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
+      }
+
+      if (optimizedTTS) {
+        optimizedTTS.cleanup();
       }
 
       // Reset state
