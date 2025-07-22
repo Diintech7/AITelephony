@@ -342,7 +342,7 @@ class WebSocketSarvamTTSProcessor {
             target_language_code: this.sarvamLanguage,
             pitch: 0,
             pace: 1.0,
-            min_buffer_size: 20,
+            min_buffer_size: 40,
             max_chunk_length: 200,
             output_audio_codec: "mp3",
             output_audio_bitrate: "64k"
@@ -428,7 +428,7 @@ class WebSocketSarvamTTSProcessor {
       
       const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
       const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);
-      const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);
+      const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
       
       const alignToSample = (size) => Math.floor(size / 2) * 2;
       
@@ -693,6 +693,7 @@ const setupUnifiedVoiceServer = (wss) => {
         
         // Get API keys for this tenant
         apiKeys = await getApiKeys(agentConfig.tenantId);
+        console.log("API keys values", apiKeys)
         if (!apiKeys.openai || !apiKeys.deepgram || !apiKeys.sarvam) {
           console.error(`❌ [CONFIG] Missing required API keys for tenant: ${agentConfig.tenantId}`);
           return false;
@@ -727,6 +728,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${apiKeys.deepgram}` },
         });
+        console.log("token123",apiKeys.deepgram)
 
         deepgramWs.onopen = () => {
           deepgramReady = true;
