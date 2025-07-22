@@ -309,7 +309,7 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced LMNT TTS processor with WebSocket streaming
+// Enhanced LMNT TTS processor with proper WebSocket streaming
 class OptimizedLMNTTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language;
@@ -323,54 +323,72 @@ class OptimizedLMNTTTSProcessor {
     this.isInterrupted = false;
     this.currentAudioStreaming = null;
     
-    // LMNT WebSocket connection
-    this.lmntWs = null;
+    // LMNT Session connection (using sessions API, not raw WebSocket)
+    this.lmntSession = null;
     this.lmntReady = false;
-    this.pendingRequests = new Map(); // Track pending synthesis requests
-    this.requestCounter = 0;
     
     // Sentence-based processing settings
     this.sentenceBuffer = "";
-    this.processingTimeout = 50; // Reduced timeout for faster response
+    this.processingTimeout = 50;
     this.sentenceTimer = null;
     
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
     
-    // Initialize LMNT connection
+    // Initialize LMNT session
     this.connectToLMNT();
   }
 
-  // Connect to LMNT WebSocket
+  // Connect to LMNT using sessions API (not raw WebSocket)
   async connectToLMNT() {
     try {
-      console.log(`🔌 [LMNT] Connecting with voice: ${this.voice}`);
+      console.log(`🔌 [LMNT] Creating session with voice: ${this.voice}`);
       
-      const lmntUrl = `wss://api.lmnt.com/speech/synthesis/v1/stream?voice=${this.voice}`;
-      
-      this.lmntWs = new WebSocket(lmntUrl, {
+      // Create LMNT session using HTTP API first
+      const sessionResponse = await fetch('https://api.lmnt.com/v1/speech/sessions', {
+        method: 'POST',
         headers: {
           'X-API-Key': API_KEYS.lmnt,
           'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          voice: this.voice,
+          format: 'pcm_16000' // 16kHz PCM for good quality
+        })
+      });
+
+      if (!sessionResponse.ok) {
+        throw new Error(`Session creation failed: ${sessionResponse.status}`);
+      }
+
+      const sessionData = await sessionResponse.json();
+      const sessionId = sessionData.session_id;
+      
+      // Connect to WebSocket using the session ID
+      const wsUrl = `wss://api.lmnt.com/v1/speech/sessions/${sessionId}/stream`;
+      
+      this.lmntSession = new WebSocket(wsUrl, {
+        headers: {
+          'X-API-Key': API_KEYS.lmnt
         }
       });
 
-      this.lmntWs.onopen = () => {
+      this.lmntSession.onopen = () => {
         this.lmntReady = true;
-        console.log(`✅ [LMNT] Connected with voice: ${this.voice}`);
+        console.log(`✅ [LMNT] Session connected: ${sessionId}`);
       };
 
-      this.lmntWs.onmessage = (event) => {
+      this.lmntSession.onmessage = (event) => {
         this.handleLMNTMessage(event.data);
       };
 
-      this.lmntWs.onerror = (error) => {
+      this.lmntSession.onerror = (error) => {
         console.error(`❌ [LMNT] WebSocket error:`, error);
         this.lmntReady = false;
       };
 
-      this.lmntWs.onclose = (code, reason) => {
+      this.lmntSession.onclose = (code, reason) => {
         console.log(`🔌 [LMNT] Connection closed: ${code} - ${reason}`);
         this.lmntReady = false;
         
@@ -388,14 +406,25 @@ class OptimizedLMNTTTSProcessor {
   // Handle LMNT WebSocket messages
   handleLMNTMessage(data) {
     try {
+      // LMNT sends binary audio data directly for streaming sessions
+      if (data instanceof Buffer || data instanceof ArrayBuffer) {
+        this.handleAudioData(data);
+        return;
+      }
+
+      // Handle JSON messages
       const message = JSON.parse(data);
       
       switch (message.type) {
         case 'audio':
-          this.handleAudioMessage(message);
+          if (message.audio) {
+            const audioBuffer = Buffer.from(message.audio, 'base64');
+            this.handleAudioData(audioBuffer);
+          }
           break;
         case 'done':
-          this.handleDoneMessage(message);
+          console.log(`✅ [LMNT] Synthesis completed`);
+          this.totalChunks++;
           break;
         case 'error':
           console.error(`❌ [LMNT] Synthesis error:`, message.error);
@@ -404,33 +433,25 @@ class OptimizedLMNTTTSProcessor {
           console.log(`📦 [LMNT] Unknown message type: ${message.type}`);
       }
     } catch (error) {
-      console.error(`❌ [LMNT] Message parsing error: ${error.message}`);
+      // If it's not JSON, treat as binary audio data
+      if (data instanceof Buffer || data instanceof ArrayBuffer) {
+        this.handleAudioData(data);
+      } else {
+        console.error(`❌ [LMNT] Message parsing error: ${error.message}`);
+      }
     }
   }
 
-  // Handle audio chunks from LMNT
-  async handleAudioMessage(message) {
-    if (this.isInterrupted || !message.audio) return;
+  // Handle audio data from LMNT
+  async handleAudioData(audioData) {
+    if (this.isInterrupted) return;
     
-    const { request_id, audio } = message;
-    const audioBuffer = Buffer.from(audio, 'base64');
+    const audioBuffer = Buffer.isBuffer(audioData) ? audioData : Buffer.from(audioData);
     
     // Stream audio immediately to reduce latency
     await this.streamAudioChunk(audioBuffer);
     
     this.totalAudioBytes += audioBuffer.length;
-  }
-
-  // Handle completion message from LMNT
-  handleDoneMessage(message) {
-    const { request_id } = message;
-    
-    if (this.pendingRequests.has(request_id)) {
-      const requestInfo = this.pendingRequests.get(request_id);
-      console.log(`✅ [LMNT] Synthesis completed: "${requestInfo.text}" (${requestInfo.timer.end()}ms)`);
-      this.pendingRequests.delete(request_id);
-      this.totalChunks++;
-    }
   }
 
   // Method to interrupt current processing
@@ -447,9 +468,6 @@ class OptimizedLMNTTTSProcessor {
       clearTimeout(this.sentenceTimer);
       this.sentenceTimer = null;
     }
-    
-    // Clear pending requests
-    this.pendingRequests.clear();
     
     // Stop current audio streaming if active
     if (this.currentAudioStreaming) {
@@ -470,8 +488,8 @@ class OptimizedLMNTTTSProcessor {
       console.log(`🔄 [LMNT-TTS] Language updated to: ${newLanguage}, Voice: ${this.voice}`);
       
       // Reconnect with new voice if needed
-      if (this.lmntWs) {
-        this.lmntWs.close();
+      if (this.lmntSession) {
+        this.lmntSession.close();
         setTimeout(() => this.connectToLMNT(), 500);
       }
     }
@@ -481,7 +499,6 @@ class OptimizedLMNTTTSProcessor {
     this.isProcessing = false;
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
-    this.requestCounter = 0;
   }
 
   addPhrase(phrase, detectedLanguage) {
@@ -491,7 +508,7 @@ class OptimizedLMNTTTSProcessor {
     if (detectedLanguage && detectedLanguage !== this.language) {
       console.log(`🔄 [LMNT-TTS] Language change detected: ${this.language} → ${detectedLanguage}`);
       this.reset(detectedLanguage);
-      return; // Reset will handle reconnection, phrase will be processed later
+      return;
     }
     
     this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
@@ -589,40 +606,31 @@ class OptimizedLMNTTTSProcessor {
     if (this.isInterrupted || !this.lmntReady) return;
     
     const timer = createTimer("LMNT_TTS_SENTENCE");
-    const requestId = `req_${++this.requestCounter}`;
     
     try {
       console.log(`🎵 [LMNT] Synthesizing: "${text}" (${this.voice})`);
-      
-      // Store request info
-      this.pendingRequests.set(requestId, {
-        text,
-        timer,
-        timestamp: Date.now()
-      });
 
-      // Send synthesis request to LMNT WebSocket
-      const synthRequest = {
-        type: 'synthesis_request',
-        request_id: requestId,
-        text: text,
-        voice: this.voice,
-        format: 'pcm_16000', // 16kHz PCM for good quality
-        language: this.language === 'en' ? 'en' : 'auto' // LMNT auto-detects non-English
+      // Send text to LMNT session using appendText method
+      const appendMessage = {
+        type: 'append_text',
+        text: text
       };
 
-      if (this.lmntWs && this.lmntWs.readyState === WebSocket.OPEN) {
-        this.lmntWs.send(JSON.stringify(synthRequest));
-        console.log(`📤 [LMNT] Request sent: ${requestId}`);
+      if (this.lmntSession && this.lmntSession.readyState === WebSocket.OPEN) {
+        this.lmntSession.send(JSON.stringify(appendMessage));
+        
+        // Send flush to get audio back immediately
+        const flushMessage = { type: 'flush' };
+        this.lmntSession.send(JSON.stringify(flushMessage));
+        
+        console.log(`📤 [LMNT] Text sent and flushed`);
       } else {
-        console.error(`❌ [LMNT] WebSocket not ready for request: ${requestId}`);
-        this.pendingRequests.delete(requestId);
+        console.error(`❌ [LMNT] Session not ready`);
       }
       
     } catch (error) {
       if (!this.isInterrupted) {
         console.error(`❌ [LMNT] Synthesis error: ${error.message}`);
-        this.pendingRequests.delete(requestId);
         throw error;
       }
     }
@@ -690,6 +698,12 @@ class OptimizedLMNTTTSProcessor {
       this.processQueue();
     }
     
+    // Send finish to close LMNT session gracefully
+    if (this.lmntSession && this.lmntSession.readyState === WebSocket.OPEN) {
+      const finishMessage = { type: 'finish' };
+      this.lmntSession.send(JSON.stringify(finishMessage));
+    }
+    
     console.log(`📊 [LMNT-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
   }
 
@@ -698,7 +712,6 @@ class OptimizedLMNTTTSProcessor {
       totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
       avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
-      pendingRequests: this.pendingRequests.size,
       isConnected: this.lmntReady
     };
   }
@@ -707,12 +720,17 @@ class OptimizedLMNTTTSProcessor {
   cleanup() {
     this.interrupt();
     
-    if (this.lmntWs) {
-      this.lmntWs.close();
-      this.lmntWs = null;
+    if (this.lmntSession) {
+      // Send finish before closing
+      if (this.lmntSession.readyState === WebSocket.OPEN) {
+        const finishMessage = { type: 'finish' };
+        this.lmntSession.send(JSON.stringify(finishMessage));
+      }
+      
+      this.lmntSession.close();
+      this.lmntSession = null;
     }
     
-    this.pendingRequests.clear();
     console.log(`🧹 [LMNT-TTS] Cleanup completed`);
   }
 }
