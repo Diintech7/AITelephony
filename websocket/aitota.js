@@ -141,7 +141,8 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, dete
         
         te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
         
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்."
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்.",
+        mr: "तुम्ही एआय तोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीतून प्रवाहीपणे बोलता. नैसर्गिक, संवादात्मक भाषा वापरा जी उबदारपणा आणि सहानुभूतीने भरलेली आहे. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मौल्यवान वाटले पाहिजे, हे तुमचे ध्येय आहे."
       };
       
       return prompts[lang] || prompts.en;
@@ -862,17 +863,23 @@ const setupUnifiedVoiceServer = (wss) => {
             } else if (/not connected|disconnected|no answer|busy|unreachable/i.test(sessionTranscript)) {
               leadStatus = 'not_connected';
             }
-            // Save CallLog
+            // Prepare CallLog object
+            const callLogObj = {
+              clientId: ws.sessionAgentConfig?.clientId,
+              mobile: sessionMobile,
+              time: callEndTime,
+              transcript: sessionTranscript,
+              audioUrl: null, // If you have audio URL, set here
+              duration: callDuration,
+              leadStatus,
+            };
+            console.log('[CALLLOG] Attempting to save:', callLogObj);
+            if (!callLogObj.clientId) {
+              console.error('[CALLLOG] Missing clientId, not saving log.');
+              break;
+            }
             try {
-              await CallLog.create({
-                clientId: ws.sessionAgentConfig.clientId,
-                mobile: sessionMobile,
-                time: callEndTime,
-                transcript: sessionTranscript,
-                audioUrl: null, // If you have audio URL, set here
-                duration: callDuration,
-                leadStatus,
-              });
+              await CallLog.create(callLogObj);
               console.log(`[CALLLOG] Saved for accountSid ${ws.sessionAgentConfig.accountSid}`);
             } catch (err) {
               console.error(`[CALLLOG] Error saving log:`, err);
