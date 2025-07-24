@@ -29,11 +29,21 @@ const createTimer = (label) => {
   };
 };
 
-// Language mappings
+// Enhanced language mappings with Marathi support
 const LANGUAGE_MAPPING = {
-  hi: "hi-IN", en: "en-IN", bn: "bn-IN", te: "te-IN", ta: "ta-IN",
-  mr: "mr-IN", gu: "gu-IN", kn: "kn-IN", ml: "ml-IN", pa: "pa-IN",
-  or: "or-IN", as: "as-IN", ur: "ur-IN",
+  hi: "hi-IN", 
+  en: "en-IN", 
+  bn: "bn-IN", 
+  te: "te-IN", 
+  ta: "ta-IN",
+  mr: "mr-IN", // Marathi added
+  gu: "gu-IN", 
+  kn: "kn-IN", 
+  ml: "ml-IN", 
+  pa: "pa-IN",
+  or: "or-IN", 
+  as: "as-IN", 
+  ur: "ur-IN",
 };
 
 const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
@@ -45,6 +55,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang;
   if (lang === "hi") return "hi";
   if (lang === "en") return "en-IN";
+  if (lang === "mr") return "mr"; // Marathi support for Deepgram
   return lang;
 };
 
@@ -68,7 +79,7 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return voiceMapping[voiceSelection] || "pavithra";
 };
 
-// Language detection using OpenAI
+// Enhanced language detection with Marathi support
 const detectLanguageWithOpenAI = async (text) => {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -89,6 +100,8 @@ Examples:
 - "नमस्ते, आप कैसे हैं?" → hi
 - "আপনি কেমন আছেন?" → bn
 - "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
+- "तुम्ही कसे आहात?" → mr
+- "તમે કેમ છો?" → gu
 
 Return only the language code, nothing else.`
           },
@@ -125,12 +138,110 @@ Return only the language code, nothing else.`
   }
 };
 
+// Call logging utility class
+class CallLogger {
+  constructor(clientId, mobile = null) {
+    this.clientId = clientId;
+    this.mobile = mobile;
+    this.callStartTime = new Date();
+    this.transcripts = [];
+    this.responses = [];
+    this.totalDuration = 0;
+  }
+
+  // Log user transcript from Deepgram
+  logUserTranscript(transcript, language, timestamp = new Date()) {
+    const entry = {
+      type: 'user',
+      text: transcript,
+      language: language,
+      timestamp: timestamp,
+      source: 'deepgram'
+    };
+    
+    this.transcripts.push(entry);
+    console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`);
+  }
+
+  // Log AI response from Sarvam
+  logAIResponse(response, language, timestamp = new Date()) {
+    const entry = {
+      type: 'ai',
+      text: response,
+      language: language,
+      timestamp: timestamp,
+      source: 'sarvam'
+    };
+    
+    this.responses.push(entry);
+    console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`);
+  }
+
+  // Generate full transcript combining user and AI messages
+  generateFullTranscript() {
+    const allEntries = [...this.transcripts, ...this.responses]
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    return allEntries.map(entry => {
+      const speaker = entry.type === 'user' ? 'User' : 'AI';
+      const time = entry.timestamp.toISOString();
+      return `[${time}] ${speaker} (${entry.language}): ${entry.text}`;
+    }).join('\n');
+  }
+
+  // Save call log to database
+  async saveToDatabase(leadStatus = 'medium') {
+    try {
+      const callEndTime = new Date();
+      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000); // Duration in seconds
+
+      const callLogData = {
+        clientId: this.clientId,
+        mobile: this.mobile,
+        time: this.callStartTime,
+        transcript: this.generateFullTranscript(),
+        duration: this.totalDuration,
+        leadStatus: leadStatus,
+        // Additional metadata
+        metadata: {
+          userTranscriptCount: this.transcripts.length,
+          aiResponseCount: this.responses.length,
+          languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
+          callEndTime: callEndTime
+        }
+      };
+
+      const callLog = new CallLog(callLogData);
+      const savedLog = await callLog.save();
+      
+      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s`);
+      console.log(`📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`);
+      
+      return savedLog;
+    } catch (error) {
+      console.error(`❌ [CALL-LOG] Database save error: ${error.message}`);
+      throw error;
+    }
+  }
+
+  // Get call statistics
+  getStats() {
+    return {
+      duration: this.totalDuration,
+      userMessages: this.transcripts.length,
+      aiResponses: this.responses.length,
+      languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
+      startTime: this.callStartTime
+    };
+  }
+}
+
 // Optimized OpenAI streaming with phrase-based chunking and language detection
-const processWithOpenAIStreaming = async (userMessage, conversationHistory, detectedLanguage, onPhrase, onComplete, onInterrupt) => {
+const processWithOpenAIStreaming = async (userMessage, conversationHistory, detectedLanguage, onPhrase, onComplete, onInterrupt, callLogger) => {
   const timer = createTimer("OPENAI_STREAMING");
   
   try {
-    // Dynamic system prompt based on detected language
+    // Enhanced system prompt with Marathi support
     const getSystemPrompt = (lang) => {
       const prompts = {
         hi: "आप एआई तोता हैं, एक विनम्र और भावनात्मक रूप से बुद्धिमान AI ग्राहक सेवा कार्यकारी। आप हिंदी में धाराप्रवाह बोलते हैं। प्राकृतिक, बातचीत की भाषा का प्रयोग करें जो गर्मजोशी और सहानुभूति से भरी हो। जवाब छोटे रखें—केवल 1-2 लाइन। ग्राहकों को सुना, समर्थित और मूल्यवान महसूस कराना आपका लक्ष्य है।",
@@ -141,7 +252,9 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, dete
         
         te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
         
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।"
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
+        
+        mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।"
       };
       
       return prompts[lang] || prompts.en;
@@ -252,6 +365,12 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, dete
 
     if (!isInterrupted) {
       console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`);
+      
+      // Log AI response to call logger
+      if (callLogger && fullResponse.trim()) {
+        callLogger.logAIResponse(fullResponse.trim(), detectedLanguage);
+      }
+      
       onComplete(fullResponse);
     } else {
       console.log(`🤖 [OPENAI] Interrupted after ${timer.end()}ms`);
@@ -281,12 +400,13 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with interruption handling
+// Enhanced TTS processor with call logging
 class OptimizedSarvamTTSProcessor {
-  constructor(language, ws, streamSid) {
+  constructor(language, ws, streamSid, callLogger = null) {
     this.language = language;
     this.ws = ws;
     this.streamSid = streamSid;
+    this.callLogger = callLogger;
     this.queue = [];
     this.isProcessing = false;
     this.sarvamLanguage = getSarvamLanguage(language);
@@ -590,9 +710,9 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// Main WebSocket server setup
+// Main WebSocket server setup with enhanced call logging
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with language detection and interruption handling");
+  console.log("🚀 [ENHANCED] Voice Server started with call logging and Marathi support");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
@@ -605,7 +725,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let lastProcessedText = "";
     let optimizedTTS = null;
     let currentLanguage = undefined;
-    let processingRequestId = 0; // To track processing requests
+    let processingRequestId = 0;
+    let callLogger = null; // Call logger instance
 
     // Deepgram WebSocket connection
     let deepgramWs = null;
@@ -660,7 +781,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Handle Deepgram responses with interruption logic
+    // Handle Deepgram responses with call logging
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript;
@@ -677,19 +798,32 @@ const setupUnifiedVoiceServer = (wss) => {
           
           if (is_final) {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
+            
+            // Log the final transcript to call logger
+            if (callLogger && transcript.trim()) {
+              const detectedLang = await detectLanguageWithOpenAI(transcript.trim());
+              callLogger.logUserTranscript(transcript.trim(), detectedLang);
+            }
+            
             await processUserUtterance(userUtteranceBuffer);
             userUtteranceBuffer = "";
           }
         }
       } else if (data.type === "UtteranceEnd") {
         if (userUtteranceBuffer.trim()) {
+          // Log the utterance end transcript
+          if (callLogger && userUtteranceBuffer.trim()) {
+            const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim());
+            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang);
+          }
+          
           await processUserUtterance(userUtteranceBuffer);
           userUtteranceBuffer = "";
         }
       }
     };
 
-    // Enhanced utterance processing with language detection and interruption handling
+    // Enhanced utterance processing with call logging
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return;
 
@@ -716,7 +850,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         // Create new TTS processor with detected language
-        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid);
+        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger);
 
         // Step 3: Check for interruption function
         const checkInterruption = () => {
@@ -756,7 +890,8 @@ const setupUnifiedVoiceServer = (wss) => {
               }
             }
           },
-          checkInterruption
+          checkInterruption,
+          callLogger // Pass call logger to OpenAI processing
         );
 
         console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`);
@@ -770,14 +905,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized initial greeting with language detection
-    const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
-      await tts.synthesizeAndStream(ws.sessionAgentConfig.firstMessage);
-    };
-
-    // WebSocket message handling
+    // WebSocket message handling with call logging
     ws.on("message", async (message) => {
       try {
         const data = JSON.parse(message.toString());
@@ -790,7 +918,9 @@ const setupUnifiedVoiceServer = (wss) => {
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid;
             const accountSid = data.start?.accountSid;
-            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}`);
+            const mobile = data.start?.from || null; // Extract mobile number from call data
+            
+            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}, Mobile: ${mobile}`);
 
             // Fetch agent config from DB using accountSid (MANDATORY)
             let agentConfig = null;
@@ -813,14 +943,26 @@ const setupUnifiedVoiceServer = (wss) => {
               ws.close();
               return;
             }
+            
             ws.sessionAgentConfig = agentConfig;
-            currentLanguage = agentConfig.language;
+            currentLanguage = agentConfig.language || 'hi';
+
+            // Initialize call logger
+            callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile);
+            console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}`);
 
             await connectToDeepgram();
-            // Use agent's firstMessage for greeting
-            const greeting = agentConfig.firstMessage;
-            console.log(greeting)
-            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
+            
+            // Use agent's firstMessage for greeting and log it
+            const greeting = agentConfig.firstMessage || "Hello! How can I help you today?";
+            console.log(`👋 [GREETING] ${greeting}`);
+            
+            // Log the initial greeting
+            if (callLogger) {
+              callLogger.logAIResponse(greeting, currentLanguage);
+            }
+            
+            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger);
             await tts.synthesizeAndStream(greeting);
             break;
           }
@@ -839,6 +981,21 @@ const setupUnifiedVoiceServer = (wss) => {
 
           case "stop":
             console.log(`📞 [ENHANCED] Stream stopped`);
+            
+            // Save call log to database before closing
+            if (callLogger) {
+              try {
+                const savedLog = await callLogger.saveToDatabase('medium'); // Default lead status
+                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
+                
+                // Print call statistics
+                const stats = callLogger.getStats();
+                console.log(`📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(', ')}`);
+              } catch (error) {
+                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`);
+              }
+            }
+            
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
@@ -852,9 +1009,19 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     });
 
-    // Connection cleanup
-    ws.on("close", () => {
+    // Enhanced connection cleanup with call logging
+    ws.on("close", async () => {
       console.log("🔗 [ENHANCED] Connection closed");
+      
+      // Save call log before cleanup if not already saved
+      if (callLogger) {
+        try {
+          const savedLog = await callLogger.saveToDatabase('not_connected'); // Status for unexpected disconnection
+          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}`);
+        } catch (error) {
+          console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`);
+        }
+      }
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
@@ -871,6 +1038,7 @@ const setupUnifiedVoiceServer = (wss) => {
       optimizedTTS = null;
       currentLanguage = undefined;
       processingRequestId = 0;
+      callLogger = null;
     });
 
     ws.on("error", (error) => {
