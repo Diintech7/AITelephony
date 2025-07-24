@@ -604,7 +604,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let userUtteranceBuffer = "";
     let lastProcessedText = "";
     let optimizedTTS = null;
-    let currentLanguage = ws.sessionAgentConfig.language;
+    let currentLanguage = undefined;
     let processingRequestId = 0; // To track processing requests
 
     // Deepgram WebSocket connection
@@ -867,7 +867,7 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramReady = false;
       deepgramAudioQueue = [];
       optimizedTTS = null;
-      currentLanguage = ws.sessionAgentConfig.language;
+      currentLanguage = undefined;
       processingRequestId = 0;
     });
 
