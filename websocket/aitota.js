@@ -283,21 +283,37 @@ const shouldSendPhrase = (buffer) => {
 };
 
 // Add this helper function near the top
-function resolveSarvamSpeaker(agentVoice, language) {
-  if (agentVoice && agentVoice !== 'default') return agentVoice;
-  if (language === 'hi') return 'meera';
-  if (language === 'mr') return 'maitreyi';
-  if (language === 'en') return 'maya';
-  return 'meera'; // fallback
+function resolveSarvamSpeaker(agentVoice, language, modelVersion = 'bulbul:v2') {
+  // Bulbul V2 speakers
+  const v2Speakers = ['anushka', 'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh'];
+  // Bulbul V1 speakers
+  const v1Speakers = ['meera', 'pavithra', 'maitreyi', 'amol', 'amartya', 'arvind', 'maya', 'arjun', 'diya', 'neel', 'misha', 'vian'];
+
+  if (modelVersion === 'bulbul:v2') {
+    if (v2Speakers.includes(agentVoice)) return agentVoice;
+    // Fallback mapping for v2
+    if (language === 'hi') return 'manisha';
+    if (language === 'en') return 'manisha';
+    // Pick any v2 speaker as fallback
+    return 'manisha';
+  } else {
+    if (v1Speakers.includes(agentVoice)) return agentVoice;
+    // Fallback mapping for v1
+    if (language === 'hi') return 'meera';
+    if (language === 'mr') return 'maitreyi';
+    if (language === 'en') return 'maya';
+    return 'meera';
+  }
 }
 
 // Replace OptimizedSarvamTTSProcessor with WebSocket-based SarvamTTSProcessor
 class SarvamWebSocketTTSProcessor {
-  constructor(language, ws, streamSid, voice) {
+  constructor(language, ws, streamSid, voice, modelVersion = 'bulbul:v2') {
     this.language = language;
     this.ws = ws;
     this.streamSid = streamSid;
     this.voice = voice;
+    this.modelVersion = modelVersion;
     this.sarvamWs = null;
     this.isInterrupted = false;
     this.audioChunkCount = 0;
@@ -305,7 +321,7 @@ class SarvamWebSocketTTSProcessor {
 
   async synthesizeAndStream(text) {
     if (!text || this.isInterrupted) return;
-    const sarvamUrl = 'wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v2';
+    const sarvamUrl = `wss://api.sarvam.ai/text-to-speech/ws?model=${this.modelVersion}`;
     return new Promise((resolve, reject) => {
       this.sarvamWs = new WebSocket(sarvamUrl, {
         headers: {
@@ -319,7 +335,7 @@ class SarvamWebSocketTTSProcessor {
           type: 'config',
           data: {
             target_language_code: getSarvamLanguage(this.language),
-            speaker: resolveSarvamSpeaker(this.voice, this.language),
+            speaker: resolveSarvamSpeaker(this.voice, this.language, this.modelVersion),
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
@@ -515,7 +531,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         // Create new TTS processor with detected language
-        optimizedTTS = new SarvamWebSocketTTSProcessor(detectedLanguage, ws, streamSid, ws.sessionAgentConfig?.voiceSelection);
+        optimizedTTS = new SarvamWebSocketTTSProcessor(detectedLanguage, ws, streamSid, ws.sessionAgentConfig?.voiceSelection, 'bulbul:v2');
 
         // Step 3: Check for interruption function
         const checkInterruption = () => {
@@ -569,7 +585,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Optimized initial greeting with language detection
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new SarvamWebSocketTTSProcessor(currentLanguage, ws, streamSid, ws.sessionAgentConfig.voiceSelection);
+      const tts = new SarvamWebSocketTTSProcessor(currentLanguage, ws, streamSid, ws.sessionAgentConfig.voiceSelection, 'bulbul:v2');
       await tts.synthesizeAndStream(ws.sessionAgentConfig.firstMessage);
     };
 
@@ -619,7 +635,7 @@ const setupUnifiedVoiceServer = (wss) => {
             // Use agent's firstMessage for greeting
             const greeting = agentConfig.firstMessage;
             console.log(greeting)
-            const tts = new SarvamWebSocketTTSProcessor(currentLanguage, ws, streamSid, agentConfig.voiceSelection);
+            const tts = new SarvamWebSocketTTSProcessor(currentLanguage, ws, streamSid, agentConfig.voiceSelection, 'bulbul:v2');
             await tts.synthesizeAndStream(greeting);
             callStartTime = new Date();
             // If mobile is available in event, set sessionMobile = ...
