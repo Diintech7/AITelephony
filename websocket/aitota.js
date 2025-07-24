@@ -1,5 +1,8 @@
 const WebSocket = require("ws");
 require("dotenv").config();
+const mongoose = require('mongoose');
+const Agent = require('../models/Agent');
+const CallLog = require('../models/CallLog');
 
 // Load API keys from environment variables
 const API_KEYS = {
@@ -795,13 +798,35 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`);
             break;
 
-          case "start":
+          case "start": {
             streamSid = data.streamSid || data.start?.streamSid;
-            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}`);
-            
+            const accountSid = data.start?.accountSid;
+            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}`);
+
+            // Fetch agent config from DB using accountSid
+            let agentConfig = null;
+            if (accountSid) {
+              try {
+                agentConfig = await Agent.findOne({ accountSid }).lean();
+                if (!agentConfig) {
+                  console.warn(`[AGENT] No agent found for accountSid: ${accountSid}, using default config.`);
+                }
+              } catch (err) {
+                console.error(`[AGENT] DB error for accountSid ${accountSid}:`, err);
+              }
+            }
+            // Fallback to default config if not found
+            ws.sessionAgentConfig = agentConfig || { ...DEFAULT_CONFIG };
+            // Set currentLanguage and other session state from agent config
+            currentLanguage = ws.sessionAgentConfig.language || DEFAULT_CONFIG.language;
+
             await connectToDeepgram();
-            await sendInitialGreeting();
+            // Use agent's firstMessage for greeting
+            const greeting = ws.sessionAgentConfig.firstMessage || DEFAULT_CONFIG.firstMessage;
+            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
+            await tts.synthesizeAndStream(greeting);
             break;
+          }
 
           case "media":
             if (data.media?.payload) {

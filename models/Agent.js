@@ -1,8 +1,8 @@
 const mongoose = require("mongoose")
 
 const agentSchema = new mongoose.Schema({
-  // Tenant Information
-  tenantId: { type: String, required: true, index: true },
+  // Client Information
+  clientId: { type: String, required: true, index: true },
 
   // Personal Information
   agentName: { type: String, required: true },
@@ -67,6 +67,14 @@ const agentSchema = new mongoose.Schema({
   contextMemory: { type: String },
   brandInfo: { type: String },
 
+  // Multiple starting messages
+  startingMessages: [
+    {
+      text: { type: String, required: true },
+      audioBase64: { type: String },
+    }
+  ],
+
   // Telephony
   accountSid: { type: String },
   serviceProvider: {
@@ -101,8 +109,8 @@ const agentSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 })
 
-// Compound index for tenant + agent name uniqueness
-agentSchema.index({ tenantId: 1, agentName: 1 }, { unique: true })
+// Compound index for client + agent name uniqueness
+agentSchema.index({ clientId: 1, agentName: 1 }, { unique: true })
 
 // Update the updatedAt field before saving
 agentSchema.pre("save", function (next) {

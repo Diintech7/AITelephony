@@ -2,7 +2,7 @@ const mongoose = require("mongoose")
 const crypto = require("crypto")
 
 const apiKeySchema = new mongoose.Schema({
-  tenantId: {
+  clientId: {
     type: String,
     required: true,
     index: true,
@@ -69,8 +69,8 @@ const apiKeySchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 })
 
-// Compound index for tenant + provider uniqueness
-apiKeySchema.index({ tenantId: 1, provider: 1 }, { unique: true })
+// Compound index for client + provider uniqueness
+apiKeySchema.index({ clientId: 1, provider: 1 }, { unique: true })
 
 apiKeySchema.pre("save", function (next) {
   this.updatedAt = Date.now()
