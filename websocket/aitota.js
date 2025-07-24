@@ -88,7 +88,7 @@ Examples:
 - "Hello, how are you?" → en
 - "नमस्ते, आप कैसे हैं?" → hi
 - "আপনি কেমন আছেন?" → bn
-- "நீங்কள் எப்படி இருக்கிறீர்கள்?" → ta
+- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
 
 Return only the language code, nothing else.`
           },
@@ -319,12 +319,14 @@ class SarvamWebSocketTTSProcessor {
             output_audio_codec: 'linear16',
           },
         };
+        console.log('[SARVAM-WS] Sending config:', JSON.stringify(configMsg));
         this.sarvamWs.send(JSON.stringify(configMsg));
         // Send text
         const textMsg = {
           type: 'text',
-          data: { text },
+          data: { text: String(text) },
         };
+        console.log('[SARVAM-WS] Sending text:', JSON.stringify(textMsg));
         this.sarvamWs.send(JSON.stringify(textMsg));
       });
       this.sarvamWs.on('message', (data) => {
