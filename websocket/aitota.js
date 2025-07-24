@@ -125,17 +125,6 @@ Return only the language code, nothing else.`
   }
 };
 
-// Basic configuration
-const DEFAULT_CONFIG = {
-  agentName: "हिंदी सहायक",
-  language: "hi",
-  voiceSelection: "pavithra",
-  firstMessage: "नमस्कार! एआई तोता में संपर्क करने के लिए धन्यवाद। बताइए, मैं आपकी किस प्रकार मदद कर सकता हूँ?",
-  personality: "friendly",
-  category: "customer service",
-  contextMemory: "customer service conversation in Hindi",
-};
-
 // Optimized OpenAI streaming with phrase-based chunking and language detection
 const processWithOpenAIStreaming = async (userMessage, conversationHistory, detectedLanguage, onPhrase, onComplete, onInterrupt) => {
   const timer = createTimer("OPENAI_STREAMING");
@@ -301,7 +290,7 @@ class OptimizedSarvamTTSProcessor {
     this.queue = [];
     this.isProcessing = false;
     this.sarvamLanguage = getSarvamLanguage(language);
-    this.voice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
+    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra");
     
     // Interruption handling
     this.isInterrupted = false;
@@ -803,26 +792,32 @@ const setupUnifiedVoiceServer = (wss) => {
             const accountSid = data.start?.accountSid;
             console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}`);
 
-            // Fetch agent config from DB using accountSid
+            // Fetch agent config from DB using accountSid (MANDATORY)
             let agentConfig = null;
             if (accountSid) {
               try {
                 agentConfig = await Agent.findOne({ accountSid }).lean();
                 if (!agentConfig) {
-                  console.warn(`[AGENT] No agent found for accountSid: ${accountSid}, using default config.`);
+                  ws.send(JSON.stringify({ event: 'error', message: `No agent found for accountSid: ${accountSid}` }));
+                  ws.close();
+                  return;
                 }
               } catch (err) {
-                console.error(`[AGENT] DB error for accountSid ${accountSid}:`, err);
+                ws.send(JSON.stringify({ event: 'error', message: `DB error for accountSid: ${accountSid}` }));
+                ws.close();
+                return;
               }
+            } else {
+              ws.send(JSON.stringify({ event: 'error', message: 'Missing accountSid in start event' }));
+              ws.close();
+              return;
             }
-            // Fallback to default config if not found
-            ws.sessionAgentConfig = agentConfig || { ...DEFAULT_CONFIG };
-            // Set currentLanguage and other session state from agent config
-            currentLanguage = ws.sessionAgentConfig.language || DEFAULT_CONFIG.language;
+            ws.sessionAgentConfig = agentConfig;
+            currentLanguage = agentConfig.language;
 
             await connectToDeepgram();
             // Use agent's firstMessage for greeting
-            const greeting = ws.sessionAgentConfig.firstMessage || DEFAULT_CONFIG.firstMessage;
+            const greeting = agentConfig.firstMessage;
             const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
             await tts.synthesizeAndStream(greeting);
             break;
