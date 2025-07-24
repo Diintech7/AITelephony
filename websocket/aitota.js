@@ -365,6 +365,7 @@ class SarvamWebSocketTTSProcessor {
               streamSid: this.streamSid,
               media: { payload: msg.data.audio },
             };
+            console.log(mediaMessage)
             if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
               this.ws.send(JSON.stringify(mediaMessage));
             }
