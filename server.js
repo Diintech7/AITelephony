@@ -239,11 +239,7 @@ const gracefulShutdown = (signal) => {
     });
   });
   
-  // Force close after 10 seconds
-  setTimeout(() => {
-    console.error("⚠️ [SERVER] Forcing shutdown after timeout");
-    process.exit(1);
-  }, 10000);
+  
 };
 
 // Handle shutdown signals
