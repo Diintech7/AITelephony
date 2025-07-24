@@ -19,6 +19,18 @@ if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
 
 const fetch = globalThis.fetch || require("node-fetch");
 
+// Add global error handlers to prevent server shutdown
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 [UNHANDLED_REJECTION] Caught unhandled rejection:', reason);
+  console.error('Promise:', promise);
+  // Don't exit the process, just log the error
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('💥 [UNCAUGHT_EXCEPTION] Caught uncaught exception:', error);
+  // Don't exit the process, just log the error
+});
+
 // Performance timing helper
 const createTimer = (label) => {
   const start = Date.now();
@@ -306,7 +318,7 @@ function resolveSarvamSpeaker(agentVoice, language, modelVersion = 'bulbul:v2') 
   }
 }
 
-// Replace OptimizedSarvamTTSProcessor with WebSocket-based SarvamTTSProcessor
+// Enhanced WebSocket-based SarvamTTSProcessor with better interruption handling
 class SarvamWebSocketTTSProcessor {
   constructor(language, ws, streamSid, voice, modelVersion = 'bulbul:v2') {
     this.language = language;
@@ -318,120 +330,205 @@ class SarvamWebSocketTTSProcessor {
     this.isInterrupted = false;
     this.audioChunkCount = 0;
     this.pingInterval = null;
+    this.currentAudioStreaming = false;
+    this.audioQueue = []; // Queue for pending audio chunks
   }
 
   async synthesizeAndStream(text) {
     if (!text || this.isInterrupted) return;
+    
     const sarvamUrl = `wss://api.sarvam.ai/text-to-speech/ws?model=${this.modelVersion}`;
     const ttsStart = Date.now();
     console.log(`[TTS] Starting Sarvam TTS for text: "${text.substring(0, 60)}..."`);
+    
     return new Promise((resolve, reject) => {
-      this.sarvamWs = new WebSocket(sarvamUrl, {
-        headers: {
-          'API-Subscription-Key': process.env.SARVAM_API_KEY,
-        },
-      });
-      let resolved = false;
-      this.sarvamWs.on('open', () => {
-        // Start ping interval to keep connection alive (5 seconds)
-        this.pingInterval = setInterval(() => {
-          if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
-            this.sarvamWs.send(JSON.stringify({ type: 'ping' }));
-            console.log('[SARVAM-WS] Sent ping');
-          }
-        }, 5000); // 5 seconds
-        // Send config
-        const configMsg = {
-          type: 'config',
-          data: {
-            target_language_code: getSarvamLanguage(this.language),
-            speaker: resolveSarvamSpeaker(this.voice, this.language, this.modelVersion),
-            pitch: 0,
-            pace: 1.0,
-            loudness: 1.0,
-            speech_sample_rate: 8000,
-            enable_preprocessing: false,
-            output_audio_codec: 'linear16',
+      try {
+        this.sarvamWs = new WebSocket(sarvamUrl, {
+          headers: {
+            'API-Subscription-Key': process.env.SARVAM_API_KEY,
           },
-        };
-        console.log('[SARVAM-WS] Sending config:', JSON.stringify(configMsg));
-        this.sarvamWs.send(JSON.stringify(configMsg));
-        // Send text
-        const textMsg = {
-          type: 'text',
-          data: { text: String(text) },
-        };
-        console.log('[SARVAM-WS] Sending text:', JSON.stringify(textMsg));
-        this.sarvamWs.send(JSON.stringify(textMsg));
-      });
-      this.sarvamWs.on('message', (data) => {
-        try {
-          const msg = JSON.parse(data);
-          if (msg.type === 'audio' && msg.data?.audio) {
-            if (this.isInterrupted) {
-              console.log('[TTS] Audio streaming interrupted, skipping audio chunk');
-              return; // Do not send audio to SIP if interrupted
-            }
-            this.audioChunkCount++;
-            const audioBuffer = Buffer.from(msg.data.audio, 'base64');
-            const CHUNK_SIZE = 640; // 40ms of 8000Hz 16-bit mono PCM
-            let position = 0;
-            let chunkIndex = 0;
-            while (position < audioBuffer.length) {
-              if (this.isInterrupted) {
-                console.log('[TTS] Audio streaming interrupted mid-chunk, stopping immediately');
-                break;
-              }
-              const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
-              const mediaMessage = {
-                event: 'media',
-                streamSid: this.streamSid,
-                media: {
-                  payload: chunk.toString('base64'),
-                },
-              };
-              if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-                this.ws.send(JSON.stringify(mediaMessage));
-              }
-              position += CHUNK_SIZE;
-              chunkIndex++;
-            }
-          } else if (msg.type === 'end') {
-            const ttsEnd = Date.now();
-            console.log(`[TTS] Sarvam TTS streaming complete. Time taken: ${ttsEnd - ttsStart} ms`);
-            if (!resolved) { resolved = true; resolve(); }
-            if (this.pingInterval) clearInterval(this.pingInterval);
-            this.sarvamWs.close();
-          } else if (msg.type === 'error') {
-            console.error('[SARVAM-WS] Error:', msg.data?.message);
-            if (!resolved) { resolved = true; reject(new Error(msg.data?.message)); }
-            if (this.pingInterval) clearInterval(this.pingInterval);
-            this.sarvamWs.close();
+        });
+        
+        let resolved = false;
+        
+        // Handle WebSocket errors properly
+        this.sarvamWs.on('error', (err) => {
+          console.error('[SARVAM-WS] WebSocket error:', err.message);
+          if (this.pingInterval) clearInterval(this.pingInterval);
+          if (!resolved) { 
+            resolved = true; 
+            resolve(); // Resolve instead of reject to prevent unhandled rejection
           }
-        } catch (err) {
-          console.error('[SARVAM-WS] Message parse error:', err);
-        }
-      });
-      this.sarvamWs.on('close', () => {
-        if (this.pingInterval) clearInterval(this.pingInterval);
+        });
+        
+        this.sarvamWs.on('open', () => {
+          if (this.isInterrupted) {
+            this.sarvamWs.close();
+            if (!resolved) { resolved = true; resolve(); }
+            return;
+          }
+          
+          // Start ping interval to keep connection alive (5 seconds)
+          this.pingInterval = setInterval(() => {
+            if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
+              try {
+                this.sarvamWs.send(JSON.stringify({ type: 'ping' }));
+                console.log('[SARVAM-WS] Sent ping');
+              } catch (err) {
+                console.error('[SARVAM-WS] Ping error:', err.message);
+                if (this.pingInterval) clearInterval(this.pingInterval);
+              }
+            }
+          }, 5000);
+          
+          // Send config
+          const configMsg = {
+            type: 'config',
+            data: {
+              target_language_code: getSarvamLanguage(this.language),
+              speaker: resolveSarvamSpeaker(this.voice, this.language, this.modelVersion),
+              pitch: 0,
+              pace: 1.0,
+              loudness: 1.0,
+              speech_sample_rate: 8000,
+              enable_preprocessing: false,
+              output_audio_codec: 'linear16',
+            },
+          };
+          
+          console.log('[SARVAM-WS] Sending config:', JSON.stringify(configMsg));
+          try {
+            this.sarvamWs.send(JSON.stringify(configMsg));
+            
+            // Send text
+            const textMsg = {
+              type: 'text',
+              data: { text: String(text) },
+            };
+            console.log('[SARVAM-WS] Sending text:', JSON.stringify(textMsg));
+            this.sarvamWs.send(JSON.stringify(textMsg));
+          } catch (err) {
+            console.error('[SARVAM-WS] Send error:', err.message);
+            if (this.pingInterval) clearInterval(this.pingInterval);
+            if (!resolved) { resolved = true; resolve(); }
+          }
+        });
+        
+        this.sarvamWs.on('message', (data) => {
+          try {
+            const msg = JSON.parse(data);
+            
+            if (msg.type === 'audio' && msg.data?.audio) {
+              if (this.isInterrupted) {
+                console.log('[TTS] Audio streaming interrupted, skipping audio chunk');
+                return;
+              }
+              
+              this.audioChunkCount++;
+              const audioBuffer = Buffer.from(msg.data.audio, 'base64');
+              this.streamAudioChunks(audioBuffer);
+              
+            } else if (msg.type === 'end') {
+              const ttsEnd = Date.now();
+              console.log(`[TTS] Sarvam TTS streaming complete. Time taken: ${ttsEnd - ttsStart} ms`);
+              if (!resolved) { resolved = true; resolve(); }
+              if (this.pingInterval) clearInterval(this.pingInterval);
+              this.sarvamWs.close();
+              
+            } else if (msg.type === 'error') {
+              console.error('[SARVAM-WS] Error:', msg.data?.message);
+              if (!resolved) { resolved = true; resolve(); } // Resolve instead of reject
+              if (this.pingInterval) clearInterval(this.pingInterval);
+              this.sarvamWs.close();
+            }
+          } catch (err) {
+            console.error('[SARVAM-WS] Message parse error:', err.message);
+          }
+        });
+        
+        this.sarvamWs.on('close', () => {
+          if (this.pingInterval) clearInterval(this.pingInterval);
+          if (!resolved) { resolved = true; resolve(); }
+        });
+        
+      } catch (err) {
+        console.error('[SARVAM-WS] Connection error:', err.message);
         if (!resolved) { resolved = true; resolve(); }
-      });
-      this.sarvamWs.on('error', (err) => {
-        console.error('[SARVAM-WS] WebSocket error:', err);
-        if (this.pingInterval) clearInterval(this.pingInterval);
-        if (!resolved) { resolved = true; reject(err); }
-        // Do not throw, just log
-      });
+      }
     });
+  }
+
+  streamAudioChunks(audioBuffer) {
+    const CHUNK_SIZE = 640; // 40ms of 8000Hz 16-bit mono PCM
+    let position = 0;
+    
+    const sendNextChunk = () => {
+      // Check for interruption before sending each chunk
+      if (this.isInterrupted || position >= audioBuffer.length) {
+        if (this.isInterrupted) {
+          console.log('[TTS] Audio streaming interrupted mid-chunk, stopping immediately');
+        }
+        return;
+      }
+      
+      const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
+      const mediaMessage = {
+        event: 'media',
+        streamSid: this.streamSid,
+        media: {
+          payload: chunk.toString('base64'),
+        },
+      };
+      
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        try {
+          this.ws.send(JSON.stringify(mediaMessage));
+        } catch (err) {
+          console.error('[TTS] Error sending audio chunk:', err.message);
+          return;
+        }
+      }
+      
+      position += CHUNK_SIZE;
+      
+      // Schedule next chunk with small delay to prevent overwhelming
+      if (position < audioBuffer.length && !this.isInterrupted) {
+        setTimeout(sendNextChunk, 5); // 5ms delay between chunks
+      }
+    };
+    
+    // Start streaming chunks
+    sendNextChunk();
   }
 
   interrupt() {
     this.isInterrupted = true;
     console.log('[TTS] TTS interrupted, closing Sarvam WebSocket and stopping audio to SIP');
-    if (this.pingInterval) clearInterval(this.pingInterval);
-    if (this.sarvamWs && (this.sarvamWs.readyState === WebSocket.OPEN || this.sarvamWs.readyState === WebSocket.CONNECTING)) {
-      this.sarvamWs.close();
+    
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
     }
+    
+    if (this.sarvamWs) {
+      try {
+        if (this.sarvamWs.readyState === WebSocket.OPEN || this.sarvamWs.readyState === WebSocket.CONNECTING) {
+          this.sarvamWs.close();
+        }
+      } catch (err) {
+        console.error('[TTS] Error closing Sarvam WebSocket:', err.message);
+      }
+      this.sarvamWs = null;
+    }
+    
+    // Clear any pending audio chunks
+    this.audioQueue = [];
+    this.currentAudioStreaming = false;
+  }
+
+  // Method to check if TTS is currently active
+  isActive() {
+    return !this.isInterrupted && this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN;
   }
 }
 
@@ -488,17 +585,27 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramReady = true;
           console.log("✅ [DEEPGRAM] Connected");
           
-          deepgramAudioQueue.forEach(buffer => deepgramWs.send(buffer));
+          deepgramAudioQueue.forEach(buffer => {
+            try {
+              deepgramWs.send(buffer);
+            } catch (err) {
+              console.error('[DEEPGRAM] Error sending queued audio:', err.message);
+            }
+          });
           deepgramAudioQueue = [];
         };
 
         deepgramWs.onmessage = async (event) => {
-          const data = JSON.parse(event.data);
-          await handleDeepgramResponse(data);
+          try {
+            const data = JSON.parse(event.data);
+            await handleDeepgramResponse(data);
+          } catch (err) {
+            console.error('[DEEPGRAM] Message parse error:', err.message);
+          }
         };
 
         deepgramWs.onerror = (error) => {
-          console.error("❌ [DEEPGRAM] Error:", error);
+          console.error("❌ [DEEPGRAM] Error:", error.message);
           deepgramReady = false;
         };
 
@@ -514,30 +621,37 @@ const setupUnifiedVoiceServer = (wss) => {
 
     // Handle Deepgram responses with interruption logic
     const handleDeepgramResponse = async (data) => {
-      if (data.type === "Results") {
-        const transcript = data.channel?.alternatives?.[0]?.transcript;
-        const is_final = data.is_final;
-        
-        if (transcript?.trim()) {
-          // Interrupt current TTS if new speech detected
-          if (optimizedTTS && (isProcessing || optimizedTTS.isInterrupted === false)) {
-            console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`);
-            optimizedTTS.interrupt();
-            isProcessing = false;
-            processingRequestId++; // Invalidate current processing
-          }
+      try {
+        if (data.type === "Results") {
+          const transcript = data.channel?.alternatives?.[0]?.transcript;
+          const is_final = data.is_final;
           
-          if (is_final) {
-            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
+          if (transcript?.trim()) {
+            // Add to session transcript
+            sessionTranscript += transcript + ' ';
+            
+            // CRITICAL: Interrupt current TTS immediately when ANY speech is detected
+            if (optimizedTTS && optimizedTTS.isActive()) {
+              console.log(`🛑 [INTERRUPT] New speech detected: "${transcript.trim()}", interrupting current TTS`);
+              optimizedTTS.interrupt();
+              isProcessing = false;
+              processingRequestId++; // Invalidate current processing
+            }
+            
+            if (is_final) {
+              userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
+              await processUserUtterance(userUtteranceBuffer);
+              userUtteranceBuffer = "";
+            }
+          }
+        } else if (data.type === "UtteranceEnd") {
+          if (userUtteranceBuffer.trim()) {
             await processUserUtterance(userUtteranceBuffer);
             userUtteranceBuffer = "";
           }
         }
-      } else if (data.type === "UtteranceEnd") {
-        if (userUtteranceBuffer.trim()) {
-          await processUserUtterance(userUtteranceBuffer);
-          userUtteranceBuffer = "";
-        }
+      } catch (err) {
+        console.error('[DEEPGRAM] Response handling error:', err.message);
       }
     };
 
@@ -620,13 +734,6 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized initial greeting with language detection
-    const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new SarvamWebSocketTTSProcessor(currentLanguage, ws, streamSid, ws.sessionAgentConfig.voiceSelection, 'bulbul:v2');
-      await tts.synthesizeAndStream(ws.sessionAgentConfig.firstMessage);
-    };
-
     // WebSocket message handling
     ws.on("message", async (message) => {
       try {
@@ -652,7 +759,7 @@ const setupUnifiedVoiceServer = (wss) => {
                   ws.close();
                   return;
                 }
-                else{
+                else {
                   console.log("Account sid matched")
                 }
                 
@@ -686,7 +793,12 @@ const setupUnifiedVoiceServer = (wss) => {
               const audioBuffer = Buffer.from(data.media.payload, "base64");
               
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
-                deepgramWs.send(audioBuffer);
+                try {
+                  deepgramWs.send(audioBuffer);
+                } catch (err) {
+                  console.error('[DEEPGRAM] Error sending audio:', err.message);
+                  deepgramAudioQueue.push(audioBuffer); // Queue if send fails
+                }
               } else {
                 deepgramAudioQueue.push(audioBuffer);
               }
@@ -741,8 +853,18 @@ const setupUnifiedVoiceServer = (wss) => {
     ws.on("close", () => {
       console.log("🔗 [ENHANCED] Connection closed");
       
+      // Close Deepgram connection if open
       if (deepgramWs?.readyState === WebSocket.OPEN) {
-        deepgramWs.close();
+        try {
+          deepgramWs.close();
+        } catch (err) {
+          console.error('[DEEPGRAM] Error closing connection:', err.message);
+        }
+      }
+
+      // Interrupt any ongoing TTS
+      if (optimizedTTS) {
+        optimizedTTS.interrupt();
       }
 
       // Reset state
@@ -756,7 +878,6 @@ const setupUnifiedVoiceServer = (wss) => {
       optimizedTTS = null;
       currentLanguage = undefined;
       processingRequestId = 0;
-      // In connection cleanup, reset transcript/session vars
       sessionTranscript = '';
       callStartTime = null;
       callEndTime = null;
