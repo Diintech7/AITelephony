@@ -359,13 +359,15 @@ class SarvamWebSocketTTSProcessor {
           const msg = JSON.parse(data);
           if (msg.type === 'audio' && msg.data?.audio) {
             this.audioChunkCount++;
-            // Forward audio chunk to SIP/media client
+            // Convert Sarvam base64 audio to Buffer, then back to base64 (ensures correct format)
+            const chunk = Buffer.from(msg.data.audio, 'base64');
             const mediaMessage = {
               event: 'media',
               streamSid: this.streamSid,
-              media: { payload: msg.data.audio },
+              media: {
+                payload: chunk.toString('base64'),
+              },
             };
-            console.log(mediaMessage)
             if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
               this.ws.send(JSON.stringify(mediaMessage));
             }
