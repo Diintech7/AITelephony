@@ -802,6 +802,7 @@ const setupUnifiedVoiceServer = (wss) => {
                   ws.close();
                   return;
                 }
+                
               } catch (err) {
                 ws.send(JSON.stringify({ event: 'error', message: `DB error for accountSid: ${accountSid}` }));
                 ws.close();
@@ -818,6 +819,7 @@ const setupUnifiedVoiceServer = (wss) => {
             await connectToDeepgram();
             // Use agent's firstMessage for greeting
             const greeting = agentConfig.firstMessage;
+            console.log(greeting)
             const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
             await tts.synthesizeAndStream(greeting);
             break;
