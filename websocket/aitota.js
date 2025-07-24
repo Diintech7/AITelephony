@@ -319,6 +319,7 @@ function resolveSarvamSpeaker(agentVoice, language, modelVersion = 'bulbul:v2') 
 }
 
 // Enhanced WebSocket-based SarvamTTSProcessor with better interruption handling
+// Enhanced WebSocket-based SarvamTTSProcessor with robust error handling
 class SarvamWebSocketTTSProcessor {
   constructor(language, ws, streamSid, voice, modelVersion = 'bulbul:v2') {
     this.language = language;
@@ -331,7 +332,12 @@ class SarvamWebSocketTTSProcessor {
     this.audioChunkCount = 0;
     this.pingInterval = null;
     this.currentAudioStreaming = false;
-    this.audioQueue = []; // Queue for pending audio chunks
+    this.audioQueue = [];
+    this.connectionTimeout = null;
+    this.isConfigSent = false;
+    this.isTextSent = false;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 3;
   }
 
   async synthesizeAndStream(text) {
@@ -341,124 +347,226 @@ class SarvamWebSocketTTSProcessor {
     const ttsStart = Date.now();
     console.log(`[TTS] Starting Sarvam TTS for text: "${text.substring(0, 60)}..."`);
     
-    return new Promise((resolve, reject) => {
-      try {
-        this.sarvamWs = new WebSocket(sarvamUrl, {
-          headers: {
-            'API-Subscription-Key': process.env.SARVAM_API_KEY,
-          },
-        });
-        
-        let resolved = false;
-        
-        // Handle WebSocket errors properly
-        this.sarvamWs.on('error', (err) => {
-          console.error('[SARVAM-WS] WebSocket error:', err.message);
-          if (this.pingInterval) clearInterval(this.pingInterval);
-          if (!resolved) { 
-            resolved = true; 
-            resolve(); // Resolve instead of reject to prevent unhandled rejection
-          }
-        });
-        
-        this.sarvamWs.on('open', () => {
-          if (this.isInterrupted) {
-            this.sarvamWs.close();
-            if (!resolved) { resolved = true; resolve(); }
-            return;
-          }
-          
-          // Start ping interval to keep connection alive (5 seconds)
-          this.pingInterval = setInterval(() => {
-            if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
-              try {
-                this.sarvamWs.send(JSON.stringify({ type: 'ping' }));
-                console.log('[SARVAM-WS] Sent ping');
-              } catch (err) {
-                console.error('[SARVAM-WS] Ping error:', err.message);
-                if (this.pingInterval) clearInterval(this.pingInterval);
-              }
-            }
-          }, 5000);
-          
-          // Send config
-          const configMsg = {
-            type: 'config',
-            data: {
-              target_language_code: getSarvamLanguage(this.language),
-              speaker: resolveSarvamSpeaker(this.voice, this.language, this.modelVersion),
-              pitch: 0,
-              pace: 1.0,
-              loudness: 1.0,
-              speech_sample_rate: 8000,
-              enable_preprocessing: false,
-              output_audio_codec: 'linear16',
-            },
-          };
-          
-          console.log('[SARVAM-WS] Sending config:', JSON.stringify(configMsg));
-          try {
-            this.sarvamWs.send(JSON.stringify(configMsg));
-            
-            // Send text
-            const textMsg = {
-              type: 'text',
-              data: { text: String(text) },
-            };
-            console.log('[SARVAM-WS] Sending text:', JSON.stringify(textMsg));
-            this.sarvamWs.send(JSON.stringify(textMsg));
-          } catch (err) {
-            console.error('[SARVAM-WS] Send error:', err.message);
-            if (this.pingInterval) clearInterval(this.pingInterval);
-            if (!resolved) { resolved = true; resolve(); }
-          }
-        });
-        
-        this.sarvamWs.on('message', (data) => {
-          try {
-            const msg = JSON.parse(data);
-            
-            if (msg.type === 'audio' && msg.data?.audio) {
-              if (this.isInterrupted) {
-                console.log('[TTS] Audio streaming interrupted, skipping audio chunk');
-                return;
-              }
-              
-              this.audioChunkCount++;
-              const audioBuffer = Buffer.from(msg.data.audio, 'base64');
-              this.streamAudioChunks(audioBuffer);
-              
-            } else if (msg.type === 'end') {
-              const ttsEnd = Date.now();
-              console.log(`[TTS] Sarvam TTS streaming complete. Time taken: ${ttsEnd - ttsStart} ms`);
-              if (!resolved) { resolved = true; resolve(); }
-              if (this.pingInterval) clearInterval(this.pingInterval);
-              this.sarvamWs.close();
-              
-            } else if (msg.type === 'error') {
-              console.error('[SARVAM-WS] Error:', msg.data?.message);
-              if (!resolved) { resolved = true; resolve(); } // Resolve instead of reject
-              if (this.pingInterval) clearInterval(this.pingInterval);
-              this.sarvamWs.close();
-            }
-          } catch (err) {
-            console.error('[SARVAM-WS] Message parse error:', err.message);
-          }
-        });
-        
-        this.sarvamWs.on('close', () => {
-          if (this.pingInterval) clearInterval(this.pingInterval);
-          if (!resolved) { resolved = true; resolve(); }
-        });
-        
-      } catch (err) {
-        console.error('[SARVAM-WS] Connection error:', err.message);
-        if (!resolved) { resolved = true; resolve(); }
-      }
+    return new Promise((resolve) => {
+      this.createSarvamConnection(sarvamUrl, text, ttsStart, resolve);
     });
   }
 
+  createSarvamConnection(sarvamUrl, text, ttsStart, resolve) {
+    try {
+      // Clear any existing connection
+      this.cleanup();
+
+      this.sarvamWs = new WebSocket(sarvamUrl, {
+        headers: {
+          'API-Subscription-Key': process.env.SARVAM_API_KEY,
+        },
+        // Add connection timeout
+        timeout: 10000,
+      });
+      
+      let resolved = false;
+      const safeResolve = () => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      };
+
+      // Set connection timeout
+      this.connectionTimeout = setTimeout(() => {
+        console.error('[SARVAM-WS] Connection timeout');
+        this.cleanup();
+        safeResolve();
+      }, 15000);
+      
+      // Handle WebSocket errors
+      this.sarvamWs.on('error', (err) => {
+        console.error('[SARVAM-WS] WebSocket error:', err.message);
+        this.cleanup();
+        
+        // Retry connection if not interrupted and within retry limits
+        if (!this.isInterrupted && this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectAttempts++;
+          console.log(`[SARVAM-WS] Retrying connection (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+          setTimeout(() => {
+            this.createSarvamConnection(sarvamUrl, text, ttsStart, resolve);
+          }, 1000 * this.reconnectAttempts);
+        } else {
+          safeResolve();
+        }
+      });
+      
+      this.sarvamWs.on('open', () => {
+        if (this.isInterrupted) {
+          this.cleanup();
+          safeResolve();
+          return;
+        }
+
+        console.log('[SARVAM-WS] Connection opened successfully');
+        
+        // Clear connection timeout since we're connected
+        if (this.connectionTimeout) {
+          clearTimeout(this.connectionTimeout);
+          this.connectionTimeout = null;
+        }
+        
+        // Start ping interval to keep connection alive
+        this.startPingInterval();
+        
+        // Send configuration
+        this.sendConfiguration(text, safeResolve);
+      });
+      
+      this.sarvamWs.on('message', (data) => {
+        try {
+          if (!data) {
+            console.warn('[SARVAM-WS] Received null/undefined message data');
+            return;
+          }
+
+          const msg = JSON.parse(data.toString());
+          this.handleMessage(msg, ttsStart, safeResolve);
+          
+        } catch (err) {
+          console.error('[SARVAM-WS] Message parse error:', err.message);
+        }
+      });
+      
+      this.sarvamWs.on('close', (code, reason) => {
+        console.log(`[SARVAM-WS] Connection closed: ${code} - ${reason || 'No reason'}`);
+        this.cleanup();
+        safeResolve();
+      });
+      
+    } catch (err) {
+      console.error('[SARVAM-WS] Connection creation error:', err.message);
+      this.cleanup();
+      resolve();
+    }
+  }
+
+  sendConfiguration(text, safeResolve) {
+    try {
+      // Wait a bit for connection to stabilize
+      setTimeout(() => {
+        if (this.isInterrupted || !this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
+          safeResolve();
+          return;
+        }
+
+        const configMsg = {
+          type: 'config',
+          data: {
+            target_language_code: getSarvamLanguage(this.language),
+            speaker: resolveSarvamSpeaker(this.voice, this.language, this.modelVersion),
+            pitch: 0,
+            pace: 1.0,
+            loudness: 1.0,
+            speech_sample_rate: 8000,
+            enable_preprocessing: false,
+            output_audio_codec: 'linear16',
+          },
+        };
+        
+        console.log('[SARVAM-WS] Sending config:', JSON.stringify(configMsg));
+        this.sarvamWs.send(JSON.stringify(configMsg));
+        this.isConfigSent = true;
+        
+        // Send text after a short delay
+        setTimeout(() => {
+          if (this.isInterrupted || !this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
+            safeResolve();
+            return;
+          }
+
+          const textMsg = {
+            type: 'text',
+            data: { text: String(text) },
+          };
+          
+          console.log('[SARVAM-WS] Sending text:', JSON.stringify(textMsg));
+          this.sarvamWs.send(JSON.stringify(textMsg));
+          this.isTextSent = true;
+          
+        }, 100); // Small delay between config and text
+        
+      }, 50); // Small delay after connection opens
+      
+    } catch (err) {
+      console.error('[SARVAM-WS] Send configuration error:', err.message);
+      this.cleanup();
+      safeResolve();
+    }
+  }
+
+  handleMessage(msg, ttsStart, safeResolve) {
+    if (!msg || !msg.type) {
+      console.warn('[SARVAM-WS] Invalid message format:', msg);
+      return;
+    }
+
+    switch (msg.type) {
+      case 'audio':
+        if (msg.data?.audio && !this.isInterrupted) {
+          this.audioChunkCount++;
+          const audioBuffer = Buffer.from(msg.data.audio, 'base64');
+          this.streamAudioChunks(audioBuffer);
+        }
+        break;
+        
+      case 'end':
+        const ttsEnd = Date.now();
+        console.log(`[TTS] Sarvam TTS streaming complete. Chunks: ${this.audioChunkCount}, Time: ${ttsEnd - ttsStart}ms`);
+        this.cleanup();
+        safeResolve();
+        break;
+        
+      case 'error':
+        console.error('[SARVAM-WS] Server error:', msg.data?.message || 'Unknown error');
+        this.cleanup();
+        safeResolve();
+        break;
+        
+      case 'pong':
+        console.log('[SARVAM-WS] Received pong');
+        break;
+        
+      default:
+        console.log('[SARVAM-WS] Unknown message type:', msg.type);
+    }
+  }
+
+  startPingInterval() {
+    // Clear any existing interval
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+    }
+
+    // Start new ping interval (every 10 seconds to prevent timeout)
+    this.pingInterval = setInterval(() => {
+      if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        try {
+          this.sarvamWs.send(JSON.stringify({ type: 'ping' }));
+          console.log('[SARVAM-WS] Sent ping');
+        } catch (err) {
+          console.error('[SARVAM-WS] Ping error:', err.message);
+          this.cleanup();
+        }
+      } else {
+        // Clear interval if connection is not open
+        if (this.pingInterval) {
+          clearInterval(this.pingInterval);
+          this.pingInterval = null;
+        }
+      }
+    }, 10000); // 10 seconds
+  }
+
   streamAudioChunks(audioBuffer) {
+    if (!audioBuffer || this.isInterrupted) return;
+
     const CHUNK_SIZE = 640; // 40ms of 8000Hz 16-bit mono PCM
     let position = 0;
     
@@ -480,20 +588,19 @@ class SarvamWebSocketTTSProcessor {
         },
       };
       
-      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
           this.ws.send(JSON.stringify(mediaMessage));
+          position += CHUNK_SIZE;
+          
+          // Schedule next chunk with small delay to prevent overwhelming
+          if (position < audioBuffer.length && !this.isInterrupted) {
+            setTimeout(sendNextChunk, 5); // 5ms delay between chunks
+          }
         } catch (err) {
           console.error('[TTS] Error sending audio chunk:', err.message);
           return;
         }
-      }
-      
-      position += CHUNK_SIZE;
-      
-      // Schedule next chunk with small delay to prevent overwhelming
-      if (position < audioBuffer.length && !this.isInterrupted) {
-        setTimeout(sendNextChunk, 5); // 5ms delay between chunks
       }
     };
     
@@ -501,36 +608,143 @@ class SarvamWebSocketTTSProcessor {
     sendNextChunk();
   }
 
-  interrupt() {
-    this.isInterrupted = true;
-    console.log('[TTS] TTS interrupted, closing Sarvam WebSocket and stopping audio to SIP');
-    
+  cleanup() {
+    // Clear ping interval
     if (this.pingInterval) {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
     
+    // Clear connection timeout
+    if (this.connectionTimeout) {
+      clearTimeout(this.connectionTimeout);
+      this.connectionTimeout = null;
+    }
+    
+    // Close WebSocket connection safely
     if (this.sarvamWs) {
       try {
+        // Remove all listeners to prevent further events
+        this.sarvamWs.removeAllListeners();
+        
         if (this.sarvamWs.readyState === WebSocket.OPEN || this.sarvamWs.readyState === WebSocket.CONNECTING) {
-          this.sarvamWs.close();
+          this.sarvamWs.close(1000, 'Normal closure');
         }
       } catch (err) {
-        console.error('[TTS] Error closing Sarvam WebSocket:', err.message);
+        console.error('[SARVAM-WS] Error during cleanup:', err.message);
       }
       this.sarvamWs = null;
     }
     
-    // Clear any pending audio chunks
+    // Clear audio queue and reset flags
     this.audioQueue = [];
     this.currentAudioStreaming = false;
+    this.isConfigSent = false;
+    this.isTextSent = false;
+  }
+
+  interrupt() {
+    console.log('[TTS] TTS interrupted, cleaning up connection and stopping audio');
+    this.isInterrupted = true;
+    this.cleanup();
   }
 
   // Method to check if TTS is currently active
   isActive() {
-    return !this.isInterrupted && this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN;
+    return !this.isInterrupted && 
+           this.sarvamWs && 
+           this.sarvamWs.readyState === WebSocket.OPEN;
   }
 }
+
+// Updated processUserUtterance function with better error handling
+const processUserUtterance = async (text) => {
+  if (!text.trim() || text === lastProcessedText) return;
+
+  // Interrupt any ongoing processing
+  if (optimizedTTS) {
+    optimizedTTS.interrupt();
+    optimizedTTS = null; // Clear reference
+  }
+  
+  isProcessing = true;
+  lastProcessedText = text;
+  const currentRequestId = ++processingRequestId;
+  const timer = createTimer("UTTERANCE_PROCESSING");
+
+  try {
+    console.log(`🎤 [USER] Processing: "${text}"`);
+
+    // Step 1: Detect language using OpenAI
+    const detectedLanguage = await detectLanguageWithOpenAI(text);
+    
+    // Step 2: Update current language
+    if (detectedLanguage !== currentLanguage) {
+      console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage}`);
+      currentLanguage = detectedLanguage;
+    }
+
+    // Step 3: Check for interruption function
+    const checkInterruption = () => {
+      return processingRequestId !== currentRequestId;
+    };
+
+    // Step 4: Process with OpenAI streaming
+    const response = await processWithOpenAIStreaming(
+      text,
+      conversationHistory,
+      detectedLanguage,
+      async (phrase, lang) => {
+        // Handle phrase chunks - only if not interrupted
+        if (processingRequestId === currentRequestId && !checkInterruption()) {
+          console.log(`📤 [PHRASE] "${phrase}" (${lang})`);
+          
+          // Create a new TTS processor for each phrase to avoid connection issues
+          const phraseTTS = new SarvamWebSocketTTSProcessor(
+            lang, 
+            ws, 
+            streamSid, 
+            ws.sessionAgentConfig?.voiceSelection, 
+            'bulbul:v2'
+          );
+          
+          try {
+            await phraseTTS.synthesizeAndStream(phrase);
+          } catch (error) {
+            console.error(`[TTS] Error processing phrase: ${error.message}`);
+          }
+        }
+      },
+      (fullResponse) => {
+        // Handle completion - only if not interrupted
+        if (processingRequestId === currentRequestId && !checkInterruption()) {
+          console.log(`✅ [COMPLETE] "${fullResponse}"`);
+          
+          // Update conversation history
+          conversationHistory.push(
+            { role: "user", content: text },
+            { role: "assistant", content: fullResponse }
+          );
+
+          // Keep last 10 messages for context
+          if (conversationHistory.length > 10) {
+            conversationHistory = conversationHistory.slice(-10);
+          }
+        }
+      },
+      checkInterruption
+    );
+
+    console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`);
+
+  } catch (error) {
+    console.error(`❌ [PROCESSING] Error: ${error.message}`);
+  } finally {
+    if (processingRequestId === currentRequestId) {
+      isProcessing = false;
+    }
+  }
+};
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
