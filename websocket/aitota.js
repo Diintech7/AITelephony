@@ -282,6 +282,15 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
+// Add this helper function near the top
+function resolveSarvamSpeaker(agentVoice, language) {
+  if (agentVoice && agentVoice !== 'default') return agentVoice;
+  if (language === 'hi') return 'meera';
+  if (language === 'mr') return 'maitreyi';
+  if (language === 'en') return 'maya';
+  return 'meera'; // fallback
+}
+
 // Replace OptimizedSarvamTTSProcessor with WebSocket-based SarvamTTSProcessor
 class SarvamWebSocketTTSProcessor {
   constructor(language, ws, streamSid, voice) {
@@ -310,7 +319,7 @@ class SarvamWebSocketTTSProcessor {
           type: 'config',
           data: {
             target_language_code: getSarvamLanguage(this.language),
-            speaker: this.voice,
+            speaker: resolveSarvamSpeaker(this.voice, this.language),
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
