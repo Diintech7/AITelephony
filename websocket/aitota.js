@@ -323,6 +323,8 @@ class SarvamWebSocketTTSProcessor {
   async synthesizeAndStream(text) {
     if (!text || this.isInterrupted) return;
     const sarvamUrl = `wss://api.sarvam.ai/text-to-speech/ws?model=${this.modelVersion}`;
+    const ttsStart = Date.now();
+    console.log(`[TTS] Starting Sarvam TTS for text: "${text.substring(0, 60)}..."`);
     return new Promise((resolve, reject) => {
       this.sarvamWs = new WebSocket(sarvamUrl, {
         headers: {
@@ -331,12 +333,13 @@ class SarvamWebSocketTTSProcessor {
       });
       let resolved = false;
       this.sarvamWs.on('open', () => {
-        // Start ping interval to keep connection alive
+        // Start ping interval to keep connection alive (5 seconds)
         this.pingInterval = setInterval(() => {
           if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
             this.sarvamWs.send(JSON.stringify({ type: 'ping' }));
+            console.log('[SARVAM-WS] Sent ping');
           }
-        }, 20000); // 20 seconds
+        }, 5000); // 5 seconds
         // Send config
         const configMsg = {
           type: 'config',
@@ -365,13 +368,20 @@ class SarvamWebSocketTTSProcessor {
         try {
           const msg = JSON.parse(data);
           if (msg.type === 'audio' && msg.data?.audio) {
-            if (this.isInterrupted) return; // Do not send audio to SIP if interrupted
+            if (this.isInterrupted) {
+              console.log('[TTS] Audio streaming interrupted, skipping audio chunk');
+              return; // Do not send audio to SIP if interrupted
+            }
             this.audioChunkCount++;
             const audioBuffer = Buffer.from(msg.data.audio, 'base64');
             const CHUNK_SIZE = 640; // 40ms of 8000Hz 16-bit mono PCM
             let position = 0;
             let chunkIndex = 0;
             while (position < audioBuffer.length) {
+              if (this.isInterrupted) {
+                console.log('[TTS] Audio streaming interrupted mid-chunk, stopping immediately');
+                break;
+              }
               const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
               const mediaMessage = {
                 event: 'media',
@@ -387,6 +397,8 @@ class SarvamWebSocketTTSProcessor {
               chunkIndex++;
             }
           } else if (msg.type === 'end') {
+            const ttsEnd = Date.now();
+            console.log(`[TTS] Sarvam TTS streaming complete. Time taken: ${ttsEnd - ttsStart} ms`);
             if (!resolved) { resolved = true; resolve(); }
             if (this.pingInterval) clearInterval(this.pingInterval);
             this.sarvamWs.close();
@@ -415,6 +427,7 @@ class SarvamWebSocketTTSProcessor {
 
   interrupt() {
     this.isInterrupted = true;
+    console.log('[TTS] TTS interrupted, closing Sarvam WebSocket and stopping audio to SIP');
     if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.sarvamWs && (this.sarvamWs.readyState === WebSocket.OPEN || this.sarvamWs.readyState === WebSocket.CONNECTING)) {
       this.sarvamWs.close();
@@ -556,6 +569,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Create new TTS processor with detected language
         optimizedTTS = new SarvamWebSocketTTSProcessor(detectedLanguage, ws, streamSid, ws.sessionAgentConfig?.voiceSelection, 'bulbul:v2');
+        console.log('[TTS] New TTS session started for language:', detectedLanguage);
 
         // Step 3: Check for interruption function
         const checkInterruption = () => {
