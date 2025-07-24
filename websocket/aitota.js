@@ -141,8 +141,7 @@ const processWithOpenAIStreaming = async (userMessage, conversationHistory, dete
         
         te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
         
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்.",
-        mr: "तुम्ही एआय तोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीतून प्रवाहीपणे बोलता. नैसर्गिक, संवादात्मक भाषा वापरा जी उबदारपणा आणि सहानुभूतीने भरलेली आहे. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मौल्यवान वाटले पाहिजे, हे तुमचे ध्येय आहे."
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்."
       };
       
       return prompts[lang] || prompts.en;
@@ -282,122 +281,312 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Add this helper function near the top
-function resolveSarvamSpeaker(agentVoice, language, modelVersion = 'bulbul:v2') {
-  // Bulbul V2 speakers
-  const v2Speakers = ['anushka', 'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh'];
-  // Bulbul V1 speakers
-  const v1Speakers = ['meera', 'pavithra', 'maitreyi', 'amol', 'amartya', 'arvind', 'maya', 'arjun', 'diya', 'neel', 'misha', 'vian'];
-
-  if (modelVersion === 'bulbul:v2') {
-    if (v2Speakers.includes(agentVoice)) return agentVoice;
-    // Fallback mapping for v2
-    if (language === 'hi') return 'manisha';
-    if (language === 'en') return 'manisha';
-    // Pick any v2 speaker as fallback
-    return 'manisha';
-  } else {
-    if (v1Speakers.includes(agentVoice)) return agentVoice;
-    // Fallback mapping for v1
-    if (language === 'hi') return 'meera';
-    if (language === 'mr') return 'maitreyi';
-    if (language === 'en') return 'maya';
-    return 'meera';
-  }
-}
-
-// Replace OptimizedSarvamTTSProcessor with WebSocket-based SarvamTTSProcessor
-class SarvamWebSocketTTSProcessor {
-  constructor(language, ws, streamSid, voice, modelVersion = 'bulbul:v2') {
+// Enhanced TTS processor with interruption handling
+class OptimizedSarvamTTSProcessor {
+  constructor(language, ws, streamSid) {
     this.language = language;
     this.ws = ws;
     this.streamSid = streamSid;
-    this.voice = voice;
-    this.modelVersion = modelVersion;
-    this.sarvamWs = null;
+    this.queue = [];
+    this.isProcessing = false;
+    this.sarvamLanguage = getSarvamLanguage(language);
+    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra");
+    
+    // Interruption handling
     this.isInterrupted = false;
-    this.audioChunkCount = 0;
+    this.currentAudioStreaming = null;
+    
+    // Sentence-based processing settings
+    this.sentenceBuffer = "";
+    this.processingTimeout = 100;
+    this.sentenceTimer = null;
+    
+    // Audio streaming stats
+    this.totalChunks = 0;
+    this.totalAudioBytes = 0;
+  }
+
+  // Method to interrupt current processing
+  interrupt() {
+    console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`);
+    this.isInterrupted = true;
+    
+    // Clear queue and buffer
+    this.queue = [];
+    this.sentenceBuffer = "";
+    
+    // Clear any pending timeout
+    if (this.sentenceTimer) {
+      clearTimeout(this.sentenceTimer);
+      this.sentenceTimer = null;
+    }
+    
+    // Stop current audio streaming if active
+    if (this.currentAudioStreaming) {
+      this.currentAudioStreaming.interrupt = true;
+    }
+    
+    console.log(`🛑 [SARVAM-TTS] Processing interrupted and cleaned up`);
+  }
+
+  // Reset for new processing
+  reset(newLanguage) {
+    this.interrupt();
+    
+    // Update language settings
+    if (newLanguage) {
+      this.language = newLanguage;
+      this.sarvamLanguage = getSarvamLanguage(newLanguage);
+      console.log(`🔄 [SARVAM-TTS] Language updated to: ${this.sarvamLanguage}`);
+    }
+    
+    // Reset state
+    this.isInterrupted = false;
+    this.isProcessing = false;
+    this.totalChunks = 0;
+    this.totalAudioBytes = 0;
+  }
+
+  addPhrase(phrase, detectedLanguage) {
+    if (!phrase.trim() || this.isInterrupted) return;
+    
+    // Update language if different from current
+    if (detectedLanguage && detectedLanguage !== this.language) {
+      console.log(`🔄 [SARVAM-TTS] Language change detected: ${this.language} → ${detectedLanguage}`);
+      this.language = detectedLanguage;
+      this.sarvamLanguage = getSarvamLanguage(detectedLanguage);
+    }
+    
+    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
+    
+    if (this.hasCompleteSentence(this.sentenceBuffer)) {
+      this.processCompleteSentences();
+    } else {
+      this.scheduleProcessing();
+    }
+  }
+
+  hasCompleteSentence(text) {
+    return /[.!?।॥।]/.test(text);
+  }
+
+  extractCompleteSentences(text) {
+    const sentences = text.split(/([.!?।॥।])/).filter(s => s.trim());
+    
+    let completeSentences = "";
+    let remainingText = "";
+    
+    for (let i = 0; i < sentences.length; i += 2) {
+      const sentence = sentences[i];
+      const punctuation = sentences[i + 1];
+      
+      if (punctuation) {
+        completeSentences += sentence + punctuation + " ";
+      } else {
+        remainingText = sentence;
+      }
+    }
+    
+    return {
+      complete: completeSentences.trim(),
+      remaining: remainingText.trim()
+    };
+  }
+
+  processCompleteSentences() {
+    if (this.isInterrupted) return;
+    
+    if (this.sentenceTimer) {
+      clearTimeout(this.sentenceTimer);
+      this.sentenceTimer = null;
+    }
+
+    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
+    
+    if (complete && !this.isInterrupted) {
+      this.queue.push(complete);
+      this.sentenceBuffer = remaining;
+      this.processQueue();
+    }
+  }
+
+  scheduleProcessing() {
+    if (this.isInterrupted) return;
+    
+    if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
+    
+    this.sentenceTimer = setTimeout(() => {
+      if (this.sentenceBuffer.trim() && !this.isInterrupted) {
+        this.queue.push(this.sentenceBuffer.trim());
+        this.sentenceBuffer = "";
+        this.processQueue();
+      }
+    }, this.processingTimeout);
+  }
+
+  async processQueue() {
+    if (this.isProcessing || this.queue.length === 0 || this.isInterrupted) return;
+
+    this.isProcessing = true;
+    const textToProcess = this.queue.shift();
+
+    try {
+      if (!this.isInterrupted) {
+        await this.synthesizeAndStream(textToProcess);
+      }
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
+      }
+    } finally {
+      this.isProcessing = false;
+      
+      // Process next item in queue if not interrupted
+      if (this.queue.length > 0 && !this.isInterrupted) {
+        setTimeout(() => this.processQueue(), 10);
+      }
+    }
   }
 
   async synthesizeAndStream(text) {
-    if (!text || this.isInterrupted) return;
-    const sarvamUrl = `wss://api.sarvam.ai/text-to-speech/ws?model=${this.modelVersion}`;
-    return new Promise((resolve, reject) => {
-      this.sarvamWs = new WebSocket(sarvamUrl, {
+    if (this.isInterrupted) return;
+    
+    const timer = createTimer("SARVAM_TTS_SENTENCE");
+    
+    try {
+      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
+
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
         headers: {
-          'API-Subscription-Key': process.env.SARVAM_API_KEY,
+          "Content-Type": "application/json",
+          "API-Subscription-Key": API_KEYS.sarvam,
         },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: this.sarvamLanguage,
+          speaker: this.voice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
+          model: "bulbul:v1",
+        }),
       });
-      let resolved = false;
-      this.sarvamWs.on('open', () => {
-        // Send config
-        const configMsg = {
-          type: 'config',
-          data: {
-            target_language_code: getSarvamLanguage(this.language),
-            speaker: resolveSarvamSpeaker(this.voice, this.language, this.modelVersion),
-            pitch: 0,
-            pace: 1.0,
-            loudness: 1.0,
-            speech_sample_rate: 8000,
-            enable_preprocessing: false,
-            output_audio_codec: 'linear16',
-          },
-        };
-        console.log('[SARVAM-WS] Sending config:', JSON.stringify(configMsg));
-        this.sarvamWs.send(JSON.stringify(configMsg));
-        // Send text
-        const textMsg = {
-          type: 'text',
-          data: { text: String(text) },
-        };
-        console.log('[SARVAM-WS] Sending text:', JSON.stringify(textMsg));
-        this.sarvamWs.send(JSON.stringify(textMsg));
-      });
-      this.sarvamWs.on('message', (data) => {
-        try {
-          const msg = JSON.parse(data);
-          if (msg.type === 'audio' && msg.data?.audio) {
-            this.audioChunkCount++;
-            // Convert Sarvam base64 audio to Buffer, then back to base64 (ensures correct format)
-            const chunk = Buffer.from(msg.data.audio, 'base64');
-            const mediaMessage = {
-              event: 'media',
-              streamSid: this.streamSid,
-              media: {
-                payload: chunk.toString('base64'),
-              },
-            };
-            if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-              this.ws.send(JSON.stringify(mediaMessage));
-            }
-          } else if (msg.type === 'end') {
-            if (!resolved) { resolved = true; resolve(); }
-            this.sarvamWs.close();
-          } else if (msg.type === 'error') {
-            console.error('[SARVAM-WS] Error:', msg.data?.message);
-            if (!resolved) { resolved = true; reject(new Error(msg.data?.message)); }
-            this.sarvamWs.close();
-          }
-        } catch (err) {
-          console.error('[SARVAM-WS] Message parse error:', err);
+
+      if (!response.ok || this.isInterrupted) {
+        if (this.isInterrupted) return;
+        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
+      }
+
+      const responseData = await response.json();
+      const audioBase64 = responseData.audios?.[0];
+      
+      if (!audioBase64 || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          throw new Error("No audio data received from Sarvam API");
         }
-      });
-      this.sarvamWs.on('close', () => {
-        if (!resolved) { resolved = true; resolve(); }
-      });
-      this.sarvamWs.on('error', (err) => {
-        console.error('[SARVAM-WS] WebSocket error:', err);
-        if (!resolved) { resolved = true; reject(err); }
-      });
-    });
+        return;
+      }
+
+      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
+      
+      // Stream audio if not interrupted
+      if (!this.isInterrupted) {
+        await this.streamAudioOptimizedForSIP(audioBase64);
+        
+        const audioBuffer = Buffer.from(audioBase64, "base64");
+        this.totalAudioBytes += audioBuffer.length;
+        this.totalChunks++;
+      }
+      
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
+        throw error;
+      }
+    }
   }
 
-  interrupt() {
-    this.isInterrupted = true;
-    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
-      this.sarvamWs.close();
+  async streamAudioOptimizedForSIP(audioBase64) {
+    if (this.isInterrupted) return;
+    
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const streamingSession = { interrupt: false };
+    this.currentAudioStreaming = streamingSession;
+    
+    // SIP audio specifications
+    const SAMPLE_RATE = 8000;
+    const BYTES_PER_SAMPLE = 2;
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
+    
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
+    
+    let position = 0;
+    let chunkIndex = 0;
+    
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = audioBuffer.length - position;
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining);
+      const chunk = audioBuffer.slice(position, position + chunkSize);
+      
+      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`);
+      
+      const mediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: {
+          payload: chunk.toString("base64")
+        }
+      };
+
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        this.ws.send(JSON.stringify(mediaMessage));
+      }
+      
+      // Delay between chunks
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        const delayMs = Math.max(chunkDurationMs - 2, 10);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+      
+      position += chunkSize;
+      chunkIndex++;
     }
+    
+    if (this.isInterrupted || streamingSession.interrupt) {
+      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
+    } else {
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
+    }
+    
+    this.currentAudioStreaming = null;
+  }
+
+  complete() {
+    if (this.isInterrupted) return;
+    
+    if (this.sentenceBuffer.trim()) {
+      this.queue.push(this.sentenceBuffer.trim());
+      this.sentenceBuffer = "";
+    }
+    
+    if (this.queue.length > 0) {
+      this.processQueue();
+    }
+    
+    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
+  }
+
+  getStats() {
+    return {
+      totalChunks: this.totalChunks,
+      totalAudioBytes: this.totalAudioBytes,
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
+    };
   }
 }
 
@@ -486,7 +675,7 @@ const setupUnifiedVoiceServer = (wss) => {
         
         if (transcript?.trim()) {
           // Interrupt current TTS if new speech detected
-          if (optimizedTTS && (isProcessing || optimizedTTS.isInterrupted)) {
+          if (optimizedTTS && (isProcessing || optimizedTTS.isProcessing)) {
             console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`);
             optimizedTTS.interrupt();
             isProcessing = false;
@@ -534,7 +723,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         // Create new TTS processor with detected language
-        optimizedTTS = new SarvamWebSocketTTSProcessor(detectedLanguage, ws, streamSid, ws.sessionAgentConfig?.voiceSelection, 'bulbul:v2');
+        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid);
 
         // Step 3: Check for interruption function
         const checkInterruption = () => {
@@ -550,14 +739,17 @@ const setupUnifiedVoiceServer = (wss) => {
             // Handle phrase chunks - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
               console.log(`📤 [PHRASE] "${phrase}" (${lang})`);
-              optimizedTTS.synthesizeAndStream(phrase); // Stream phrase directly
+              optimizedTTS.addPhrase(phrase, lang);
             }
           },
           (fullResponse) => {
             // Handle completion - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
               console.log(`✅ [COMPLETE] "${fullResponse}"`);
-              optimizedTTS.synthesizeAndStream(fullResponse); // Stream full response
+              optimizedTTS.complete();
+              
+              const stats = optimizedTTS.getStats();
+              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
               
               // Update conversation history
               conversationHistory.push(
@@ -588,7 +780,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Optimized initial greeting with language detection
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new SarvamWebSocketTTSProcessor(currentLanguage, ws, streamSid, ws.sessionAgentConfig.voiceSelection, 'bulbul:v2');
+      const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
       await tts.synthesizeAndStream(ws.sessionAgentConfig.firstMessage);
     };
 
@@ -638,7 +830,7 @@ const setupUnifiedVoiceServer = (wss) => {
             // Use agent's firstMessage for greeting
             const greeting = agentConfig.firstMessage;
             console.log(greeting)
-            const tts = new SarvamWebSocketTTSProcessor(currentLanguage, ws, streamSid, agentConfig.voiceSelection, 'bulbul:v2');
+            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
             await tts.synthesizeAndStream(greeting);
             callStartTime = new Date();
             // If mobile is available in event, set sessionMobile = ...
@@ -670,23 +862,17 @@ const setupUnifiedVoiceServer = (wss) => {
             } else if (/not connected|disconnected|no answer|busy|unreachable/i.test(sessionTranscript)) {
               leadStatus = 'not_connected';
             }
-            // Prepare CallLog object
-            const callLogObj = {
-              clientId: ws.sessionAgentConfig?.clientId,
-              mobile: sessionMobile,
-              time: callEndTime,
-              transcript: sessionTranscript,
-              audioUrl: null, // If you have audio URL, set here
-              duration: callDuration,
-              leadStatus,
-            };
-            console.log('[CALLLOG] Attempting to save:', callLogObj);
-            if (!callLogObj.clientId) {
-              console.error('[CALLLOG] Missing clientId, not saving log.');
-              break;
-            }
+            // Save CallLog
             try {
-              await CallLog.create(callLogObj);
+              await CallLog.create({
+                clientId: ws.sessionAgentConfig.clientId,
+                mobile: sessionMobile,
+                time: callEndTime,
+                transcript: sessionTranscript,
+                audioUrl: null, // If you have audio URL, set here
+                duration: callDuration,
+                leadStatus,
+              });
               console.log(`[CALLLOG] Saved for accountSid ${ws.sessionAgentConfig.accountSid}`);
             } catch (err) {
               console.error(`[CALLLOG] Error saving log:`, err);
