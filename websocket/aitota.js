@@ -604,7 +604,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let userUtteranceBuffer = "";
     let lastProcessedText = "";
     let optimizedTTS = null;
-    let currentLanguage = DEFAULT_CONFIG.language;
+    let currentLanguage = ws.sessionAgentConfig.language;
     let processingRequestId = 0; // To track processing requests
 
     // Deepgram WebSocket connection
@@ -774,7 +774,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
       const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid);
-      await tts.synthesizeAndStream(DEFAULT_CONFIG.firstMessage);
+      await tts.synthesizeAndStream(ws.sessionAgentConfig.firstMessage);
     };
 
     // WebSocket message handling
@@ -867,7 +867,7 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramReady = false;
       deepgramAudioQueue = [];
       optimizedTTS = null;
-      currentLanguage = DEFAULT_CONFIG.language;
+      currentLanguage = ws.sessionAgentConfig.language;
       processingRequestId = 0;
     });
 
