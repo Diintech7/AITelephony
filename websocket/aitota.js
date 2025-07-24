@@ -396,13 +396,14 @@ class SarvamWebSocketTTSProcessor {
       this.sarvamWs.on('error', (err) => {
         console.error('[SARVAM-WS] WebSocket error:', err);
         if (!resolved) { resolved = true; reject(err); }
+        // Do not throw, just log
       });
     });
   }
 
   interrupt() {
     this.isInterrupted = true;
-    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
+    if (this.sarvamWs && (this.sarvamWs.readyState === WebSocket.OPEN || this.sarvamWs.readyState === WebSocket.CONNECTING)) {
       this.sarvamWs.close();
     }
   }
@@ -493,7 +494,7 @@ const setupUnifiedVoiceServer = (wss) => {
         
         if (transcript?.trim()) {
           // Interrupt current TTS if new speech detected
-          if (optimizedTTS && (isProcessing || optimizedTTS.isInterrupted)) {
+          if (optimizedTTS && (isProcessing || optimizedTTS.isInterrupted === false)) {
             console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`);
             optimizedTTS.interrupt();
             isProcessing = false;
