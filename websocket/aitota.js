@@ -802,6 +802,9 @@ const setupUnifiedVoiceServer = (wss) => {
                   ws.close();
                   return;
                 }
+                else{
+                  console.log("Account sid matched")
+                }
                 
               } catch (err) {
                 ws.send(JSON.stringify({ event: 'error', message: `DB error for accountSid: ${accountSid}` }));
