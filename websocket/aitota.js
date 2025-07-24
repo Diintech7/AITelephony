@@ -317,6 +317,7 @@ class SarvamWebSocketTTSProcessor {
     this.sarvamWs = null;
     this.isInterrupted = false;
     this.audioChunkCount = 0;
+    this.pingInterval = null;
   }
 
   async synthesizeAndStream(text) {
@@ -330,6 +331,12 @@ class SarvamWebSocketTTSProcessor {
       });
       let resolved = false;
       this.sarvamWs.on('open', () => {
+        // Start ping interval to keep connection alive
+        this.pingInterval = setInterval(() => {
+          if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
+            this.sarvamWs.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 20000); // 20 seconds
         // Send config
         const configMsg = {
           type: 'config',
@@ -358,6 +365,7 @@ class SarvamWebSocketTTSProcessor {
         try {
           const msg = JSON.parse(data);
           if (msg.type === 'audio' && msg.data?.audio) {
+            if (this.isInterrupted) return; // Do not send audio to SIP if interrupted
             this.audioChunkCount++;
             const audioBuffer = Buffer.from(msg.data.audio, 'base64');
             const CHUNK_SIZE = 640; // 40ms of 8000Hz 16-bit mono PCM
@@ -380,10 +388,12 @@ class SarvamWebSocketTTSProcessor {
             }
           } else if (msg.type === 'end') {
             if (!resolved) { resolved = true; resolve(); }
+            if (this.pingInterval) clearInterval(this.pingInterval);
             this.sarvamWs.close();
           } else if (msg.type === 'error') {
             console.error('[SARVAM-WS] Error:', msg.data?.message);
             if (!resolved) { resolved = true; reject(new Error(msg.data?.message)); }
+            if (this.pingInterval) clearInterval(this.pingInterval);
             this.sarvamWs.close();
           }
         } catch (err) {
@@ -391,10 +401,12 @@ class SarvamWebSocketTTSProcessor {
         }
       });
       this.sarvamWs.on('close', () => {
+        if (this.pingInterval) clearInterval(this.pingInterval);
         if (!resolved) { resolved = true; resolve(); }
       });
       this.sarvamWs.on('error', (err) => {
         console.error('[SARVAM-WS] WebSocket error:', err);
+        if (this.pingInterval) clearInterval(this.pingInterval);
         if (!resolved) { resolved = true; reject(err); }
         // Do not throw, just log
       });
@@ -403,6 +415,7 @@ class SarvamWebSocketTTSProcessor {
 
   interrupt() {
     this.isInterrupted = true;
+    if (this.pingInterval) clearInterval(this.pingInterval);
     if (this.sarvamWs && (this.sarvamWs.readyState === WebSocket.OPEN || this.sarvamWs.readyState === WebSocket.CONNECTING)) {
       this.sarvamWs.close();
     }
