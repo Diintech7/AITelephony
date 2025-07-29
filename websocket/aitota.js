@@ -19,49 +19,6 @@ if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
 
 const fetch = globalThis.fetch || require("node-fetch");
 
-// Audio conversion utility: Convert slinear16 to mulaw
-const convertSlinear16ToMulaw = (slinear16Buffer) => {
-  const MULAW_BIAS = 0x84;
-  const MULAW_MAX = 0x1FFF;
-  const MULAW_CLIP = 32635;
-  
-  const mulawBuffer = Buffer.alloc(slinear16Buffer.length / 2);
-  
-  for (let i = 0; i < slinear16Buffer.length; i += 2) {
-    // Read 16-bit signed sample (little-endian)
-    let sample = slinear16Buffer.readInt16LE(i);
-    
-    // Get sign and make sample positive
-    const sign = (sample >> 8) & 0x80;
-    if (sign) {
-      sample = -sample;
-    }
-    
-    // Clip sample
-    if (sample > MULAW_CLIP) {
-      sample = MULAW_CLIP;
-    }
-    
-    // Convert to μ-law
-    sample += MULAW_BIAS;
-    
-    let exponent = 7;
-    for (let exp = 0; exp < 8; exp++) {
-      if (sample <= (0x1F << exp)) {
-        exponent = exp;
-        break;
-      }
-    }
-    
-    const mantissa = (sample >> exponent) & 0x0F;
-    const mulaw = ~(sign | (exponent << 4) | mantissa);
-    
-    mulawBuffer[i / 2] = mulaw & 0xFF;
-  }
-  
-  return mulawBuffer;
-};
-
 // Performance timing helper
 const createTimer = (label) => {
   const start = Date.now();
@@ -181,83 +138,6 @@ Return only the language code, nothing else.`
   }
 };
 
-// Lead status detection function
-const detectLeadStatus = async (fullTranscript) => {
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a lead qualification expert. Analyze the conversation transcript and determine the lead status based on customer interest and responses. 
-
-Return ONLY one of these exact status codes:
-
-VERY INTERESTED:
-- vvi (very very interested - customer is extremely eager, asking for immediate enrollment/purchase)
-- maybe (customer shows interest but has some hesitation or needs time to think)
-- enrolled (customer has confirmed enrollment/purchase/sign-up)
-
-MEDIUM:
-- medium (customer shows neutral interest, asking questions but not committed either way)
-
-NOT INTERESTED:
-- junk_leads (irrelevant calls, spam, or completely unrelated conversations)
-- not_required (customer clearly states they don't need the product/service)
-- enroll_other (customer mentions they're already enrolled with a competitor)
-- declined (customer politely declines the offer)
-- not_eligible (customer doesn't meet eligibility criteria)
-- wrong_number (wrong number, no valid conversation)
-
-NOT CONNECTED:
-- not_connected (call didn't connect properly or customer didn't respond)
-
-Analyze the customer's tone, responses, questions asked, and overall engagement level. Return only the status code, nothing else.`
-          },
-          {
-            role: "user",
-            content: `Analyze this conversation transcript and determine lead status:\n\n${fullTranscript}`
-          }
-        ],
-        max_tokens: 20,
-        temperature: 0.1,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Lead status detection failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const detectedStatus = data.choices[0]?.message?.content?.trim().toLowerCase();
-    
-    // Validate detected status
-    const validStatuses = [
-      'vvi', 'maybe', 'enrolled', 'medium', 
-      'junk_leads', 'not_required', 'enroll_other', 
-      'declined', 'not_eligible', 'wrong_number', 'not_connected'
-    ];
-    
-    if (validStatuses.includes(detectedStatus)) {
-      console.log(`📊 [LEAD-DETECT] Status: "${detectedStatus}" from transcript analysis`);
-      return detectedStatus;
-    }
-    
-    console.log(`⚠️ [LEAD-DETECT] Invalid status "${detectedStatus}", defaulting to "medium"`);
-    return "medium"; // Default fallback
-    
-  } catch (error) {
-    console.error(`❌ [LEAD-DETECT] Error: ${error.message}`);
-    return "medium"; // Default fallback
-  }
-};
-
 // Call logging utility class
 class CallLogger {
   constructor(clientId, mobile = null) {
@@ -309,22 +189,11 @@ class CallLogger {
     }).join('\n');
   }
 
-  // Save call log to database with intelligent lead status detection
-  async saveToDatabase(leadStatus = null) {
+  // Save call log to database
+  async saveToDatabase(leadStatus = 'medium') {
     try {
       const callEndTime = new Date();
       this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000); // Duration in seconds
-
-      // If no leadStatus provided, detect it from transcript
-      let finalLeadStatus = leadStatus;
-      if (!leadStatus || leadStatus === 'medium') {
-        const fullTranscript = this.generateFullTranscript();
-        if (fullTranscript.trim()) {
-          finalLeadStatus = await detectLeadStatus(fullTranscript);
-        } else {
-          finalLeadStatus = 'not_connected'; // No conversation happened
-        }
-      }
 
       const callLogData = {
         clientId: this.clientId,
@@ -332,7 +201,7 @@ class CallLogger {
         time: this.callStartTime,
         transcript: this.generateFullTranscript(),
         duration: this.totalDuration,
-        leadStatus: finalLeadStatus,
+        leadStatus: leadStatus,
         // Additional metadata
         metadata: {
           userTranscriptCount: this.transcripts.length,
@@ -345,7 +214,7 @@ class CallLogger {
       const callLog = new CallLog(callLogData);
       const savedLog = await callLog.save();
       
-      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s, Lead Status: ${finalLeadStatus}`);
+      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s`);
       console.log(`📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`);
       
       return savedLog;
@@ -531,7 +400,7 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with FIXED mulaw audio conversion for telephony
+// Enhanced TTS processor with call logging
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language;
@@ -720,8 +589,8 @@ class OptimizedSarvamTTSProcessor {
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000, // Ensure 8kHz for telephony
-          enable_preprocessing: true, // Enable preprocessing for better quality
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
           model: "bulbul:v1",
         }),
       });
@@ -745,7 +614,7 @@ class OptimizedSarvamTTSProcessor {
       
       // Stream audio if not interrupted
       if (!this.isInterrupted) {
-        await this.streamAudioOptimizedForTelephony(audioBase64);
+        await this.streamAudioOptimizedForSIP(audioBase64);
         
         const audioBuffer = Buffer.from(audioBase64, "base64");
         this.totalAudioBytes += audioBuffer.length;
@@ -760,34 +629,30 @@ class OptimizedSarvamTTSProcessor {
     }
   }
 
-  async streamAudioOptimizedForTelephony(audioBase64) {
+  async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return;
     
-    const slinear16Buffer = Buffer.from(audioBase64, "base64");
+    const audioBuffer = Buffer.from(audioBase64, "base64");
     const streamingSession = { interrupt: false };
     this.currentAudioStreaming = streamingSession;
     
-    // Convert slinear16 to mulaw for telephony compatibility
-    console.log(`🔄 [AUDIO-CONVERT] Converting ${slinear16Buffer.length} bytes slinear16 to mulaw`);
-    const mulawBuffer = convertSlinear16ToMulaw(slinear16Buffer);
-    console.log(`✅ [AUDIO-CONVERT] Converted to ${mulawBuffer.length} bytes mulaw`);
-    
-    // Telephony audio specifications for mulaw format
+    // SIP audio specifications
     const SAMPLE_RATE = 8000;
-    const CHUNK_SIZE = 160; // 160 bytes for mulaw = 160 samples = 20ms at 8kHz
-    const CHUNK_DURATION_MS = 20; // Fixed 20ms for mulaw chunks
+    const BYTES_PER_SAMPLE = 2;
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
     
-    console.log(`📦 [TELEPHONY-STREAM] Streaming ${mulawBuffer.length} bytes (mulaw) in ${CHUNK_SIZE}-byte chunks`);
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
     
     let position = 0;
     let chunkIndex = 0;
     
-    while (position < mulawBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = mulawBuffer.length - position;
-      const currentChunkSize = Math.min(CHUNK_SIZE, remaining);
-      const chunk = mulawBuffer.slice(position, position + currentChunkSize);
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = audioBuffer.length - position;
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining);
+      const chunk = audioBuffer.slice(position, position + chunkSize);
       
-      console.log(`📤 [TELEPHONY-STREAM] Chunk ${chunkIndex + 1}: ${chunk.length} bytes mulaw (${CHUNK_DURATION_MS}ms)`);
+      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`);
       
       const mediaMessage = {
         event: "media",
@@ -801,19 +666,21 @@ class OptimizedSarvamTTSProcessor {
         this.ws.send(JSON.stringify(mediaMessage));
       }
       
-      // Proper timing for 20ms chunks
-      if (position + currentChunkSize < mulawBuffer.length && !this.isInterrupted) {
-        await new Promise(resolve => setTimeout(resolve, CHUNK_DURATION_MS - 2)); // Small buffer for processing
+      // Delay between chunks
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        const delayMs = Math.max(chunkDurationMs - 2, 10);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
       
-      position += currentChunkSize;
+      position += chunkSize;
       chunkIndex++;
     }
     
     if (this.isInterrupted || streamingSession.interrupt) {
-      console.log(`🛑 [TELEPHONY-STREAM] Audio streaming interrupted at chunk ${chunkIndex}`);
+      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
     } else {
-      console.log(`✅ [TELEPHONY-STREAM] Completed streaming ${chunkIndex} mulaw chunks`);
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
     }
     
     this.currentAudioStreaming = null;
@@ -843,9 +710,9 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// Main WebSocket server setup with enhanced call logging and lead detection
+// Main WebSocket server setup with enhanced call logging
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with intelligent lead detection and mulaw audio conversion");
+  console.log("🚀 [ENHANCED] Voice Server started with call logging and Marathi support");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
@@ -1051,7 +918,7 @@ const setupUnifiedVoiceServer = (wss) => {
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid;
             const accountSid = data.start?.accountSid;
-            const mobile = data.start?.from || data.start?.customParameters?.RemoteParty || null; // Extract mobile number
+            const mobile = data.start?.from || null; // Extract mobile number from call data
             
             console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}, Mobile: ${mobile}`);
 
@@ -1115,11 +982,11 @@ const setupUnifiedVoiceServer = (wss) => {
           case "stop":
             console.log(`📞 [ENHANCED] Stream stopped`);
             
-            // Save call log to database with intelligent lead detection
+            // Save call log to database before closing
             if (callLogger) {
               try {
-                const savedLog = await callLogger.saveToDatabase(); // Will auto-detect lead status
-                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}, Lead Status: ${savedLog.leadStatus}`);
+                const savedLog = await callLogger.saveToDatabase('medium'); // Default lead status
+                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
                 
                 // Print call statistics
                 const stats = callLogger.getStats();
@@ -1134,16 +1001,6 @@ const setupUnifiedVoiceServer = (wss) => {
             }
             break;
 
-          case "dtmf":
-            console.log(`📞 [DTMF] Key pressed: ${data.dtmf?.digit}`);
-            // Handle DTMF input if needed
-            break;
-
-          case "vad":
-            console.log(`🎤 [VAD] Voice activity: ${data.vad?.value}`);
-            // Handle voice activity detection if needed
-            break;
-
           default:
             console.log(`❓ [ENHANCED] Unknown event: ${data.event}`);
         }
@@ -1152,15 +1009,15 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     });
 
-    // Enhanced connection cleanup with intelligent lead status detection
+    // Enhanced connection cleanup with call logging
     ws.on("close", async () => {
       console.log("🔗 [ENHANCED] Connection closed");
       
-      // Save call log before cleanup with intelligent detection
+      // Save call log before cleanup if not already saved
       if (callLogger) {
         try {
           const savedLog = await callLogger.saveToDatabase('not_connected'); // Status for unexpected disconnection
-          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}, Lead Status: ${savedLog.leadStatus}`);
+          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}`);
         } catch (error) {
           console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`);
         }
