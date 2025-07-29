@@ -19,6 +19,49 @@ if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
 
 const fetch = globalThis.fetch || require("node-fetch");
 
+// Audio conversion utility: Convert slinear16 to mulaw
+const convertSlinear16ToMulaw = (slinear16Buffer) => {
+  const MULAW_BIAS = 0x84;
+  const MULAW_MAX = 0x1FFF;
+  const MULAW_CLIP = 32635;
+  
+  const mulawBuffer = Buffer.alloc(slinear16Buffer.length / 2);
+  
+  for (let i = 0; i < slinear16Buffer.length; i += 2) {
+    // Read 16-bit signed sample (little-endian)
+    let sample = slinear16Buffer.readInt16LE(i);
+    
+    // Get sign and make sample positive
+    const sign = (sample >> 8) & 0x80;
+    if (sign) {
+      sample = -sample;
+    }
+    
+    // Clip sample
+    if (sample > MULAW_CLIP) {
+      sample = MULAW_CLIP;
+    }
+    
+    // Convert to μ-law
+    sample += MULAW_BIAS;
+    
+    let exponent = 7;
+    for (let exp = 0; exp < 8; exp++) {
+      if (sample <= (0x1F << exp)) {
+        exponent = exp;
+        break;
+      }
+    }
+    
+    const mantissa = (sample >> exponent) & 0x0F;
+    const mulaw = ~(sign | (exponent << 4) | mantissa);
+    
+    mulawBuffer[i / 2] = mulaw & 0xFF;
+  }
+  
+  return mulawBuffer;
+};
+
 // Performance timing helper
 const createTimer = (label) => {
   const start = Date.now();
@@ -488,7 +531,7 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with FIXED audio chunk size (160 bytes)
+// Enhanced TTS processor with FIXED mulaw audio conversion for telephony
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language;
@@ -677,8 +720,8 @@ class OptimizedSarvamTTSProcessor {
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
+          speech_sample_rate: 8000, // Ensure 8kHz for telephony
+          enable_preprocessing: true, // Enable preprocessing for better quality
           model: "bulbul:v1",
         }),
       });
@@ -702,7 +745,7 @@ class OptimizedSarvamTTSProcessor {
       
       // Stream audio if not interrupted
       if (!this.isInterrupted) {
-        await this.streamAudioOptimizedForSIP(audioBase64);
+        await this.streamAudioOptimizedForTelephony(audioBase64);
         
         const audioBuffer = Buffer.from(audioBase64, "base64");
         this.totalAudioBytes += audioBuffer.length;
@@ -717,30 +760,34 @@ class OptimizedSarvamTTSProcessor {
     }
   }
 
-  async streamAudioOptimizedForSIP(audioBase64) {
+  async streamAudioOptimizedForTelephony(audioBase64) {
     if (this.isInterrupted) return;
     
-    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const slinear16Buffer = Buffer.from(audioBase64, "base64");
     const streamingSession = { interrupt: false };
     this.currentAudioStreaming = streamingSession;
     
-    // FIXED: SIP audio specifications for exactly 160 bytes per chunk
-    const SAMPLE_RATE = 8000;
-    const BYTES_PER_SAMPLE = 2;
-    const CHUNK_SIZE = 160; // FIXED: Exactly 160 bytes per chunk as requested
-    const CHUNK_DURATION_MS = (CHUNK_SIZE / (SAMPLE_RATE * BYTES_PER_SAMPLE)) * 1000; // ~10ms per chunk
+    // Convert slinear16 to mulaw for telephony compatibility
+    console.log(`🔄 [AUDIO-CONVERT] Converting ${slinear16Buffer.length} bytes slinear16 to mulaw`);
+    const mulawBuffer = convertSlinear16ToMulaw(slinear16Buffer);
+    console.log(`✅ [AUDIO-CONVERT] Converted to ${mulawBuffer.length} bytes mulaw`);
     
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ${CHUNK_SIZE}-byte chunks`);
+    // Telephony audio specifications for mulaw format
+    const SAMPLE_RATE = 8000;
+    const CHUNK_SIZE = 160; // 160 bytes for mulaw = 160 samples = 20ms at 8kHz
+    const CHUNK_DURATION_MS = 20; // Fixed 20ms for mulaw chunks
+    
+    console.log(`📦 [TELEPHONY-STREAM] Streaming ${mulawBuffer.length} bytes (mulaw) in ${CHUNK_SIZE}-byte chunks`);
     
     let position = 0;
     let chunkIndex = 0;
     
-    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = audioBuffer.length - position;
+    while (position < mulawBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = mulawBuffer.length - position;
       const currentChunkSize = Math.min(CHUNK_SIZE, remaining);
-      const chunk = audioBuffer.slice(position, position + currentChunkSize);
+      const chunk = mulawBuffer.slice(position, position + currentChunkSize);
       
-      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${CHUNK_DURATION_MS.toFixed(1)}ms)`);
+      console.log(`📤 [TELEPHONY-STREAM] Chunk ${chunkIndex + 1}: ${chunk.length} bytes mulaw (${CHUNK_DURATION_MS}ms)`);
       
       const mediaMessage = {
         event: "media",
@@ -754,10 +801,9 @@ class OptimizedSarvamTTSProcessor {
         this.ws.send(JSON.stringify(mediaMessage));
       }
       
-      // Delay between chunks based on audio duration
-      if (position + currentChunkSize < audioBuffer.length && !this.isInterrupted) {
-        const delayMs = Math.max(CHUNK_DURATION_MS - 2, 8); // Small buffer for processing time
-        await new Promise(resolve => setTimeout(resolve, delayMs));
+      // Proper timing for 20ms chunks
+      if (position + currentChunkSize < mulawBuffer.length && !this.isInterrupted) {
+        await new Promise(resolve => setTimeout(resolve, CHUNK_DURATION_MS - 2)); // Small buffer for processing
       }
       
       position += currentChunkSize;
@@ -765,9 +811,9 @@ class OptimizedSarvamTTSProcessor {
     }
     
     if (this.isInterrupted || streamingSession.interrupt) {
-      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
+      console.log(`🛑 [TELEPHONY-STREAM] Audio streaming interrupted at chunk ${chunkIndex}`);
     } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks of ${CHUNK_SIZE} bytes each`);
+      console.log(`✅ [TELEPHONY-STREAM] Completed streaming ${chunkIndex} mulaw chunks`);
     }
     
     this.currentAudioStreaming = null;
@@ -799,7 +845,7 @@ class OptimizedSarvamTTSProcessor {
 
 // Main WebSocket server setup with enhanced call logging and lead detection
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with intelligent lead detection and 160-byte audio chunks");
+  console.log("🚀 [ENHANCED] Voice Server started with intelligent lead detection and mulaw audio conversion");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
@@ -1005,7 +1051,7 @@ const setupUnifiedVoiceServer = (wss) => {
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid;
             const accountSid = data.start?.accountSid;
-            const mobile = data.start?.from || null; // Extract mobile number from call data
+            const mobile = data.start?.from || data.start?.customParameters?.RemoteParty || null; // Extract mobile number
             
             console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}, Mobile: ${mobile}`);
 
@@ -1086,6 +1132,16 @@ const setupUnifiedVoiceServer = (wss) => {
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
+            break;
+
+          case "dtmf":
+            console.log(`📞 [DTMF] Key pressed: ${data.dtmf?.digit}`);
+            // Handle DTMF input if needed
+            break;
+
+          case "vad":
+            console.log(`🎤 [VAD] Voice activity: ${data.vad?.value}`);
+            // Handle voice activity detection if needed
             break;
 
           default:
