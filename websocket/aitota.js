@@ -138,83 +138,6 @@ Return only the language code, nothing else.`
   }
 };
 
-// Lead status detection function
-const detectLeadStatus = async (fullTranscript) => {
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a lead qualification expert. Analyze the conversation transcript and determine the lead status based on customer interest and responses. 
-
-Return ONLY one of these exact status codes:
-
-VERY INTERESTED:
-- vvi (very very interested - customer is extremely eager, asking for immediate enrollment/purchase)
-- maybe (customer shows interest but has some hesitation or needs time to think)
-- enrolled (customer has confirmed enrollment/purchase/sign-up)
-
-MEDIUM:
-- medium (customer shows neutral interest, asking questions but not committed either way)
-
-NOT INTERESTED:
-- junk_leads (irrelevant calls, spam, or completely unrelated conversations)
-- not_required (customer clearly states they don't need the product/service)
-- enroll_other (customer mentions they're already enrolled with a competitor)
-- declined (customer politely declines the offer)
-- not_eligible (customer doesn't meet eligibility criteria)
-- wrong_number (wrong number, no valid conversation)
-
-NOT CONNECTED:
-- not_connected (call didn't connect properly or customer didn't respond)
-
-Analyze the customer's tone, responses, questions asked, and overall engagement level. Return only the status code, nothing else.`
-          },
-          {
-            role: "user",
-            content: `Analyze this conversation transcript and determine lead status:\n\n${fullTranscript}`
-          }
-        ],
-        max_tokens: 20,
-        temperature: 0.1,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Lead status detection failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    const detectedStatus = data.choices[0]?.message?.content?.trim().toLowerCase();
-    
-    // Validate detected status
-    const validStatuses = [
-      'vvi', 'maybe', 'enrolled', 'medium', 
-      'junk_leads', 'not_required', 'enroll_other', 
-      'declined', 'not_eligible', 'wrong_number', 'not_connected'
-    ];
-    
-    if (validStatuses.includes(detectedStatus)) {
-      console.log(`📊 [LEAD-DETECT] Status: "${detectedStatus}" from transcript analysis`);
-      return detectedStatus;
-    }
-    
-    console.log(`⚠️ [LEAD-DETECT] Invalid status "${detectedStatus}", defaulting to "medium"`);
-    return "medium"; // Default fallback
-    
-  } catch (error) {
-    console.error(`❌ [LEAD-DETECT] Error: ${error.message}`);
-    return "medium"; // Default fallback
-  }
-};
-
 // Call logging utility class
 class CallLogger {
   constructor(clientId, mobile = null) {
@@ -266,22 +189,11 @@ class CallLogger {
     }).join('\n');
   }
 
-  // Save call log to database with intelligent lead status detection
-  async saveToDatabase(leadStatus = null) {
+  // Save call log to database
+  async saveToDatabase(leadStatus = 'medium') {
     try {
       const callEndTime = new Date();
       this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000); // Duration in seconds
-
-      // If no leadStatus provided, detect it from transcript
-      let finalLeadStatus = leadStatus;
-      if (!leadStatus || leadStatus === 'medium') {
-        const fullTranscript = this.generateFullTranscript();
-        if (fullTranscript.trim()) {
-          finalLeadStatus = await detectLeadStatus(fullTranscript);
-        } else {
-          finalLeadStatus = 'not_connected'; // No conversation happened
-        }
-      }
 
       const callLogData = {
         clientId: this.clientId,
@@ -289,7 +201,7 @@ class CallLogger {
         time: this.callStartTime,
         transcript: this.generateFullTranscript(),
         duration: this.totalDuration,
-        leadStatus: finalLeadStatus,
+        leadStatus: leadStatus,
         // Additional metadata
         metadata: {
           userTranscriptCount: this.transcripts.length,
@@ -302,7 +214,7 @@ class CallLogger {
       const callLog = new CallLog(callLogData);
       const savedLog = await callLog.save();
       
-      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s, Lead Status: ${finalLeadStatus}`);
+      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s`);
       console.log(`📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`);
       
       return savedLog;
@@ -488,7 +400,7 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with FIXED audio chunk size (160 bytes)
+// Enhanced TTS processor with call logging
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language;
@@ -717,70 +629,62 @@ class OptimizedSarvamTTSProcessor {
     }
   }
 
-  // Fixed streamAudioOptimizedForSIP method - sends exactly 160 bytes per chunk
-async streamAudioOptimizedForSIP(audioBase64) {
-  if (this.isInterrupted) return;
-  
-  const audioBuffer = Buffer.from(audioBase64, "base64");
-  const streamingSession = { interrupt: false };
-  this.currentAudioStreaming = streamingSession;
-  
-  // FIXED: SIP audio specifications for exactly 160 bytes per chunk
-  const SAMPLE_RATE = 8000;
-  const BYTES_PER_SAMPLE = 2;
-  const CHUNK_SIZE = 160; // EXACTLY 160 bytes per chunk
-  const CHUNK_DURATION_MS = (CHUNK_SIZE / (SAMPLE_RATE * BYTES_PER_SAMPLE)) * 1000; // ~10ms per chunk
-  
-  console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ${CHUNK_SIZE}-byte chunks`);
-  
-  let position = 0;
-  let chunkIndex = 0;
-  
-  while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-    // Calculate remaining bytes
-    const remaining = audioBuffer.length - position;
+  async streamAudioOptimizedForSIP(audioBase64) {
+    if (this.isInterrupted) return;
     
-    // CRITICAL FIX: Use exactly CHUNK_SIZE (160) or remaining bytes if less
-    const currentChunkSize = Math.min(CHUNK_SIZE, remaining);
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const streamingSession = { interrupt: false };
+    this.currentAudioStreaming = streamingSession;
     
-    // Extract exactly currentChunkSize bytes from the buffer
-    const chunk = audioBuffer.subarray(position, position + currentChunkSize);
+    // SIP audio specifications
+    const SAMPLE_RATE = 8000;
+    const BYTES_PER_SAMPLE = 2;
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
     
-    console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${CHUNK_DURATION_MS.toFixed(1)}ms)`);
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
     
-    // Create media message with the chunk
-    const mediaMessage = {
-      event: "media",
-      streamSid: this.streamSid,
-      media: {
-        payload: chunk.toString("base64")
-      }
-    };
+    let position = 0;
+    let chunkIndex = 0;
+    
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = audioBuffer.length - position;
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining);
+      const chunk = audioBuffer.slice(position, position + chunkSize);
+      
+      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`);
+      
+      const mediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: {
+          payload: chunk.toString("base64")
+        }
+      };
 
-    // Send the chunk
-    if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-      this.ws.send(JSON.stringify(mediaMessage));
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        this.ws.send(JSON.stringify(mediaMessage));
+      }
+      
+      // Delay between chunks
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        const delayMs = Math.max(chunkDurationMs - 2, 10);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+      
+      position += chunkSize;
+      chunkIndex++;
     }
     
-    // Move position forward by exactly currentChunkSize
-    position += currentChunkSize;
-    chunkIndex++;
-    
-    // Add delay between chunks (except for the last chunk)
-    if (position < audioBuffer.length && !this.isInterrupted) {
-      const delayMs = Math.max(CHUNK_DURATION_MS - 2, 8); // Small buffer for processing time
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+    if (this.isInterrupted || streamingSession.interrupt) {
+      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
+    } else {
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
     }
+    
+    this.currentAudioStreaming = null;
   }
-  
-  if (this.isInterrupted || streamingSession.interrupt) {
-    console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
-  } else {
-    console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks of exactly 160 bytes each`);
-  }
-  
-  this.currentAudioStreaming = null;
-}
 
   complete() {
     if (this.isInterrupted) return;
@@ -806,9 +710,9 @@ async streamAudioOptimizedForSIP(audioBase64) {
   }
 }
 
-// Main WebSocket server setup with enhanced call logging and lead detection
+// Main WebSocket server setup with enhanced call logging
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with intelligent lead detection and 160-byte audio chunks");
+  console.log("🚀 [ENHANCED] Voice Server started with call logging and Marathi support");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
@@ -1078,11 +982,11 @@ const setupUnifiedVoiceServer = (wss) => {
           case "stop":
             console.log(`📞 [ENHANCED] Stream stopped`);
             
-            // Save call log to database with intelligent lead detection
+            // Save call log to database before closing
             if (callLogger) {
               try {
-                const savedLog = await callLogger.saveToDatabase(); // Will auto-detect lead status
-                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}, Lead Status: ${savedLog.leadStatus}`);
+                const savedLog = await callLogger.saveToDatabase('medium'); // Default lead status
+                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
                 
                 // Print call statistics
                 const stats = callLogger.getStats();
@@ -1105,15 +1009,15 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     });
 
-    // Enhanced connection cleanup with intelligent lead status detection
+    // Enhanced connection cleanup with call logging
     ws.on("close", async () => {
       console.log("🔗 [ENHANCED] Connection closed");
       
-      // Save call log before cleanup with intelligent detection
+      // Save call log before cleanup if not already saved
       if (callLogger) {
         try {
           const savedLog = await callLogger.saveToDatabase('not_connected'); // Status for unexpected disconnection
-          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}, Lead Status: ${savedLog.leadStatus}`);
+          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}`);
         } catch (error) {
           console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`);
         }
