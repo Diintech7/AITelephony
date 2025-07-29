@@ -717,61 +717,70 @@ class OptimizedSarvamTTSProcessor {
     }
   }
 
-  async streamAudioOptimizedForSIP(audioBase64) {
-    if (this.isInterrupted) return;
+  // Fixed streamAudioOptimizedForSIP method - sends exactly 160 bytes per chunk
+async streamAudioOptimizedForSIP(audioBase64) {
+  if (this.isInterrupted) return;
+  
+  const audioBuffer = Buffer.from(audioBase64, "base64");
+  const streamingSession = { interrupt: false };
+  this.currentAudioStreaming = streamingSession;
+  
+  // FIXED: SIP audio specifications for exactly 160 bytes per chunk
+  const SAMPLE_RATE = 8000;
+  const BYTES_PER_SAMPLE = 2;
+  const CHUNK_SIZE = 160; // EXACTLY 160 bytes per chunk
+  const CHUNK_DURATION_MS = (CHUNK_SIZE / (SAMPLE_RATE * BYTES_PER_SAMPLE)) * 1000; // ~10ms per chunk
+  
+  console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ${CHUNK_SIZE}-byte chunks`);
+  
+  let position = 0;
+  let chunkIndex = 0;
+  
+  while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+    // Calculate remaining bytes
+    const remaining = audioBuffer.length - position;
     
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    const streamingSession = { interrupt: false };
-    this.currentAudioStreaming = streamingSession;
+    // CRITICAL FIX: Use exactly CHUNK_SIZE (160) or remaining bytes if less
+    const currentChunkSize = Math.min(CHUNK_SIZE, remaining);
     
-    // FIXED: SIP audio specifications for exactly 160 bytes per chunk
-    const SAMPLE_RATE = 8000;
-    const BYTES_PER_SAMPLE = 2;
-    const CHUNK_SIZE = 160; // FIXED: Exactly 160 bytes per chunk as requested
-    const CHUNK_DURATION_MS = (CHUNK_SIZE / (SAMPLE_RATE * BYTES_PER_SAMPLE)) * 1000; // ~10ms per chunk
+    // Extract exactly currentChunkSize bytes from the buffer
+    const chunk = audioBuffer.subarray(position, position + currentChunkSize);
     
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ${CHUNK_SIZE}-byte chunks`);
+    console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${CHUNK_DURATION_MS.toFixed(1)}ms)`);
     
-    let position = 0;
-    let chunkIndex = 0;
-    
-    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = audioBuffer.length - position;
-      const currentChunkSize = Math.min(CHUNK_SIZE, remaining);
-      const chunk = audioBuffer.slice(position, position + currentChunkSize);
-      
-      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${CHUNK_DURATION_MS.toFixed(1)}ms)`);
-      
-      const mediaMessage = {
-        event: "media",
-        streamSid: this.streamSid,
-        media: {
-          payload: chunk.toString("base64")
-        }
-      };
+    // Create media message with the chunk
+    const mediaMessage = {
+      event: "media",
+      streamSid: this.streamSid,
+      media: {
+        payload: chunk.toString("base64")
+      }
+    };
 
-      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-        this.ws.send(JSON.stringify(mediaMessage));
-      }
-      
-      // Delay between chunks based on audio duration
-      if (position + currentChunkSize < audioBuffer.length && !this.isInterrupted) {
-        const delayMs = Math.max(CHUNK_DURATION_MS - 2, 8); // Small buffer for processing time
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-      }
-      
-      position += currentChunkSize;
-      chunkIndex++;
+    // Send the chunk
+    if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+      this.ws.send(JSON.stringify(mediaMessage));
     }
     
-    if (this.isInterrupted || streamingSession.interrupt) {
-      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
-    } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks of ${CHUNK_SIZE} bytes each`);
-    }
+    // Move position forward by exactly currentChunkSize
+    position += currentChunkSize;
+    chunkIndex++;
     
-    this.currentAudioStreaming = null;
+    // Add delay between chunks (except for the last chunk)
+    if (position < audioBuffer.length && !this.isInterrupted) {
+      const delayMs = Math.max(CHUNK_DURATION_MS - 2, 8); // Small buffer for processing time
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
   }
+  
+  if (this.isInterrupted || streamingSession.interrupt) {
+    console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
+  } else {
+    console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks of exactly 160 bytes each`);
+  }
+  
+  this.currentAudioStreaming = null;
+}
 
   complete() {
     if (this.isInterrupted) return;
