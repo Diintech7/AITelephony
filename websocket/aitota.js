@@ -29,6 +29,85 @@ const createTimer = (label) => {
   };
 };
 
+// SIP Header Decoder Utility
+class SIPHeaderDecoder {
+  static decodeBase64Extra(base64String) {
+    try {
+      const decoded = Buffer.from(base64String, 'base64').toString('utf-8');
+      const parsed = JSON.parse(decoded);
+      
+      console.log(`🔓 [SIP-DECODE] Base64 decoded successfully`);
+      console.log(`📋 [SIP-DECODE] Parsed data:`, JSON.stringify(parsed, null, 2));
+      
+      return parsed;
+    } catch (error) {
+      console.error(`❌ [SIP-DECODE] Failed to decode base64 extra: ${error.message}`);
+      return null;
+    }
+  }
+
+  static parseConnectionURL(url) {
+    try {
+      const urlObj = new URL(url);
+      const params = new URLSearchParams(urlObj.search);
+      
+      const sipData = {
+        app_id: params.get('app_id'),
+        caller_id: params.get('caller_id'), // Customer mobile number
+        did: params.get('did'), // DID number
+        direction: params.get('direction'),
+        session_id: params.get('session_id'),
+        extra_raw: params.get('extra'),
+        czdata: params.get('czdata')
+      };
+
+      // Decode extra field if present
+      if (sipData.extra_raw) {
+        const decodedExtra = this.decodeBase64Extra(decodeURIComponent(sipData.extra_raw));
+        sipData.extra = decodedExtra;
+      }
+
+      return sipData;
+    } catch (error) {
+      console.error(`❌ [SIP-PARSE] Failed to parse connection URL: ${error.message}`);
+      return null;
+    }
+  }
+
+  static logSIPData(sipData) {
+    console.log(`\n🌐 [SIP-HEADERS] ==========================================`);
+    console.log(`📱 [SIP-HEADERS] Customer Mobile (caller_id): ${sipData.caller_id}`);
+    console.log(`📞 [SIP-HEADERS] DID Number: ${sipData.did}`);
+    console.log(`🔄 [SIP-HEADERS] Direction: ${sipData.direction || 'Not specified'}`);
+    console.log(`🆔 [SIP-HEADERS] App ID: ${sipData.app_id}`);
+    console.log(`🔗 [SIP-HEADERS] Session ID: ${sipData.session_id}`);
+    
+    if (sipData.extra) {
+      console.log(`📋 [SIP-HEADERS] Extra Data:`);
+      console.log(`   • Call CLI: ${sipData.extra.CallCli}`);
+      console.log(`   • Call Session ID: ${sipData.extra.CallSessionId}`);
+      console.log(`   • Call VA ID: ${sipData.extra.CallVaId}`);
+      console.log(`   • DID (from extra): ${sipData.extra.DID}`);
+      console.log(`   • CZ Service App ID: ${sipData.extra.CZSERVICEAPPID}`);
+    }
+    console.log(`🌐 [SIP-HEADERS] ==========================================\n`);
+  }
+
+  static determineCallType(sipData) {
+    // Logic to determine if it's inbound or outbound
+    if (sipData.direction) {
+      return sipData.direction.toLowerCase();
+    }
+    
+    // Fallback logic based on available data
+    if (sipData.extra?.CallVaId) {
+      return 'inbound'; // Assumption: VA ID present means inbound
+    }
+    
+    return 'unknown';
+  }
+}
+
 // Enhanced language mappings with Marathi support
 const LANGUAGE_MAPPING = {
   hi: "hi-IN", 
@@ -138,15 +217,22 @@ Return only the language code, nothing else.`
   }
 };
 
-// Call logging utility class
+// Enhanced Call logging utility class with SIP data
 class CallLogger {
-  constructor(clientId, mobile = null) {
+  constructor(clientId, sipData = null) {
     this.clientId = clientId;
-    this.mobile = mobile;
+    this.sipData = sipData;
+    this.mobile = sipData?.caller_id || null;
     this.callStartTime = new Date();
     this.transcripts = [];
     this.responses = [];
     this.totalDuration = 0;
+    
+    // Log SIP data initialization
+    if (sipData) {
+      console.log(`📝 [CALL-LOG] Initialized with SIP data for client: ${clientId}`);
+      SIPHeaderDecoder.logSIPData(sipData);
+    }
   }
 
   // Log user transcript from Deepgram
@@ -189,7 +275,7 @@ class CallLogger {
     }).join('\n');
   }
 
-  // Save call log to database
+  // Enhanced save to database with SIP data
   async saveToDatabase(leadStatus = 'medium') {
     try {
       const callEndTime = new Date();
@@ -202,12 +288,19 @@ class CallLogger {
         transcript: this.generateFullTranscript(),
         duration: this.totalDuration,
         leadStatus: leadStatus,
-        // Additional metadata
+        // Enhanced metadata with SIP data
         metadata: {
           userTranscriptCount: this.transcripts.length,
           aiResponseCount: this.responses.length,
           languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
-          callEndTime: callEndTime
+          callEndTime: callEndTime,
+          // SIP Headers
+          sipData: this.sipData,
+          callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : 'unknown',
+          did: this.sipData?.did,
+          appId: this.sipData?.app_id,
+          sessionId: this.sipData?.session_id,
+          extraData: this.sipData?.extra
         }
       };
 
@@ -217,6 +310,10 @@ class CallLogger {
       console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s`);
       console.log(`📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`);
       
+      if (this.sipData) {
+        console.log(`📞 [CALL-LOG] SIP Data - Type: ${SIPHeaderDecoder.determineCallType(this.sipData)}, DID: ${this.sipData.did}, Mobile: ${this.mobile}`);
+      }
+      
       return savedLog;
     } catch (error) {
       console.error(`❌ [CALL-LOG] Database save error: ${error.message}`);
@@ -224,14 +321,16 @@ class CallLogger {
     }
   }
 
-  // Get call statistics
+  // Get enhanced call statistics
   getStats() {
     return {
       duration: this.totalDuration,
       userMessages: this.transcripts.length,
       aiResponses: this.responses.length,
       languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
-      startTime: this.callStartTime
+      startTime: this.callStartTime,
+      sipData: this.sipData,
+      callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : 'unknown'
     };
   }
 }
@@ -710,43 +809,19 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// Main WebSocket server setup with enhanced call logging
+// Main WebSocket server setup with enhanced call logging and SIP header parsing
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with call logging and Marathi support");
+  console.log("🚀 [ENHANCED] Voice Server started with SIP header parsing and call logging");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
     
-    // ===== ENHANCED LOGGING - Connection Details =====
-    const connectionDetails = {
-      timestamp: new Date().toISOString(),
-      clientIP: req.socket.remoteAddress,
-      userAgent: req.headers["user-agent"],
-      origin: req.headers.origin,
-      host: req.headers.host,
-      protocol: req.headers["sec-websocket-protocol"],
-      extensions: req.headers["sec-websocket-extensions"],
-      key: req.headers["sec-websocket-key"],
-      version: req.headers["sec-websocket-version"],
-      url: req.url,
-      method: req.method,
-      headers: req.headers
-    };
-    
-    console.log(`📋 [WS-CONNECTION] Full Connection Details:`);
-    console.log(`   🕐 Timestamp: ${connectionDetails.timestamp}`);
-    console.log(`   🌐 Client IP: ${connectionDetails.clientIP}`);
-    console.log(`   🔗 URL: ${connectionDetails.url}`);
-    console.log(`   📱 User Agent: ${connectionDetails.userAgent}`);
-    console.log(`   🏠 Origin: ${connectionDetails.origin}`);
-    console.log(`   🖥️  Host: ${connectionDetails.host}`);
-    console.log(`   📄 Method: ${connectionDetails.method}`);
-    console.log(`   🔧 Protocol: ${connectionDetails.protocol}`);
-    console.log(`   📦 Extensions: ${connectionDetails.extensions}`);
-    console.log(`   🔑 WebSocket Key: ${connectionDetails.key}`);
-    console.log(`   📊 WebSocket Version: ${connectionDetails.version}`);
-    console.log(`   📋 All Headers:`, JSON.stringify(connectionDetails.headers, null, 2));
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    // Parse SIP data from connection URL
+    const sipData = SIPHeaderDecoder.parseConnectionURL(req.url);
+    if (sipData) {
+      SIPHeaderDecoder.logSIPData(sipData);
+      ws.sipData = sipData; // Store SIP data in WebSocket session
+    }
 
     // Session state
     let streamSid = null;
@@ -812,7 +887,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Handle Deepgram responses with call logging
+    // Handle Deepgram responses with enhanced logging
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript;
@@ -830,10 +905,13 @@ const setupUnifiedVoiceServer = (wss) => {
           if (is_final) {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
             
-            // Log the final transcript to call logger
+            // Log the final transcript to call logger with SIP context
             if (callLogger && transcript.trim()) {
               const detectedLang = await detectLanguageWithOpenAI(transcript.trim());
               callLogger.logUserTranscript(transcript.trim(), detectedLang);
+              
+              // Enhanced logging with SIP data
+              console.log(`📝 [TRANSCRIPT] Customer (${sipData?.caller_id || 'unknown'}): "${transcript.trim()}" (${detectedLang})`);
             }
             
             await processUserUtterance(userUtteranceBuffer);
@@ -842,10 +920,12 @@ const setupUnifiedVoiceServer = (wss) => {
         }
       } else if (data.type === "UtteranceEnd") {
         if (userUtteranceBuffer.trim()) {
-          // Log the utterance end transcript
+          // Log the utterance end transcript with SIP context
           if (callLogger && userUtteranceBuffer.trim()) {
             const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim());
             callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang);
+            
+            console.log(`📝 [UTTERANCE-END] Customer (${sipData?.caller_id || 'unknown'}): "${userUtteranceBuffer.trim()}" (${detectedLang})`);
           }
           
           await processUserUtterance(userUtteranceBuffer);
@@ -854,7 +934,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Enhanced utterance processing with call logging
+    // Enhanced utterance processing with SIP context logging
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return;
 
@@ -869,14 +949,14 @@ const setupUnifiedVoiceServer = (wss) => {
       const timer = createTimer("UTTERANCE_PROCESSING");
 
       try {
-        console.log(`🎤 [USER] Processing: "${text}"`);
+        console.log(`🎤 [USER] Processing: "${text}" from ${sipData?.caller_id || 'unknown'} via DID ${sipData?.did || 'unknown'}`);
 
         // Step 1: Detect language using OpenAI
         const detectedLanguage = await detectLanguageWithOpenAI(text);
         
         // Step 2: Update current language and initialize TTS processor
         if (detectedLanguage !== currentLanguage) {
-          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage}`);
+          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage} for ${sipData?.caller_id || 'unknown'}`);
           currentLanguage = detectedLanguage;
         }
 
@@ -896,18 +976,18 @@ const setupUnifiedVoiceServer = (wss) => {
           (phrase, lang) => {
             // Handle phrase chunks - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`📤 [PHRASE] "${phrase}" (${lang})`);
+              console.log(`📤 [PHRASE] "${phrase}" (${lang}) -> ${sipData?.caller_id || 'unknown'}`);
               optimizedTTS.addPhrase(phrase, lang);
             }
           },
           (fullResponse) => {
             // Handle completion - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`✅ [COMPLETE] "${fullResponse}"`);
+              console.log(`✅ [COMPLETE] "${fullResponse}" -> ${sipData?.caller_id || 'unknown'}`);
               optimizedTTS.complete();
               
               const stats = optimizedTTS.getStats();
-              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
+              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk for ${sipData?.caller_id || 'unknown'}`);
               
               // Update conversation history
               conversationHistory.push(
@@ -925,10 +1005,10 @@ const setupUnifiedVoiceServer = (wss) => {
           callLogger // Pass call logger to OpenAI processing
         );
 
-        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`);
+        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms for ${sipData?.caller_id || 'unknown'}`);
 
       } catch (error) {
-        console.error(`❌ [PROCESSING] Error: ${error.message}`);
+        console.error(`❌ [PROCESSING] Error for ${sipData?.caller_id || 'unknown'}: ${error.message}`);
       } finally {
         if (processingRequestId === currentRequestId) {
           isProcessing = false;
@@ -936,75 +1016,55 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // ===== ENHANCED LOGGING - WebSocket Message Handling =====
+    // Enhanced WebSocket message handling with SIP data integration
     ws.on("message", async (message) => {
       try {
-        // Log raw message details
-        console.log(`\n📨 [WS-INCOMING] New Message Received:`);
-        console.log(`   🕐 Timestamp: ${new Date().toISOString()}`);
-        console.log(`   📏 Message Size: ${message.length} bytes`);
-        console.log(`   📦 Message Type: ${typeof message}`);
-        console.log(`   🔤 Message Buffer Type: ${Buffer.isBuffer(message) ? 'Buffer' : 'String'}`);
-        
-        // Try to parse as JSON and log both raw and parsed data
-        let data;
-        let rawMessageString = message.toString();
-        
-        console.log(`   📄 Raw Message (first 500 chars): ${rawMessageString.substring(0, 500)}${rawMessageString.length > 500 ? '...' : ''}`);
-        
-        try {
-          data = JSON.parse(rawMessageString);
-          console.log(`   ✅ Successfully parsed JSON`);
-          console.log(`   📋 Parsed Data:`, JSON.stringify(data, null, 2));
-        } catch (parseError) {
-          console.log(`   ❌ JSON Parse Error: ${parseError.message}`);
-          console.log(`   🔤 Raw String: "${rawMessageString}"`);
-          return;
-        }
+        const data = JSON.parse(message.toString());
 
-        // Log event-specific details
-        console.log(`   🎯 Event Type: "${data.event}"`);
-        
         switch (data.event) {
           case "connected":
-            console.log(`   🔗 [EVENT-CONNECTED] Protocol: ${data.protocol}`);
-            console.log(`   📋 Full Connected Data:`, JSON.stringify(data, null, 2));
+            console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid;
             const accountSid = data.start?.accountSid;
-            const mobile = data.start?.from || null; // Extract mobile number from call data
+            const mobile = data.start?.from || sipData?.caller_id || null; // Use SIP data as fallback
             
-            console.log(`   🎯 [EVENT-START] Stream Details:`);
-            console.log(`      📡 StreamSid: ${streamSid}`);
-            console.log(`      🏢 AccountSid: ${accountSid}`);
-            console.log(`      📱 Mobile: ${mobile}`);
-            console.log(`      📋 Complete Start Data:`, JSON.stringify(data, null, 2));
+            console.log(`\n🎯 [ENHANCED] Stream started:`);
+            console.log(`   • StreamSid: ${streamSid}`);
+            console.log(`   • AccountSid: ${accountSid}`);
+            console.log(`   • Mobile: ${mobile}`);
+            
+            if (sipData) {
+              console.log(`   • SIP App ID: ${sipData.app_id}`);
+              console.log(`   • SIP DID: ${sipData.did}`);
+              console.log(`   • SIP Session ID: ${sipData.session_id}`);
+              console.log(`   • Call Type: ${SIPHeaderDecoder.determineCallType(sipData)}`);
+            }
 
             // Fetch agent config from DB using accountSid (MANDATORY)
             let agentConfig = null;
             if (accountSid) {
               try {
-                console.log(`   🔍 [DB-QUERY] Searching for agent with accountSid: ${accountSid}`);
                 agentConfig = await Agent.findOne({ accountSid }).lean();
                 if (!agentConfig) {
-                  console.log(`   ❌ [DB-ERROR] No agent found for accountSid: ${accountSid}`);
+                  console.error(`❌ [DB] No agent found for accountSid: ${accountSid}`);
                   ws.send(JSON.stringify({ event: 'error', message: `No agent found for accountSid: ${accountSid}` }));
                   ws.close();
                   return;
-                } else {
-                  console.log(`   ✅ [DB-SUCCESS] Agent found:`, JSON.stringify(agentConfig, null, 2));
                 }
                 
+                console.log(`✅ [DB] Agent config loaded for client: ${agentConfig.clientId}`);
+                
               } catch (err) {
-                console.log(`   ❌ [DB-ERROR] Database error for accountSid: ${accountSid}`, err);
+                console.error(`❌ [DB] Database error for accountSid: ${accountSid}`, err);
                 ws.send(JSON.stringify({ event: 'error', message: `DB error for accountSid: ${accountSid}` }));
                 ws.close();
                 return;
               }
             } else {
-              console.log(`   ❌ [VALIDATION-ERROR] Missing accountSid in start event`);
+              console.error(`❌ [SIP] Missing accountSid in start event`);
               ws.send(JSON.stringify({ event: 'error', message: 'Missing accountSid in start event' }));
               ws.close();
               return;
@@ -1012,19 +1072,18 @@ const setupUnifiedVoiceServer = (wss) => {
             
             ws.sessionAgentConfig = agentConfig;
             currentLanguage = agentConfig.language || 'hi';
-            console.log(`   🌍 [LANGUAGE] Set to: ${currentLanguage}`);
 
-            // Initialize call logger
-            callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile);
-            console.log(`   📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}`);
+            // Initialize enhanced call logger with SIP data
+            callLogger = new CallLogger(agentConfig.clientId || accountSid, sipData);
+            console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, DID: ${sipData?.did || 'unknown'}`);
 
             await connectToDeepgram();
             
             // Use agent's firstMessage for greeting and log it
             const greeting = agentConfig.firstMessage || "Hello! How can I help you today?";
-            console.log(`   👋 [GREETING] "${greeting}"`);
+            console.log(`👋 [GREETING] "${greeting}" -> ${mobile || 'unknown customer'}`);
             
-            // Log the initial greeting
+            // Log the initial greeting with enhanced context
             if (callLogger) {
               callLogger.logAIResponse(greeting, currentLanguage);
             }
@@ -1035,46 +1094,45 @@ const setupUnifiedVoiceServer = (wss) => {
           }
 
           case "media":
-            const mediaPayload = data.media?.payload;
-            const mediaTimestamp = data.media?.timestamp;
-            
-            console.log(`   🎵 [EVENT-MEDIA] Media Details:`);
-            console.log(`      📡 StreamSid: ${data.streamSid}`);
-            console.log(`      🕐 Timestamp: ${mediaTimestamp}`);
-            console.log(`      📦 Payload Length: ${mediaPayload ? mediaPayload.length : 0} chars`);
-            console.log(`      🔤 Payload Sample (first 100 chars): ${mediaPayload ? mediaPayload.substring(0, 100) + '...' : 'null'}`);
-            
-            if (mediaPayload) {
-              const audioBuffer = Buffer.from(mediaPayload, "base64");
-              console.log(`      📊 Audio Buffer Size: ${audioBuffer.length} bytes`);
+            if (data.media?.payload) {
+              const audioBuffer = Buffer.from(data.media.payload, "base64");
               
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
-                console.log(`      ✅ [DEEPGRAM] Sending audio to Deepgram`);
                 deepgramWs.send(audioBuffer);
               } else {
-                console.log(`      ⏳ [DEEPGRAM] Queueing audio (not ready yet)`);
                 deepgramAudioQueue.push(audioBuffer);
               }
-            } else {
-              console.log(`      ❌ [MEDIA-ERROR] No payload in media event`);
             }
             break;
 
           case "stop":
-            console.log(`   📞 [EVENT-STOP] Stream stopped`);
-            console.log(`   📋 Stop Data:`, JSON.stringify(data, null, 2));
+            console.log(`\n📞 [ENHANCED] Stream stopped for ${sipData?.caller_id || 'unknown'}`);
             
-            // Save call log to database before closing
+            // Enhanced call log saving with SIP context
             if (callLogger) {
               try {
-                const savedLog = await callLogger.saveToDatabase('medium'); // Default lead status
-                console.log(`   💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
+                const savedLog = await callLogger.saveToDatabase('completed'); // Status for normal completion
+                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
                 
-                // Print call statistics
+                // Print enhanced call statistics with SIP data
                 const stats = callLogger.getStats();
-                console.log(`   📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(', ')}`);
+                console.log(`\n📊 [FINAL-STATS] Call Summary:`);
+                console.log(`   • Duration: ${stats.duration}s`);
+                console.log(`   • User Messages: ${stats.userMessages}`);
+                console.log(`   • AI Responses: ${stats.aiResponses}`);
+                console.log(`   • Languages: ${stats.languages.join(', ')}`);
+                console.log(`   • Customer: ${sipData?.caller_id || 'unknown'}`);
+                console.log(`   • DID: ${sipData?.did || 'unknown'}`);
+                console.log(`   • Call Type: ${stats.callType}`);
+                console.log(`   • Session ID: ${sipData?.session_id || 'unknown'}`);
+                
+                if (sipData?.extra) {
+                  console.log(`   • VA ID: ${sipData.extra.CallVaId || 'unknown'}`);
+                  console.log(`   • Service App ID: ${sipData.extra.CZSERVICEAPPID || 'unknown'}`);
+                }
+                
               } catch (error) {
-                console.error(`   ❌ [CALL-LOG] Failed to save final log: ${error.message}`);
+                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`);
               }
             }
             
@@ -1083,46 +1141,25 @@ const setupUnifiedVoiceServer = (wss) => {
             }
             break;
 
-          case "mark":
-            console.log(`   🏷️  [EVENT-MARK] Mark Details:`);
-            console.log(`   📋 Mark Data:`, JSON.stringify(data, null, 2));
-            break;
-
-          case "dtmf":
-            console.log(`   📱 [EVENT-DTMF] DTMF Details:`);
-            console.log(`      🔢 Digit: ${data.dtmf?.digit}`);
-            console.log(`   📋 DTMF Data:`, JSON.stringify(data, null, 2));
-            break;
-
           default:
-            console.log(`   ❓ [EVENT-UNKNOWN] Unknown event: ${data.event}`);
-            console.log(`   📋 Unknown Event Data:`, JSON.stringify(data, null, 2));
+            console.log(`❓ [ENHANCED] Unknown event: ${data.event} from ${sipData?.caller_id || 'unknown'}`);
         }
-        
-        console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-        
       } catch (error) {
-        console.error(`❌ [WS-MESSAGE-ERROR] Error processing message: ${error.message}`);
-        console.error(`❌ [WS-MESSAGE-ERROR] Stack trace:`, error.stack);
-        console.error(`❌ [WS-MESSAGE-ERROR] Raw message:`, message.toString());
+        console.error(`❌ [ENHANCED] Message error from ${sipData?.caller_id || 'unknown'}: ${error.message}`);
       }
     });
 
-    // Enhanced connection cleanup with call logging
-    ws.on("close", async (code, reason) => {
-      console.log(`\n🔗 [WS-CLOSE] Connection Closed:`);
-      console.log(`   🕐 Timestamp: ${new Date().toISOString()}`);
-      console.log(`   🔢 Close Code: ${code}`);
-      console.log(`   📝 Close Reason: ${reason || 'No reason provided'}`);
-      console.log(`   📊 Connection Duration: ${Date.now() - (ws.connectedAt?.getTime() || Date.now())}ms`);
+    // Enhanced connection cleanup with SIP context
+    ws.on("close", async () => {
+      console.log(`🔗 [ENHANCED] Connection closed for ${sipData?.caller_id || 'unknown'}`);
       
       // Save call log before cleanup if not already saved
       if (callLogger) {
         try {
-          const savedLog = await callLogger.saveToDatabase('not_connected'); // Status for unexpected disconnection
-          console.log(`   💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}`);
+          const savedLog = await callLogger.saveToDatabase('disconnected'); // Status for unexpected disconnection
+          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id} for ${sipData?.caller_id || 'unknown'}`);
         } catch (error) {
-          console.error(`   ❌ [CALL-LOG] Emergency save failed: ${error.message}`);
+          console.error(`❌ [CALL-LOG] Emergency save failed for ${sipData?.caller_id || 'unknown'}: ${error.message}`);
         }
       }
       
@@ -1142,20 +1179,12 @@ const setupUnifiedVoiceServer = (wss) => {
       currentLanguage = undefined;
       processingRequestId = 0;
       callLogger = null;
-      
-      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     });
 
     ws.on("error", (error) => {
-      console.log(`\n❌ [WS-ERROR] WebSocket Error:`);
-      console.log(`   🕐 Timestamp: ${new Date().toISOString()}`);
-      console.log(`   📝 Error Message: ${error.message}`);
-      console.log(`   📋 Error Stack:`, error.stack);
-      console.log(`   🔧 Error Code: ${error.code}`);
-      console.log(`   📊 Error Type: ${error.type || 'Unknown'}`);
-      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.error(`❌ [ENHANCED] WebSocket error for ${sipData?.caller_id || 'unknown'}: ${error.message}`);
     });
   });
 };
 
-module.exports = { setupUnifiedVoiceServer };
+module.exports = { setupUnifiedVoiceServer, SIPHeaderDecoder, CallLogger };
