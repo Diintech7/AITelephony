@@ -48,8 +48,28 @@ class SIPHeaderDecoder {
 
   static parseConnectionURL(url) {
     try {
-      const urlObj = new URL(url);
+      // Handle cases where URL might not have protocol
+      let fullUrl = url;
+      if (!url.startsWith('http') && !url.startsWith('ws')) {
+        // If it's just a path, we need to handle it differently
+        if (url.startsWith('/')) {
+          fullUrl = 'wss://dummy.com' + url;
+        } else {
+          console.log(`⚠️ [SIP-PARSE] Invalid URL format: ${url}`);
+          return null;
+        }
+      }
+      
+      const urlObj = new URL(fullUrl);
       const params = new URLSearchParams(urlObj.search);
+      
+      // Check if we have any SIP parameters
+      const hasParams = params.has('app_id') || params.has('caller_id') || params.has('did') || params.has('extra');
+      
+      if (!hasParams) {
+        console.log(`ℹ️ [SIP-PARSE] No SIP parameters found in URL: ${url}`);
+        return null;
+      }
       
       const sipData = {
         app_id: params.get('app_id'),
@@ -63,13 +83,18 @@ class SIPHeaderDecoder {
 
       // Decode extra field if present
       if (sipData.extra_raw) {
-        const decodedExtra = this.decodeBase64Extra(decodeURIComponent(sipData.extra_raw));
-        sipData.extra = decodedExtra;
+        try {
+          const decodedExtra = this.decodeBase64Extra(decodeURIComponent(sipData.extra_raw));
+          sipData.extra = decodedExtra;
+        } catch (decodeError) {
+          console.error(`❌ [SIP-PARSE] Failed to decode extra field: ${decodeError.message}`);
+          sipData.extra = null;
+        }
       }
 
       return sipData;
     } catch (error) {
-      console.error(`❌ [SIP-PARSE] Failed to parse connection URL: ${error.message}`);
+      console.log(`ℹ️ [SIP-PARSE] URL parsing failed (likely non-SIP connection): ${error.message}`);
       return null;
     }
   }
@@ -816,11 +841,20 @@ const setupUnifiedVoiceServer = (wss) => {
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
     
-    // Parse SIP data from connection URL
-    const sipData = SIPHeaderDecoder.parseConnectionURL(req.url);
-    if (sipData) {
-      SIPHeaderDecoder.logSIPData(sipData);
-      ws.sipData = sipData; // Store SIP data in WebSocket session
+    // Parse SIP data from connection URL (handle gracefully if not SIP)
+    let sipData = null;
+    try {
+      if (req.url) {
+        sipData = SIPHeaderDecoder.parseConnectionURL(req.url);
+        if (sipData) {
+          SIPHeaderDecoder.logSIPData(sipData);
+          ws.sipData = sipData; // Store SIP data in WebSocket session
+        } else {
+          console.log(`ℹ️ [CONNECTION] Non-SIP WebSocket connection (no SIP parameters found)`);
+        }
+      }
+    } catch (error) {
+      console.log(`ℹ️ [CONNECTION] Error parsing URL for SIP data: ${error.message}`);
     }
 
     // Session state
@@ -1019,7 +1053,44 @@ const setupUnifiedVoiceServer = (wss) => {
     // Enhanced WebSocket message handling with SIP data integration
     ws.on("message", async (message) => {
       try {
-        const data = JSON.parse(message.toString());
+        // Handle empty or invalid messages gracefully
+        if (!message || message.length === 0) {
+          console.log(`ℹ️ [MESSAGE] Received empty message from ${sipData?.caller_id || 'unknown'}`);
+          return;
+        }
+
+        let messageString;
+        try {
+          messageString = message.toString();
+          if (!messageString || messageString.trim() === '') {
+            console.log(`ℹ️ [MESSAGE] Received empty string message from ${sipData?.caller_id || 'unknown'}`);
+            return;
+          }
+        } catch (error) {
+          console.log(`⚠️ [MESSAGE] Failed to convert message to string: ${error.message}`);
+          return;
+        }
+
+        let data;
+        try {
+          data = JSON.parse(messageString);
+        } catch (jsonError) {
+          // Check if it's a common non-JSON message type
+          if (messageString.startsWith('<') || messageString.includes('HTTP/')) {
+            console.log(`ℹ️ [MESSAGE] Received non-JSON message (likely HTTP/HTML): ${messageString.substring(0, 50)}...`);
+            return;
+          }
+          
+          console.log(`⚠️ [MESSAGE] Invalid JSON from ${sipData?.caller_id || 'unknown'}: ${jsonError.message}`);
+          console.log(`⚠️ [MESSAGE] Raw message (first 100 chars): "${messageString.substring(0, 100)}..."`);
+          return;
+        }
+
+        // Ensure data is an object with an event property
+        if (!data || typeof data !== 'object' || !data.event) {
+          console.log(`⚠️ [MESSAGE] Invalid message format from ${sipData?.caller_id || 'unknown'}:`, data);
+          return;
+        }
 
         switch (data.event) {
           case "connected":
@@ -1145,7 +1216,8 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log(`❓ [ENHANCED] Unknown event: ${data.event} from ${sipData?.caller_id || 'unknown'}`);
         }
       } catch (error) {
-        console.error(`❌ [ENHANCED] Message error from ${sipData?.caller_id || 'unknown'}: ${error.message}`);
+        console.error(`❌ [ENHANCED] Unexpected error processing message from ${sipData?.caller_id || 'unknown'}: ${error.message}`);
+        console.error(`❌ [ENHANCED] Stack trace:`, error.stack);
       }
     });
 
