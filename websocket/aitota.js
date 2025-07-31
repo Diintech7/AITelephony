@@ -1,710 +1,214 @@
-const WebSocket = require("ws")
-require("dotenv").config()
-const mongoose = require("mongoose")
-const Agent = require("../models/Agent")
-const CallLog = require("../models/CallLog")
+const WebSocket = require("ws");
+require("dotenv").config();
+const mongoose = require('mongoose');
+const Agent = require('../models/Agent');
+const CallLog = require('../models/CallLog');
 
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
   sarvam: process.env.SARVAM_API_KEY,
   openai: process.env.OPENAI_API_KEY,
-}
+};
 
 // Validate API keys
 if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
-  console.error("❌ Missing required API keys in environment variables")
-  process.exit(1)
+  console.error("❌ Missing required API keys in environment variables");
+  process.exit(1);
 }
 
-const fetch = globalThis.fetch || require("node-fetch")
+const fetch = globalThis.fetch || require("node-fetch");
 
 // Performance timing helper
 const createTimer = (label) => {
-  const start = Date.now()
+  const start = Date.now();
   return {
     start,
     end: () => Date.now() - start,
     checkpoint: (checkpointName) => Date.now() - start,
-  }
-}
-
-// CIRCUIT BREAKER: Global Deepgram Circuit Breaker
-class DeepgramCircuitBreaker {
-  constructor() {
-    this.state = "CLOSED" // CLOSED, OPEN, HALF_OPEN
-    this.failureCount = 0
-    this.failureThreshold = 3 // Open circuit after 3 failures
-    this.timeout = 300000 // 5 minutes before trying again
-    this.nextAttempt = 0
-    this.lastFailureTime = 0
-
-    console.log(`🔒 [CIRCUIT-BREAKER] Initialized - State: ${this.state}`)
-  }
-
-  canAttempt() {
-    const now = Date.now()
-
-    switch (this.state) {
-      case "CLOSED":
-        return true
-
-      case "OPEN":
-        if (now >= this.nextAttempt) {
-          console.log(`🔄 [CIRCUIT-BREAKER] Moving to HALF_OPEN state`)
-          this.state = "HALF_OPEN"
-          return true
-        }
-        return false
-
-      case "HALF_OPEN":
-        return true
-
-      default:
-        return false
-    }
-  }
-
-  recordSuccess() {
-    console.log(`✅ [CIRCUIT-BREAKER] Success recorded - Resetting to CLOSED`)
-    this.failureCount = 0
-    this.state = "CLOSED"
-  }
-
-  recordFailure(error) {
-    this.failureCount++
-    this.lastFailureTime = Date.now()
-
-    console.log(`❌ [CIRCUIT-BREAKER] Failure ${this.failureCount}/${this.failureThreshold} - Error: ${error.message}`)
-
-    if (this.failureCount >= this.failureThreshold) {
-      this.state = "OPEN"
-      this.nextAttempt = Date.now() + this.timeout
-
-      console.log(`🚨 [CIRCUIT-BREAKER] CIRCUIT OPENED - No Deepgram attempts for ${this.timeout / 1000}s`)
-      console.log(`🔇 [CIRCUIT-BREAKER] Switching to TTS-ONLY mode`)
-    }
-  }
-
-  getStatus() {
-    return {
-      state: this.state,
-      failureCount: this.failureCount,
-      nextAttempt: this.nextAttempt,
-      timeUntilNextAttempt: Math.max(0, this.nextAttempt - Date.now()),
-      canAttempt: this.canAttempt(),
-    }
-  }
-}
-
-// Global circuit breaker instance
-const deepgramCircuitBreaker = new DeepgramCircuitBreaker()
-
-// SIMPLIFIED: TTS-Only Connection Manager
-class TTSOnlyConnectionManager {
-  constructor(customerNumber) {
-    this.customerNumber = customerNumber
-    this.isActive = true
-
-    console.log(`🔇 [TTS-ONLY] Initialized for ${customerNumber} - Speech recognition disabled`)
-  }
-
-  sendAudio(audioBuffer) {
-    // Silently ignore audio - no speech recognition
-    return false
-  }
-
-  updateLanguage(newLanguage) {
-    console.log(`🔄 [TTS-ONLY] Language updated to ${newLanguage} for ${this.customerNumber}`)
-  }
-
-  disconnect() {
-    this.isActive = false
-    console.log(`🔌 [TTS-ONLY] Disconnected for ${this.customerNumber}`)
-  }
-
-  cleanup() {
-    this.disconnect()
-  }
-
-  getStatus() {
-    return {
-      isConnected: false,
-      isTTSOnly: true,
-      customerNumber: this.customerNumber,
-      isActive: this.isActive,
-    }
-  }
-}
-
-// OPTIMIZED: Smart Connection Manager with Circuit Breaker
-class SmartDeepgramManager {
-  constructor() {
-    this.connections = new Map()
-    this.maxConnections = 3 // Drastically reduced
-  }
-
-  async getConnection(customerNumber, language, onTranscript, onError) {
-    // Check circuit breaker first
-    if (!deepgramCircuitBreaker.canAttempt()) {
-      const status = deepgramCircuitBreaker.getStatus()
-      console.log(
-        `🚫 [SMART-MANAGER] Circuit breaker OPEN - ${Math.round(status.timeUntilNextAttempt / 1000)}s remaining`,
-      )
-
-      // Return TTS-only connection
-      const ttsOnlyConnection = new TTSOnlyConnectionManager(customerNumber)
-      return ttsOnlyConnection
-    }
-
-    // Check if we already have a connection
-    if (this.connections.has(customerNumber)) {
-      const existingConnection = this.connections.get(customerNumber)
-      if (existingConnection.isConnected) {
-        console.log(`♻️ [SMART-MANAGER] Reusing connection for ${customerNumber}`)
-        return existingConnection
-      } else {
-        this.connections.delete(customerNumber)
-      }
-    }
-
-    // Check connection limit
-    if (this.connections.size >= this.maxConnections) {
-      console.log(`🚫 [SMART-MANAGER] Connection limit reached (${this.connections.size}/${this.maxConnections})`)
-      console.log(`🔇 [SMART-MANAGER] Returning TTS-only connection for ${customerNumber}`)
-
-      const ttsOnlyConnection = new TTSOnlyConnectionManager(customerNumber)
-      return ttsOnlyConnection
-    }
-
-    // Try to create new Deepgram connection
-    try {
-      console.log(`🔌 [SMART-MANAGER] Creating new Deepgram connection for ${customerNumber}`)
-
-      const connection = new OptimizedDeepgramConnection(customerNumber, language, onTranscript, onError, this)
-      await connection.connect()
-
-      this.connections.set(customerNumber, connection)
-      deepgramCircuitBreaker.recordSuccess()
-
-      console.log(`✅ [SMART-MANAGER] Deepgram connection created for ${customerNumber}`)
-      return connection
-    } catch (error) {
-      console.error(`❌ [SMART-MANAGER] Failed to create Deepgram connection: ${error.message}`)
-
-      // Record failure in circuit breaker
-      deepgramCircuitBreaker.recordFailure(error)
-
-      // Return TTS-only connection as fallback
-      console.log(`🔇 [SMART-MANAGER] Falling back to TTS-only for ${customerNumber}`)
-      const ttsOnlyConnection = new TTSOnlyConnectionManager(customerNumber)
-      return ttsOnlyConnection
-    }
-  }
-
-  removeConnection(customerNumber) {
-    if (this.connections.has(customerNumber)) {
-      this.connections.delete(customerNumber)
-      console.log(`🗑️ [SMART-MANAGER] Removed connection for ${customerNumber}`)
-    }
-  }
-
-  getStats() {
-    const circuitStatus = deepgramCircuitBreaker.getStatus()
-
-    return {
-      activeConnections: this.connections.size,
-      maxConnections: this.maxConnections,
-      circuitBreakerState: circuitStatus.state,
-      circuitBreakerFailures: circuitStatus.failureCount,
-      timeUntilNextAttempt: circuitStatus.timeUntilNextAttempt,
-      canAttemptDeepgram: circuitStatus.canAttempt,
-    }
-  }
-
-  cleanup() {
-    console.log(`🧹 [SMART-MANAGER] Cleaning up all connections`)
-
-    for (const [customerNumber, connection] of this.connections) {
-      connection.cleanup()
-    }
-
-    this.connections.clear()
-  }
-}
-
-// Global smart manager instance
-const smartDeepgramManager = new SmartDeepgramManager()
-
-// OPTIMIZED: Single Deepgram Connection with better error handling
-class OptimizedDeepgramConnection {
-  constructor(customerNumber, language, onTranscript, onError, pool) {
-    this.customerNumber = customerNumber
-    this.language = language
-    this.onTranscript = onTranscript
-    this.onError = onError
-    this.pool = pool
-    this.deepgramWs = null
-    this.isConnected = false
-    this.audioQueue = []
-    this.lastActivity = Date.now()
-    this.keepAliveInterval = null
-    this.connectionAttempts = 0
-    this.maxConnectionAttempts = 3 // Reduced from unlimited
-    this.isDestroyed = false
-  }
-
-  async connect() {
-    if (this.isDestroyed) {
-      throw new Error("Connection has been destroyed")
-    }
-
-    if (this.deepgramWs && this.isConnected) {
-      console.log(`✅ [DEEPGRAM] Already connected for ${this.customerNumber}`)
-      return true
-    }
-
-    this.connectionAttempts++
-
-    if (this.connectionAttempts > this.maxConnectionAttempts) {
-      throw new Error(`Max connection attempts (${this.maxConnectionAttempts}) reached for ${this.customerNumber}`)
-    }
-
-    try {
-      console.log(`🔌 [DEEPGRAM] Connecting for ${this.customerNumber} (attempt ${this.connectionAttempts})`)
-
-      const deepgramLanguage = getDeepgramLanguage(this.language)
-      console.log(`🌍 [DEEPGRAM] Using language: ${deepgramLanguage}`)
-
-      const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-      deepgramUrl.searchParams.append("sample_rate", "8000")
-      deepgramUrl.searchParams.append("channels", "1")
-      deepgramUrl.searchParams.append("encoding", "linear16")
-      deepgramUrl.searchParams.append("model", "nova-2")
-      deepgramUrl.searchParams.append("language", deepgramLanguage)
-      deepgramUrl.searchParams.append("interim_results", "true")
-      deepgramUrl.searchParams.append("smart_format", "true")
-      deepgramUrl.searchParams.append("endpointing", "300")
-      deepgramUrl.searchParams.append("keep_alive", "true")
-
-      this.deepgramWs = new WebSocket(deepgramUrl.toString(), {
-        headers: {
-          Authorization: `Token ${API_KEYS.deepgram}`,
-          "User-Agent": `VoiceServer/3.0 Customer-${this.customerNumber}`,
-        },
-      })
-
-      return new Promise((resolve, reject) => {
-        const connectionTimeout = setTimeout(() => {
-          console.error(`❌ [DEEPGRAM] Connection timeout for ${this.customerNumber}`)
-          this.cleanup()
-          reject(new Error("Connection timeout"))
-        }, 15000) // 15 second timeout
-
-        this.deepgramWs.onopen = () => {
-          clearTimeout(connectionTimeout)
-          this.isConnected = true
-          this.connectionAttempts = 0 // Reset on successful connection
-          this.lastActivity = Date.now()
-
-          console.log(`✅ [DEEPGRAM] Connected successfully for ${this.customerNumber}`)
-
-          // Process queued audio
-          if (this.audioQueue.length > 0) {
-            console.log(`📦 [DEEPGRAM] Processing ${this.audioQueue.length} queued audio buffers`)
-            this.audioQueue.forEach((buffer, index) => {
-              if (this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
-                this.deepgramWs.send(buffer)
-                console.log(`📤 [DEEPGRAM] Sent queued buffer ${index + 1}/${this.audioQueue.length}`)
-              }
-            })
-            this.audioQueue = []
-          }
-
-          this.startKeepAlive()
-          resolve(true)
-        }
-
-        this.deepgramWs.onmessage = (event) => {
-          this.lastActivity = Date.now()
-          const data = JSON.parse(event.data)
-          this.handleMessage(data)
-        }
-
-        this.deepgramWs.onerror = (error) => {
-          clearTimeout(connectionTimeout)
-          console.error(`❌ [DEEPGRAM] WebSocket error for ${this.customerNumber}:`, error.message)
-          this.isConnected = false
-
-          if (this.onError) {
-            this.onError(error)
-          }
-
-          reject(error)
-        }
-
-        this.deepgramWs.onclose = (event) => {
-          clearTimeout(connectionTimeout)
-          console.log(
-            `🔌 [DEEPGRAM] Connection closed for ${this.customerNumber} - Code: ${event.code}, Reason: ${event.reason}`,
-          )
-          this.isConnected = false
-          this.stopKeepAlive()
-
-          // STOP AGGRESSIVE RECONNECTION - Only reconnect on normal network issues
-          if (event.code === 1000) {
-            console.log(`ℹ️ [DEEPGRAM] Normal closure for ${this.customerNumber}`)
-            this.pool.removeConnection(this.customerNumber)
-            return
-          }
-
-          // Don't reconnect on rate limit errors (429) or too many failures
-          if (this.connectionAttempts >= this.maxConnectionAttempts) {
-            console.error(`❌ [DEEPGRAM] Max attempts reached for ${this.customerNumber} - Giving up`)
-            this.pool.removeConnection(this.customerNumber)
-            return
-          }
-
-          // Only attempt one more reconnection for network issues
-          if (event.code === 1006 && this.connectionAttempts < 2) {
-            const delay = 5000 // 5 second delay only
-            console.log(`🔄 [DEEPGRAM] Single reconnection attempt for ${this.customerNumber} in ${delay}ms`)
-
-            setTimeout(() => {
-              if (!this.isDestroyed) {
-                this.connect().catch((err) => {
-                  console.error(`❌ [DEEPGRAM] Final reconnection failed for ${this.customerNumber}:`, err.message)
-                  this.pool.removeConnection(this.customerNumber)
-                })
-              }
-            }, delay)
-          } else {
-            console.log(`🛑 [DEEPGRAM] No more reconnection attempts for ${this.customerNumber}`)
-            this.pool.removeConnection(this.customerNumber)
-          }
-        }
-      })
-    } catch (error) {
-      console.error(`❌ [DEEPGRAM] Setup error for ${this.customerNumber}: ${error.message}`)
-      throw error
-    }
-  }
-
-  startKeepAlive() {
-    this.keepAliveInterval = setInterval(() => {
-      if (this.isConnected && this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
-        const idleTime = Date.now() - this.lastActivity
-        if (idleTime > 45000) {
-          // 45 seconds idle
-          console.log(
-            `💓 [DEEPGRAM-KEEP-ALIVE] Ping for ${this.customerNumber} (idle: ${Math.round(idleTime / 1000)}s)`,
-          )
-
-          try {
-            // Send a small audio buffer as keep-alive (silence)
-            const silenceBuffer = Buffer.alloc(320, 0) // 320 bytes of silence
-            this.deepgramWs.send(silenceBuffer)
-            this.lastActivity = Date.now()
-          } catch (error) {
-            console.error(`❌ [DEEPGRAM-KEEP-ALIVE] Failed for ${this.customerNumber}:`, error.message)
-          }
-        }
-      }
-    }, 30000) // Every 30 seconds
-  }
-
-  stopKeepAlive() {
-    if (this.keepAliveInterval) {
-      clearInterval(this.keepAliveInterval)
-      this.keepAliveInterval = null
-    }
-  }
-
-  handleMessage(data) {
-    if (data.type === "Results") {
-      const transcript = data.channel?.alternatives?.[0]?.transcript
-      const is_final = data.is_final
-      const confidence = data.channel?.alternatives?.[0]?.confidence
-
-      if (transcript?.trim()) {
-        console.log(
-          `🎤 [DEEPGRAM] ${is_final ? "FINAL" : "interim"} from ${this.customerNumber}: "${transcript}" (confidence: ${confidence || "unknown"})`,
-        )
-
-        if (this.onTranscript) {
-          this.onTranscript(transcript, is_final, confidence)
-        }
-      }
-    } else if (data.type === "UtteranceEnd") {
-      console.log(`🔚 [DEEPGRAM] Utterance end for ${this.customerNumber}`)
-      if (this.onTranscript) {
-        this.onTranscript(null, true, null, "utterance_end")
-      }
-    } else if (data.type === "Metadata") {
-      console.log(`📊 [DEEPGRAM] Metadata for ${this.customerNumber}:`, {
-        request_id: data.request_id,
-        model_info: data.model_info,
-      })
-    }
-  }
-
-  sendAudio(audioBuffer) {
-    if (this.isDestroyed) {
-      return false
-    }
-
-    if (this.isConnected && this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
-      try {
-        this.deepgramWs.send(audioBuffer)
-        this.lastActivity = Date.now()
-        return true
-      } catch (error) {
-        console.error(`❌ [DEEPGRAM] Error sending audio for ${this.customerNumber}:`, error.message)
-        this.isConnected = false
-        return false
-      }
-    } else {
-      // Queue audio if not connected, but limit queue size
-      if (this.audioQueue.length < 100) {
-        // Limit queue to prevent memory issues
-        this.audioQueue.push(audioBuffer)
-        console.log(`📦 [DEEPGRAM] Queued audio for ${this.customerNumber} (queue: ${this.audioQueue.length})`)
-      } else {
-        console.log(`⚠️ [DEEPGRAM] Audio queue full for ${this.customerNumber}, dropping audio`)
-      }
-
-      // Try to reconnect if not connected and not destroyed
-      if (!this.isConnected && !this.isDestroyed && this.connectionAttempts < this.maxConnectionAttempts) {
-        this.connect().catch((error) => {
-          console.error(`❌ [DEEPGRAM] Auto-reconnect failed for ${this.customerNumber}:`, error.message)
-        })
-      }
-
-      return false
-    }
-  }
-
-  updateLanguage(newLanguage) {
-    if (newLanguage !== this.language && !this.isDestroyed) {
-      console.log(`🔄 [DEEPGRAM] Language change for ${this.customerNumber}: ${this.language} → ${newLanguage}`)
-      this.language = newLanguage
-
-      // Reconnect with new language
-      this.disconnect()
-      this.connect().catch((error) => {
-        console.error(`❌ [DEEPGRAM] Language update reconnection failed for ${this.customerNumber}:`, error.message)
-      })
-    }
-  }
-
-  disconnect() {
-    console.log(`🔌 [DEEPGRAM] Disconnecting for ${this.customerNumber}`)
-
-    this.stopKeepAlive()
-
-    if (this.deepgramWs) {
-      if (this.deepgramWs.readyState === WebSocket.OPEN) {
-        this.deepgramWs.close(1000, "Normal closure")
-      }
-      this.deepgramWs = null
-    }
-
-    this.isConnected = false
-  }
-
-  cleanup() {
-    console.log(`🧹 [DEEPGRAM] Cleaning up connection for ${this.customerNumber}`)
-
-    this.isDestroyed = true
-    this.disconnect()
-    this.audioQueue = []
-    this.onTranscript = null
-    this.onError = null
-
-    // Remove from pool
-    this.pool.removeConnection(this.customerNumber)
-  }
-
-  getStatus() {
-    return {
-      isConnected: this.isConnected,
-      language: this.language,
-      queueSize: this.audioQueue.length,
-      connectionAttempts: this.connectionAttempts,
-      lastActivity: this.lastActivity,
-      customerNumber: this.customerNumber,
-      isDestroyed: this.isDestroyed,
-    }
-  }
-}
+  };
+};
 
 // SIP Header Decoder Utility
 class SIPHeaderDecoder {
   static decodeBase64Extra(base64String) {
     try {
-      const decoded = Buffer.from(base64String, "base64").toString("utf-8")
-      const parsed = JSON.parse(decoded)
-
-      console.log(`🔓 [SIP-DECODE] Base64 decoded successfully`)
-      console.log(`📋 [SIP-DECODE] Parsed data:`, JSON.stringify(parsed, null, 2))
-
-      return parsed
+      const decoded = Buffer.from(base64String, 'base64').toString('utf-8');
+      const parsed = JSON.parse(decoded);
+      
+      console.log(`🔓 [SIP-DECODE] Base64 decoded successfully`);
+      console.log(`📋 [SIP-DECODE] Parsed data:`, JSON.stringify(parsed, null, 2));
+      
+      return parsed;
     } catch (error) {
-      console.error(`❌ [SIP-DECODE] Failed to decode base64 extra: ${error.message}`)
-      return null
+      console.error(`❌ [SIP-DECODE] Failed to decode base64 extra: ${error.message}`);
+      return null;
     }
   }
 
   static parseConnectionURL(url) {
     try {
-      let fullUrl = url
-      if (!url.startsWith("http") && !url.startsWith("ws")) {
-        if (url.startsWith("/")) {
-          fullUrl = "wss://dummy.com" + url
+      // Handle cases where URL might not have protocol
+      let fullUrl = url;
+      if (!url.startsWith('http') && !url.startsWith('ws')) {
+        // If it's just a path, we need to handle it differently
+        if (url.startsWith('/')) {
+          fullUrl = 'wss://dummy.com' + url;
         } else {
-          console.log(`⚠️ [SIP-PARSE] Invalid URL format: ${url}`)
-          return null
+          console.log(`⚠️ [SIP-PARSE] Invalid URL format: ${url}`);
+          return null;
         }
       }
-
-      const urlObj = new URL(fullUrl)
-      const params = new URLSearchParams(urlObj.search)
-
-      const hasParams = params.has("app_id") || params.has("caller_id") || params.has("did") || params.has("extra")
-
+      
+      const urlObj = new URL(fullUrl);
+      const params = new URLSearchParams(urlObj.search);
+      
+      // Check if we have any SIP parameters
+      const hasParams = params.has('app_id') || params.has('caller_id') || params.has('did') || params.has('extra');
+      
       if (!hasParams) {
-        console.log(`ℹ️ [SIP-PARSE] No SIP parameters found in URL: ${url}`)
-        return null
+        console.log(`ℹ️ [SIP-PARSE] No SIP parameters found in URL: ${url}`);
+        return null;
       }
-
+      
       const sipData = {
-        app_id: params.get("app_id"),
-        caller_id: params.get("caller_id"),
-        did: params.get("did"),
-        direction: params.get("direction"),
-        session_id: params.get("session_id"),
-        extra_raw: params.get("extra"),
-        czdata: params.get("czdata"),
-      }
+        app_id: params.get('app_id'),
+        caller_id: params.get('caller_id'), // Customer mobile number
+        did: params.get('did'), // DID number
+        direction: params.get('direction'),
+        session_id: params.get('session_id'),
+        extra_raw: params.get('extra'),
+        czdata: params.get('czdata')
+      };
 
+      // Decode extra field if present
       if (sipData.extra_raw) {
         try {
-          const decodedExtra = this.decodeBase64Extra(decodeURIComponent(sipData.extra_raw))
-          sipData.extra = decodedExtra
+          const decodedExtra = this.decodeBase64Extra(decodeURIComponent(sipData.extra_raw));
+          sipData.extra = decodedExtra;
         } catch (decodeError) {
-          console.error(`❌ [SIP-PARSE] Failed to decode extra field: ${decodeError.message}`)
-          sipData.extra = null
+          console.error(`❌ [SIP-PARSE] Failed to decode extra field: ${decodeError.message}`);
+          sipData.extra = null;
         }
       }
 
-      return sipData
+      return sipData;
     } catch (error) {
-      console.log(`ℹ️ [SIP-PARSE] URL parsing failed (likely non-SIP connection): ${error.message}`)
-      return null
+      console.log(`ℹ️ [SIP-PARSE] URL parsing failed (likely non-SIP connection): ${error.message}`);
+      return null;
     }
   }
 
   static logSIPData(sipData) {
-    console.log(`\n🌐 [SIP-HEADERS] ==========================================`)
-    console.log(`📱 [SIP-HEADERS] Customer Mobile (caller_id): ${sipData.caller_id}`)
-    console.log(`📞 [SIP-HEADERS] DID Number: ${sipData.did}`)
-    console.log(`🔄 [SIP-HEADERS] Direction: ${sipData.direction || "Not specified"}`)
-    console.log(`🆔 [SIP-HEADERS] App ID: ${sipData.app_id}`)
-    console.log(`🔗 [SIP-HEADERS] Session ID: ${sipData.session_id}`)
-
+    console.log(`\n🌐 [SIP-HEADERS] ==========================================`);
+    console.log(`📱 [SIP-HEADERS] Customer Mobile (caller_id): ${sipData.caller_id}`);
+    console.log(`📞 [SIP-HEADERS] DID Number: ${sipData.did}`);
+    console.log(`🔄 [SIP-HEADERS] Direction: ${sipData.direction || 'Not specified'}`);
+    console.log(`🆔 [SIP-HEADERS] App ID: ${sipData.app_id}`);
+    console.log(`🔗 [SIP-HEADERS] Session ID: ${sipData.session_id}`);
+    
     if (sipData.extra) {
-      console.log(`📋 [SIP-HEADERS] Extra Data:`)
-      console.log(`   • Call CLI: ${sipData.extra.CallCli}`)
-      console.log(`   • Call Session ID: ${sipData.extra.CallSessionId}`)
-      console.log(`   • Call VA ID: ${sipData.extra.CallVaId}`)
-      console.log(`   • DID (from extra): ${sipData.extra.DID}`)
-      console.log(`   • CZ Service App ID: ${sipData.extra.CZSERVICEAPPID}`)
-      console.log(`   • Call Direction: ${sipData.extra.CallDirection}`)
+      console.log(`📋 [SIP-HEADERS] Extra Data:`);
+      console.log(`   • Call CLI: ${sipData.extra.CallCli}`);
+      console.log(`   • Call Session ID: ${sipData.extra.CallSessionId}`);
+      console.log(`   • Call VA ID: ${sipData.extra.CallVaId}`);
+      console.log(`   • DID (from extra): ${sipData.extra.DID}`);
+      console.log(`   • CZ Service App ID: ${sipData.extra.CZSERVICEAPPID}`);
+      console.log(`   • Call Direction: ${sipData.extra.CallDirection}`);
     }
-    console.log(`🌐 [SIP-HEADERS] ==========================================\n`)
+    console.log(`🌐 [SIP-HEADERS] ==========================================\n`);
   }
 
   static determineCallType(sipData) {
+    // Check direction from extra data first
     if (sipData.extra?.CallDirection) {
-      const direction = sipData.extra.CallDirection.toLowerCase()
-      if (direction === "outdial") return "outbound"
-      if (direction === "indial") return "inbound"
+      const direction = sipData.extra.CallDirection.toLowerCase();
+      if (direction === 'outdial') return 'outbound';
+      if (direction === 'indial') return 'inbound';
     }
-
+    
+    // Check main direction field
     if (sipData.direction) {
-      const direction = sipData.direction.toLowerCase()
-      if (direction === "outbound" || direction === "outdial") return "outbound"
-      if (direction === "inbound" || direction === "indial") return "inbound"
+      const direction = sipData.direction.toLowerCase();
+      if (direction === 'outbound' || direction === 'outdial') return 'outbound';
+      if (direction === 'inbound' || direction === 'indial') return 'inbound';
     }
-
+    
+    // Fallback logic based on available data
     if (sipData.extra?.CallVaId) {
-      return "inbound"
+      return 'inbound'; // Assumption: VA ID present means inbound
     }
-
-    return "unknown"
+    
+    return 'unknown';
   }
 
+  // NEW: Extract actual customer number from SIP data
   static getCustomerNumber(sipData) {
+    // For outbound calls, customer number is in CallCli
     if (sipData.extra?.CallCli) {
-      return sipData.extra.CallCli
+      return sipData.extra.CallCli;
     }
-
+    
+    // For inbound calls, it might be in caller_id
     if (sipData.caller_id && sipData.caller_id !== sipData.extra?.CallVaId) {
-      return sipData.caller_id
+      return sipData.caller_id;
     }
-
-    return null
+    
+    return null;
   }
 
+  // NEW: Get agent identifier based on call type
   static getAgentIdentifier(sipData) {
-    const callType = this.determineCallType(sipData)
-
-    if (callType === "outbound") {
-      return sipData.extra?.CallVaId || sipData.caller_id
+    const callType = this.determineCallType(sipData);
+    
+    if (callType === 'outbound') {
+      // For outbound, use CallVaId as the agent identifier (caller ID in agent table)
+      return sipData.extra?.CallVaId || sipData.caller_id;
     } else {
-      return sipData.app_id
+      // For inbound, use traditional accountSid approach
+      return sipData.app_id; // This should map to accountSid
     }
   }
 }
 
-// Enhanced language mappings
+// Enhanced language mappings with Marathi support
 const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
-  en: "en-IN",
-  bn: "bn-IN",
-  te: "te-IN",
+  hi: "hi-IN", 
+  en: "en-IN", 
+  bn: "bn-IN", 
+  te: "te-IN", 
   ta: "ta-IN",
-  mr: "mr-IN",
-  gu: "gu-IN",
-  kn: "kn-IN",
-  ml: "ml-IN",
+  mr: "mr-IN", // Marathi added
+  gu: "gu-IN", 
+  kn: "kn-IN", 
+  ml: "ml-IN", 
   pa: "pa-IN",
-  or: "or-IN",
-  as: "as-IN",
+  or: "or-IN", 
+  as: "as-IN", 
   ur: "ur-IN",
-}
+};
 
 const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
-  return LANGUAGE_MAPPING[lang] || "hi-IN"
-}
+  const lang = detectedLang?.toLowerCase() || defaultLang;
+  return LANGUAGE_MAPPING[lang] || "hi-IN";
+};
 
 const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
-  if (lang === "hi") return "hi"
-  if (lang === "en") return "en-IN"
-  if (lang === "mr") return "mr"
-  return lang
-}
+  const lang = detectedLang?.toLowerCase() || defaultLang;
+  if (lang === "hi") return "hi";
+  if (lang === "en") return "en-IN";
+  if (lang === "mr") return "mr"; // Marathi support for Deepgram
+  return lang;
+};
 
 // Valid Sarvam voice options
-const VALID_SARVAM_VOICES = ["meera", "pavithra", "arvind", "amol", "maya"]
+const VALID_SARVAM_VOICES = ["meera", "pavithra", "arvind", "amol", "maya"];
 
 const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
-    return voiceSelection
+    return voiceSelection;
   }
-
+  
   const voiceMapping = {
     "male-professional": "arvind",
     "female-professional": "pavithra",
@@ -712,12 +216,12 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
     "female-friendly": "maya",
     neutral: "pavithra",
     default: "pavithra",
-  }
+  };
+  
+  return voiceMapping[voiceSelection] || "pavithra";
+};
 
-  return voiceMapping[voiceSelection] || "pavithra"
-}
-
-// Language detection with OpenAI
+// Enhanced language detection with Marathi support
 const detectLanguageWithOpenAI = async (text) => {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -741,101 +245,105 @@ Examples:
 - "तुम्ही कसे आहात?" → mr
 - "તમે કેમ છો?" → gu
 
-Return only the language code, nothing else.`,
+Return only the language code, nothing else.`
           },
           {
             role: "user",
-            content: text,
-          },
+            content: text
+          }
         ],
         max_tokens: 10,
         temperature: 0.1,
       }),
-    })
+    });
 
     if (!response.ok) {
-      throw new Error(`Language detection failed: ${response.status}`)
+      throw new Error(`Language detection failed: ${response.status}`);
     }
 
-    const data = await response.json()
-    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
-
-    const validLanguages = Object.keys(LANGUAGE_MAPPING)
+    const data = await response.json();
+    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase();
+    
+    // Validate detected language
+    const validLanguages = Object.keys(LANGUAGE_MAPPING);
     if (validLanguages.includes(detectedLang)) {
-      console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`)
-      return detectedLang
+      console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`);
+      return detectedLang;
     }
-
-    console.log(`⚠️ [LANG-DETECT] Invalid language "${detectedLang}", defaulting to "hi"`)
-    return "hi"
+    
+    console.log(`⚠️ [LANG-DETECT] Invalid language "${detectedLang}", defaulting to "hi"`);
+    return "hi"; // Default fallback
+    
   } catch (error) {
-    console.error(`❌ [LANG-DETECT] Error: ${error.message}`)
-    return "hi"
+    console.error(`❌ [LANG-DETECT] Error: ${error.message}`);
+    return "hi"; // Default fallback
   }
-}
+};
 
-// Enhanced Call logging utility class
+// Enhanced Call logging utility class with SIP data
 class CallLogger {
   constructor(clientId, sipData = null) {
-    this.clientId = clientId
-    this.sipData = sipData
-    this.mobile = SIPHeaderDecoder.getCustomerNumber(sipData) || sipData?.caller_id || null
-    this.callStartTime = new Date()
-    this.transcripts = []
-    this.responses = []
-    this.totalDuration = 0
-
+    this.clientId = clientId;
+    this.sipData = sipData;
+    this.mobile = SIPHeaderDecoder.getCustomerNumber(sipData) || sipData?.caller_id || null;
+    this.callStartTime = new Date();
+    this.transcripts = [];
+    this.responses = [];
+    this.totalDuration = 0;
+    
+    // Log SIP data initialization
     if (sipData) {
-      console.log(`📝 [CALL-LOG] Initialized with SIP data for client: ${clientId}`)
-      console.log(`📱 [CALL-LOG] Customer number: ${this.mobile}`)
-      SIPHeaderDecoder.logSIPData(sipData)
+      console.log(`📝 [CALL-LOG] Initialized with SIP data for client: ${clientId}`);
+      console.log(`📱 [CALL-LOG] Customer number: ${this.mobile}`);
+      SIPHeaderDecoder.logSIPData(sipData);
     }
   }
 
+  // Log user transcript from Deepgram
   logUserTranscript(transcript, language, timestamp = new Date()) {
     const entry = {
-      type: "user",
+      type: 'user',
       text: transcript,
       language: language,
       timestamp: timestamp,
-      source: "deepgram",
-    }
-
-    this.transcripts.push(entry)
-    console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`)
+      source: 'deepgram'
+    };
+    
+    this.transcripts.push(entry);
+    console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`);
   }
 
+  // Log AI response from Sarvam
   logAIResponse(response, language, timestamp = new Date()) {
     const entry = {
-      type: "ai",
+      type: 'ai',
       text: response,
       language: language,
       timestamp: timestamp,
-      source: "sarvam",
-    }
-
-    this.responses.push(entry)
-    console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`)
+      source: 'sarvam'
+    };
+    
+    this.responses.push(entry);
+    console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`);
   }
 
+  // Generate full transcript combining user and AI messages
   generateFullTranscript() {
-    const allEntries = [...this.transcripts, ...this.responses].sort(
-      (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
-    )
-
-    return allEntries
-      .map((entry) => {
-        const speaker = entry.type === "user" ? "User" : "AI"
-        const time = entry.timestamp.toISOString()
-        return `[${time}] ${speaker} (${entry.language}): ${entry.text}`
-      })
-      .join("\n")
+    const allEntries = [...this.transcripts, ...this.responses]
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    return allEntries.map(entry => {
+      const speaker = entry.type === 'user' ? 'User' : 'AI';
+      const time = entry.timestamp.toISOString();
+      return `[${time}] ${speaker} (${entry.language}): ${entry.text}`;
+    }).join('\n');
   }
 
-  async saveToDatabase(leadStatus = "medium") {
+  // Enhanced save to database with SIP data
+  async saveToDatabase(leadStatus = 'medium') {
     try {
-      const callEndTime = new Date()
-      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000)
+      const callEndTime = new Date();
+      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000); // Duration in seconds
 
       const callLogData = {
         clientId: this.clientId,
@@ -844,94 +352,86 @@ class CallLogger {
         transcript: this.generateFullTranscript(),
         duration: this.totalDuration,
         leadStatus: leadStatus,
+        // Enhanced metadata with SIP data
         metadata: {
           userTranscriptCount: this.transcripts.length,
           aiResponseCount: this.responses.length,
-          languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
+          languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
           callEndTime: callEndTime,
+          // SIP Headers
           sipData: this.sipData,
-          callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : "unknown",
+          callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : 'unknown',
           did: this.sipData?.did,
           appId: this.sipData?.app_id,
           sessionId: this.sipData?.session_id,
           extraData: this.sipData?.extra,
-          customerNumber: this.mobile,
-        },
-      }
+          customerNumber: this.mobile
+        }
+      };
 
-      const callLog = new CallLog(callLogData)
-      const savedLog = await callLog.save()
-
-      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s`)
-      console.log(
-        `📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`,
-      )
-
+      const callLog = new CallLog(callLogData);
+      const savedLog = await callLog.save();
+      
+      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s`);
+      console.log(`📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`);
+      
       if (this.sipData) {
-        console.log(
-          `📞 [CALL-LOG] SIP Data - Type: ${SIPHeaderDecoder.determineCallType(this.sipData)}, DID: ${this.sipData.did}, Customer: ${this.mobile}`,
-        )
+        console.log(`📞 [CALL-LOG] SIP Data - Type: ${SIPHeaderDecoder.determineCallType(this.sipData)}, DID: ${this.sipData.did}, Customer: ${this.mobile}`);
       }
-
-      return savedLog
+      
+      return savedLog;
     } catch (error) {
-      console.error(`❌ [CALL-LOG] Database save error: ${error.message}`)
-      throw error
+      console.error(`❌ [CALL-LOG] Database save error: ${error.message}`);
+      throw error;
     }
   }
 
+  // Get enhanced call statistics
   getStats() {
     return {
       duration: this.totalDuration,
       userMessages: this.transcripts.length,
       aiResponses: this.responses.length,
-      languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
+      languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
       startTime: this.callStartTime,
       sipData: this.sipData,
-      callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : "unknown",
-      customerNumber: this.mobile,
-    }
+      callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : 'unknown',
+      customerNumber: this.mobile
+    };
   }
 }
 
-// OpenAI streaming processing
-const processWithOpenAIStreaming = async (
-  userMessage,
-  conversationHistory,
-  detectedLanguage,
-  onPhrase,
-  onComplete,
-  onInterrupt,
-  callLogger,
-) => {
-  const timer = createTimer("OPENAI_STREAMING")
-
+// Optimized OpenAI streaming with phrase-based chunking and language detection
+const processWithOpenAIStreaming = async (userMessage, conversationHistory, detectedLanguage, onPhrase, onComplete, onInterrupt, callLogger) => {
+  const timer = createTimer("OPENAI_STREAMING");
+  
   try {
+    // Enhanced system prompt with Marathi support
     const getSystemPrompt = (lang) => {
       const prompts = {
         hi: "आप एआई तोता हैं, एक विनम्र और भावनात्मक रूप से बुद्धिमान AI ग्राहक सेवा कार्यकारी। आप हिंदी में धाराप्रवाह बोलते हैं। प्राकृतिक, बातचीत की भाषा का प्रयोग करें जो गर्मजोशी और सहानुभूति से भरी हो। जवाब छोटे रखें—केवल 1-2 लाइन। ग्राहकों को सुना, समर्थित और मूल्यवान महसूस कराना आपका लक्ष्य है।",
-
+        
         en: "You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. Your goal is to make customers feel heard, supported, and valued.",
-
+        
         bn: "আপনি আইতোতা, একজন ভদ্র এবং আবেগপ্রবণভাবে বুদ্ধিমান AI গ্রাহক সেবা কর্মকর্তা। আপনি বাংলায় সাবলীলভাবে কথা বলেন। উষ্ণতা এবং সহানুভূতি সহ প্রাকৃতিক, কথোপকথনমূলক ভাষা ব্যবহার করুন।",
-
+        
         te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
+        
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
+        
+        mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।"
+      };
+      
+      return prompts[lang] || prompts.en;
+    };
 
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்.",
-
-        mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
-      }
-
-      return prompts[lang] || prompts.en
-    }
-
-    const systemPrompt = getSystemPrompt(detectedLanguage)
+    const systemPrompt = getSystemPrompt(detectedLanguage);
 
     const messages = [
       { role: "system", content: systemPrompt },
       ...conversationHistory.slice(-6),
-      { role: "user", content: userMessage },
-    ]
+      { role: "user", content: userMessage }
+    ];
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -946,73 +446,76 @@ const processWithOpenAIStreaming = async (
         temperature: 0.3,
         stream: true,
       }),
-    })
+    });
 
     if (!response.ok) {
-      console.error(`❌ [OPENAI] Error: ${response.status}`)
-      return null
+      console.error(`❌ [OPENAI] Error: ${response.status}`);
+      return null;
     }
 
-    let fullResponse = ""
-    let phraseBuffer = ""
-    let isFirstPhrase = true
-    let isInterrupted = false
+    let fullResponse = "";
+    let phraseBuffer = "";
+    let isFirstPhrase = true;
+    let isInterrupted = false;
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
 
+    // Check for interruption periodically
     const checkInterruption = () => {
-      return onInterrupt && onInterrupt()
-    }
+      return onInterrupt && onInterrupt();
+    };
 
     while (true) {
+      // Check for interruption
       if (checkInterruption()) {
-        isInterrupted = true
-        console.log(`⚠️ [OPENAI] Stream interrupted by new user input`)
-        reader.cancel()
-        break
+        isInterrupted = true;
+        console.log(`⚠️ [OPENAI] Stream interrupted by new user input`);
+        reader.cancel();
+        break;
       }
 
-      const { done, value } = await reader.read()
-      if (done) break
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true })
-      const lines = chunk.split("\n").filter((line) => line.trim())
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n').filter(line => line.trim());
 
       for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6)
-
-          if (data === "[DONE]") {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          
+          if (data === '[DONE]') {
             if (phraseBuffer.trim() && !isInterrupted) {
-              onPhrase(phraseBuffer.trim(), detectedLanguage)
-              fullResponse += phraseBuffer
+              onPhrase(phraseBuffer.trim(), detectedLanguage);
+              fullResponse += phraseBuffer;
             }
-            break
+            break;
           }
 
           try {
-            const parsed = JSON.parse(data)
-            const content = parsed.choices?.[0]?.delta?.content
-
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content;
+            
             if (content) {
-              phraseBuffer += content
-
+              phraseBuffer += content;
+              
+              // Check for interruption before sending phrase
               if (checkInterruption()) {
-                isInterrupted = true
-                break
+                isInterrupted = true;
+                break;
               }
-
+              
               if (shouldSendPhrase(phraseBuffer)) {
-                const phrase = phraseBuffer.trim()
+                const phrase = phraseBuffer.trim();
                 if (phrase.length > 0 && !isInterrupted) {
                   if (isFirstPhrase) {
-                    console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint("first_phrase")}ms)`)
-                    isFirstPhrase = false
+                    console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint('first_phrase')}ms)`);
+                    isFirstPhrase = false;
                   }
-                  onPhrase(phrase, detectedLanguage)
-                  fullResponse += phrase
-                  phraseBuffer = ""
+                  onPhrase(phrase, detectedLanguage);
+                  fullResponse += phrase;
+                  phraseBuffer = "";
                 }
               }
             }
@@ -1021,202 +524,222 @@ const processWithOpenAIStreaming = async (
           }
         }
       }
-
-      if (isInterrupted) break
+      
+      if (isInterrupted) break;
     }
 
     if (!isInterrupted) {
-      console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`)
-
+      console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`);
+      
+      // Log AI response to call logger
       if (callLogger && fullResponse.trim()) {
-        callLogger.logAIResponse(fullResponse.trim(), detectedLanguage)
+        callLogger.logAIResponse(fullResponse.trim(), detectedLanguage);
       }
-
-      onComplete(fullResponse)
+      
+      onComplete(fullResponse);
     } else {
-      console.log(`🤖 [OPENAI] Interrupted after ${timer.end()}ms`)
+      console.log(`🤖 [OPENAI] Interrupted after ${timer.end()}ms`);
     }
+    
+    return isInterrupted ? null : fullResponse;
 
-    return isInterrupted ? null : fullResponse
   } catch (error) {
-    console.error(`❌ [OPENAI] Error: ${error.message}`)
-    return null
+    console.error(`❌ [OPENAI] Error: ${error.message}`);
+    return null;
   }
-}
+};
 
+// Smart phrase detection for better chunking
 const shouldSendPhrase = (buffer) => {
-  const trimmed = buffer.trim()
+  const trimmed = buffer.trim();
+  
+  // Complete sentences
+  if (/[.!?।॥।]$/.test(trimmed)) return true;
+  
+  // Meaningful phrases with natural breaks
+  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true;
+  
+  // Longer phrases (prevent too much buffering)
+  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true;
+  
+  return false;
+};
 
-  if (/[.!?।॥।]$/.test(trimmed)) return true
-  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true
-  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true
-
-  return false
-}
-
-// TTS processor
+// Enhanced TTS processor with call logging
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
-    this.language = language
-    this.ws = ws
-    this.streamSid = streamSid
-    this.callLogger = callLogger
-    this.queue = []
-    this.isProcessing = false
-    this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
-
-    this.isInterrupted = false
-    this.currentAudioStreaming = null
-
-    this.sentenceBuffer = ""
-    this.processingTimeout = 100
-    this.sentenceTimer = null
-
-    this.totalChunks = 0
-    this.totalAudioBytes = 0
+    this.language = language;
+    this.ws = ws;
+    this.streamSid = streamSid;
+    this.callLogger = callLogger;
+    this.queue = [];
+    this.isProcessing = false;
+    this.sarvamLanguage = getSarvamLanguage(language);
+    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra");
+    
+    // Interruption handling
+    this.isInterrupted = false;
+    this.currentAudioStreaming = null;
+    
+    // Sentence-based processing settings
+    this.sentenceBuffer = "";
+    this.processingTimeout = 100;
+    this.sentenceTimer = null;
+    
+    // Audio streaming stats
+    this.totalChunks = 0;
+    this.totalAudioBytes = 0;
   }
 
+  // Method to interrupt current processing
   interrupt() {
-    console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`)
-    this.isInterrupted = true
-
-    this.queue = []
-    this.sentenceBuffer = ""
-
+    console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`);
+    this.isInterrupted = true;
+    
+    // Clear queue and buffer
+    this.queue = [];
+    this.sentenceBuffer = "";
+    
+    // Clear any pending timeout
     if (this.sentenceTimer) {
-      clearTimeout(this.sentenceTimer)
-      this.sentenceTimer = null
+      clearTimeout(this.sentenceTimer);
+      this.sentenceTimer = null;
     }
-
+    
+    // Stop current audio streaming if active
     if (this.currentAudioStreaming) {
-      this.currentAudioStreaming.interrupt = true
+      this.currentAudioStreaming.interrupt = true;
     }
-
-    console.log(`🛑 [SARVAM-TTS] Processing interrupted and cleaned up`)
+    
+    console.log(`🛑 [SARVAM-TTS] Processing interrupted and cleaned up`);
   }
 
+  // Reset for new processing
   reset(newLanguage) {
-    this.interrupt()
-
+    this.interrupt();
+    
+    // Update language settings
     if (newLanguage) {
-      this.language = newLanguage
-      this.sarvamLanguage = getSarvamLanguage(newLanguage)
-      console.log(`🔄 [SARVAM-TTS] Language updated to: ${this.sarvamLanguage}`)
+      this.language = newLanguage;
+      this.sarvamLanguage = getSarvamLanguage(newLanguage);
+      console.log(`🔄 [SARVAM-TTS] Language updated to: ${this.sarvamLanguage}`);
     }
-
-    this.isInterrupted = false
-    this.isProcessing = false
-    this.totalChunks = 0
-    this.totalAudioBytes = 0
+    
+    // Reset state
+    this.isInterrupted = false;
+    this.isProcessing = false;
+    this.totalChunks = 0;
+    this.totalAudioBytes = 0;
   }
 
   addPhrase(phrase, detectedLanguage) {
-    if (!phrase.trim() || this.isInterrupted) return
-
+    if (!phrase.trim() || this.isInterrupted) return;
+    
+    // Update language if different from current
     if (detectedLanguage && detectedLanguage !== this.language) {
-      console.log(`🔄 [SARVAM-TTS] Language change detected: ${this.language} → ${detectedLanguage}`)
-      this.language = detectedLanguage
-      this.sarvamLanguage = getSarvamLanguage(detectedLanguage)
+      console.log(`🔄 [SARVAM-TTS] Language change detected: ${this.language} → ${detectedLanguage}`);
+      this.language = detectedLanguage;
+      this.sarvamLanguage = getSarvamLanguage(detectedLanguage);
     }
-
-    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim()
-
+    
+    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
+    
     if (this.hasCompleteSentence(this.sentenceBuffer)) {
-      this.processCompleteSentences()
+      this.processCompleteSentences();
     } else {
-      this.scheduleProcessing()
+      this.scheduleProcessing();
     }
   }
 
   hasCompleteSentence(text) {
-    return /[.!?।॥।]/.test(text)
+    return /[.!?।॥।]/.test(text);
   }
 
   extractCompleteSentences(text) {
-    const sentences = text.split(/([.!?।॥।])/).filter((s) => s.trim())
-
-    let completeSentences = ""
-    let remainingText = ""
-
+    const sentences = text.split(/([.!?।॥।])/).filter(s => s.trim());
+    
+    let completeSentences = "";
+    let remainingText = "";
+    
     for (let i = 0; i < sentences.length; i += 2) {
-      const sentence = sentences[i]
-      const punctuation = sentences[i + 1]
-
+      const sentence = sentences[i];
+      const punctuation = sentences[i + 1];
+      
       if (punctuation) {
-        completeSentences += sentence + punctuation + " "
+        completeSentences += sentence + punctuation + " ";
       } else {
-        remainingText = sentence
+        remainingText = sentence;
       }
     }
-
+    
     return {
       complete: completeSentences.trim(),
-      remaining: remainingText.trim(),
-    }
+      remaining: remainingText.trim()
+    };
   }
 
   processCompleteSentences() {
-    if (this.isInterrupted) return
-
+    if (this.isInterrupted) return;
+    
     if (this.sentenceTimer) {
-      clearTimeout(this.sentenceTimer)
-      this.sentenceTimer = null
+      clearTimeout(this.sentenceTimer);
+      this.sentenceTimer = null;
     }
 
-    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer)
-
+    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
+    
     if (complete && !this.isInterrupted) {
-      this.queue.push(complete)
-      this.sentenceBuffer = remaining
-      this.processQueue()
+      this.queue.push(complete);
+      this.sentenceBuffer = remaining;
+      this.processQueue();
     }
   }
 
   scheduleProcessing() {
-    if (this.isInterrupted) return
-
-    if (this.sentenceTimer) clearTimeout(this.sentenceTimer)
-
+    if (this.isInterrupted) return;
+    
+    if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
+    
     this.sentenceTimer = setTimeout(() => {
       if (this.sentenceBuffer.trim() && !this.isInterrupted) {
-        this.queue.push(this.sentenceBuffer.trim())
-        this.sentenceBuffer = ""
-        this.processQueue()
+        this.queue.push(this.sentenceBuffer.trim());
+        this.sentenceBuffer = "";
+        this.processQueue();
       }
-    }, this.processingTimeout)
+    }, this.processingTimeout);
   }
 
   async processQueue() {
-    if (this.isProcessing || this.queue.length === 0 || this.isInterrupted) return
+    if (this.isProcessing || this.queue.length === 0 || this.isInterrupted) return;
 
-    this.isProcessing = true
-    const textToProcess = this.queue.shift()
+    this.isProcessing = true;
+    const textToProcess = this.queue.shift();
 
     try {
       if (!this.isInterrupted) {
-        await this.synthesizeAndStream(textToProcess)
+        await this.synthesizeAndStream(textToProcess);
       }
     } catch (error) {
       if (!this.isInterrupted) {
-        console.error(`❌ [SARVAM-TTS] Error: ${error.message}`)
+        console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
       }
     } finally {
-      this.isProcessing = false
-
+      this.isProcessing = false;
+      
+      // Process next item in queue if not interrupted
       if (this.queue.length > 0 && !this.isInterrupted) {
-        setTimeout(() => this.processQueue(), 10)
+        setTimeout(() => this.processQueue(), 10);
       }
     }
   }
 
   async synthesizeAndStream(text) {
-    if (this.isInterrupted) return
-
-    const timer = createTimer("SARVAM_TTS_SENTENCE")
-
+    if (this.isInterrupted) return;
+    
+    const timer = createTimer("SARVAM_TTS_SENTENCE");
+    
     try {
-      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`)
+      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -1235,1040 +758,1076 @@ class OptimizedSarvamTTSProcessor {
           enable_preprocessing: false,
           model: "bulbul:v1",
         }),
-      })
+      });
 
       if (!response.ok || this.isInterrupted) {
-        if (this.isInterrupted) return
-        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`)
+        if (this.isInterrupted) return;
+        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
       }
 
-      const responseData = await response.json()
-      const audioBase64 = responseData.audios?.[0]
-
+      const responseData = await response.json();
+      const audioBase64 = responseData.audios?.[0];
+      
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
-          throw new Error("No audio data received from Sarvam API")
+          throw new Error("No audio data received from Sarvam API");
         }
-        return
+        return;
       }
 
-      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`)
-
+      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
+      
+      // Stream audio if not interrupted
       if (!this.isInterrupted) {
-        await this.streamAudioOptimizedForSIP(audioBase64)
-
-        const audioBuffer = Buffer.from(audioBase64, "base64")
-        this.totalAudioBytes += audioBuffer.length
-        this.totalChunks++
+        await this.streamAudioOptimizedForSIP(audioBase64);
+        
+        const audioBuffer = Buffer.from(audioBase64, "base64");
+        this.totalAudioBytes += audioBuffer.length;
+        this.totalChunks++;
       }
+      
     } catch (error) {
       if (!this.isInterrupted) {
-        console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`)
-        throw error
+        console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
+        throw error;
       }
     }
   }
 
   async streamAudioOptimizedForSIP(audioBase64) {
-    if (this.isInterrupted) return
-
-    const audioBuffer = Buffer.from(audioBase64, "base64")
-    const streamingSession = { interrupt: false }
-    this.currentAudioStreaming = streamingSession
-
-    const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // ~160 bytes per chunk
-
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ~160 byte chunks`)
-
-    let position = 0
-    let chunkIndex = 0
-
+    if (this.isInterrupted) return;
+    
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const streamingSession = { interrupt: false };
+    this.currentAudioStreaming = streamingSession;
+    
+    // SIP audio specifications
+    const SAMPLE_RATE = 8000;
+    const BYTES_PER_SAMPLE = 2;
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
+    
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
+    
+    let position = 0;
+    let chunkIndex = 0;
+    
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = audioBuffer.length - position
-      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-      const chunk = audioBuffer.slice(position, position + chunkSize)
-
-      console.log(
-        `📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (base64: ${chunk.toString("base64").length} chars)`,
-      )
-
+      const remaining = audioBuffer.length - position;
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining);
+      const chunk = audioBuffer.slice(position, position + chunkSize);
+      
+      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`);
+      
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
         media: {
-          payload: chunk.toString("base64"),
-        },
-      }
+          payload: chunk.toString("base64")
+        }
+      };
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-        this.ws.send(JSON.stringify(mediaMessage))
+        this.ws.send(JSON.stringify(mediaMessage));
       }
-
+      
+      // Delay between chunks
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        const delayMs = Math.max(chunkDurationMs - 2, 10);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
-
-      position += chunkSize
-      chunkIndex++
+      
+      position += chunkSize;
+      chunkIndex++;
     }
-
+    
     if (this.isInterrupted || streamingSession.interrupt) {
-      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`)
+      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
     } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks (~160 bytes each)`)
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
     }
-
-    this.currentAudioStreaming = null
+    
+    this.currentAudioStreaming = null;
   }
 
   complete() {
-    if (this.isInterrupted) return
-
+    if (this.isInterrupted) return;
+    
     if (this.sentenceBuffer.trim()) {
-      this.queue.push(this.sentenceBuffer.trim())
-      this.sentenceBuffer = ""
+      this.queue.push(this.sentenceBuffer.trim());
+      this.sentenceBuffer = "";
     }
-
+    
     if (this.queue.length > 0) {
-      this.processQueue()
+      this.processQueue();
     }
-
-    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`)
+    
+    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
   }
 
   getStats() {
     return {
       totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
-      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
-    }
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
+    };
   }
 }
 
-// Agent configuration fetcher
+// NEW: Enhanced agent configuration fetcher with detailed caller ID logging
 class AgentConfigFetcher {
   static async fetchAgentConfig(sipData) {
-    const callType = SIPHeaderDecoder.determineCallType(sipData)
-    const agentIdentifier = SIPHeaderDecoder.getAgentIdentifier(sipData)
-    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData)
-
-    console.log(`\n🔍 [AGENT-FETCH] ==========================================`)
-    console.log(`📞 [AGENT-FETCH] Call Type: ${callType}`)
-    console.log(`🆔 [AGENT-FETCH] Agent Identifier: ${agentIdentifier}`)
-    console.log(`📱 [AGENT-FETCH] Customer Number: ${customerNumber}`)
-    console.log(`🌐 [AGENT-FETCH] SIP Data received:`, JSON.stringify(sipData, null, 2))
-
-    let agentConfig = null
-
+    const callType = SIPHeaderDecoder.determineCallType(sipData);
+    const agentIdentifier = SIPHeaderDecoder.getAgentIdentifier(sipData);
+    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData);
+    
+    console.log(`\n🔍 [AGENT-FETCH] ==========================================`);
+    console.log(`📞 [AGENT-FETCH] Call Type: ${callType}`);
+    console.log(`🆔 [AGENT-FETCH] Agent Identifier: ${agentIdentifier}`);
+    console.log(`📱 [AGENT-FETCH] Customer Number: ${customerNumber}`);
+    console.log(`🌐 [AGENT-FETCH] SIP Data received:`, JSON.stringify(sipData, null, 2));
+    
+    let agentConfig = null;
+    
     try {
-      if (callType === "outbound") {
-        console.log(`📤 [AGENT-FETCH] Searching for OUTBOUND agent with callerId: "${agentIdentifier}"`)
-        console.log(`🔍 [AGENT-FETCH] Database query: Agent.findOne({ callerId: "${agentIdentifier}" })`)
-
-        agentConfig = await Agent.findOne({ callerId: agentIdentifier }).lean()
-
+      if (callType === 'outbound') {
+        // For outbound calls, search by callerId field
+        console.log(`📤 [AGENT-FETCH] Searching for OUTBOUND agent with callerId: "${agentIdentifier}"`);
+        
+        // Log the search query for debugging
+        console.log(`🔍 [AGENT-FETCH] Database query: Agent.findOne({ callerId: "${agentIdentifier}" })`);
+        
+        agentConfig = await Agent.findOne({ callerId: agentIdentifier }).lean();
+        
         if (!agentConfig) {
-          console.error(`❌ [AGENT-FETCH] No outbound agent found for callerId: "${agentIdentifier}"`)
-
+          // Enhanced error logging with available agents
+          console.error(`❌ [AGENT-FETCH] No outbound agent found for callerId: "${agentIdentifier}"`);
+          
+          // Log available agents for debugging
           try {
-            const availableAgents = await Agent.find({}, { callerId: 1, agentName: 1, clientId: 1 }).lean()
-            console.log(`📊 [AGENT-FETCH] Available agents in database:`)
+            const availableAgents = await Agent.find({}, { callerId: 1, agentName: 1, clientId: 1 }).lean();
+            console.log(`📊 [AGENT-FETCH] Available agents in database:`);
             availableAgents.forEach((agent, index) => {
-              console.log(
-                `   ${index + 1}. Agent: "${agent.agentName}" | CallerId: "${agent.callerId}" | ClientId: "${agent.clientId}"`,
-              )
-            })
-
-            const partialMatches = availableAgents.filter(
-              (agent) => agent.callerId && agent.callerId.includes(agentIdentifier),
-            )
-
+              console.log(`   ${index + 1}. Agent: "${agent.agentName}" | CallerId: "${agent.callerId}" | ClientId: "${agent.clientId}"`);
+            });
+            
+            // Check for partial matches
+            const partialMatches = availableAgents.filter(agent => 
+              agent.callerId && agent.callerId.includes(agentIdentifier)
+            );
+            
             if (partialMatches.length > 0) {
-              console.log(`🔍 [AGENT-FETCH] Partial matches found:`)
+              console.log(`🔍 [AGENT-FETCH] Partial matches found:`);
               partialMatches.forEach((agent, index) => {
-                console.log(`   ${index + 1}. Agent: "${agent.agentName}" | CallerId: "${agent.callerId}"`)
-              })
+                console.log(`   ${index + 1}. Agent: "${agent.agentName}" | CallerId: "${agent.callerId}"`);
+              });
             }
+            
           } catch (debugError) {
-            console.error(`❌ [AGENT-FETCH] Error fetching available agents: ${debugError.message}`)
+            console.error(`❌ [AGENT-FETCH] Error fetching available agents: ${debugError.message}`);
           }
-
-          return {
-            success: false,
+          
+          return { 
+            success: false, 
             error: `No outbound agent found for callerId: "${agentIdentifier}". Please check agent configuration.`,
             callType,
             agentIdentifier,
-            customerNumber,
-          }
+            customerNumber
+          };
         }
-
-        console.log(`✅ [AGENT-FETCH] OUTBOUND agent found successfully!`)
-        console.log(`   🏷️  Agent Name: "${agentConfig.agentName}"`)
-        console.log(`   🆔 Client ID: "${agentConfig.clientId}"`)
-        console.log(`   📞 Caller ID: "${agentConfig.callerId}"`)
-        console.log(`   🌍 Language: "${agentConfig.language}"`)
-        console.log(`   🎵 Voice: "${agentConfig.voiceSelection}"`)
-        console.log(`   📝 Category: "${agentConfig.category}"`)
-        console.log(`   👤 Personality: "${agentConfig.personality}"`)
-        console.log(`   💬 First Message: "${agentConfig.firstMessage}"`)
+        
+        console.log(`✅ [AGENT-FETCH] OUTBOUND agent found successfully!`);
+        console.log(`   🏷️  Agent Name: "${agentConfig.agentName}"`);
+        console.log(`   🆔 Client ID: "${agentConfig.clientId}"`);
+        console.log(`   📞 Caller ID: "${agentConfig.callerId}"`);
+        console.log(`   🌍 Language: "${agentConfig.language}"`);
+        console.log(`   🎵 Voice: "${agentConfig.voiceSelection}"`);
+        console.log(`   📝 Category: "${agentConfig.category}"`);
+        console.log(`   👤 Personality: "${agentConfig.personality}"`);
+        console.log(`   💬 First Message: "${agentConfig.firstMessage}"`);
+        
       } else {
-        console.log(`📥 [AGENT-FETCH] Searching for INBOUND agent with accountSid: "${agentIdentifier}"`)
-        console.log(`🔍 [AGENT-FETCH] Database query: Agent.findOne({ accountSid: "${agentIdentifier}" })`)
-
-        agentConfig = await Agent.findOne({ accountSid: agentIdentifier }).lean()
-
+        // For inbound calls, search by accountSid field (existing logic)
+        console.log(`📥 [AGENT-FETCH] Searching for INBOUND agent with accountSid: "${agentIdentifier}"`);
+        
+        // Log the search query for debugging
+        console.log(`🔍 [AGENT-FETCH] Database query: Agent.findOne({ accountSid: "${agentIdentifier}" })`);
+        
+        agentConfig = await Agent.findOne({ accountSid: agentIdentifier }).lean();
+        
         if (!agentConfig) {
-          console.error(`❌ [AGENT-FETCH] No inbound agent found for accountSid: "${agentIdentifier}"`)
-
+          // Enhanced error logging with available agents
+          console.error(`❌ [AGENT-FETCH] No inbound agent found for accountSid: "${agentIdentifier}"`);
+          
+          // Log available agents for debugging
           try {
-            const availableAgents = await Agent.find({}, { accountSid: 1, agentName: 1, clientId: 1 }).lean()
-            console.log(`📊 [AGENT-FETCH] Available agents in database:`)
+            const availableAgents = await Agent.find({}, { accountSid: 1, agentName: 1, clientId: 1 }).lean();
+            console.log(`📊 [AGENT-FETCH] Available agents in database:`);
             availableAgents.forEach((agent, index) => {
-              console.log(
-                `   ${index + 1}. Agent: "${agent.agentName}" | AccountSid: "${agent.accountSid}" | ClientId: "${agent.clientId}"`,
-              )
-            })
-
-            const partialMatches = availableAgents.filter(
-              (agent) => agent.accountSid && agent.accountSid.includes(agentIdentifier),
-            )
-
+              console.log(`   ${index + 1}. Agent: "${agent.agentName}" | AccountSid: "${agent.accountSid}" | ClientId: "${agent.clientId}"`);
+            });
+            
+            // Check for partial matches
+            const partialMatches = availableAgents.filter(agent => 
+              agent.accountSid && agent.accountSid.includes(agentIdentifier)
+            );
+            
             if (partialMatches.length > 0) {
-              console.log(`🔍 [AGENT-FETCH] Partial matches found:`)
+              console.log(`🔍 [AGENT-FETCH] Partial matches found:`);
               partialMatches.forEach((agent, index) => {
-                console.log(`   ${index + 1}. Agent: "${agent.agentName}" | AccountSid: "${agent.accountSid}"`)
-              })
+                console.log(`   ${index + 1}. Agent: "${agent.agentName}" | AccountSid: "${agent.accountSid}"`);
+              });
             }
+            
           } catch (debugError) {
-            console.error(`❌ [AGENT-FETCH] Error fetching available agents: ${debugError.message}`)
+            console.error(`❌ [AGENT-FETCH] Error fetching available agents: ${debugError.message}`);
           }
-
-          return {
-            success: false,
+          
+          return { 
+            success: false, 
             error: `No inbound agent found for accountSid: "${agentIdentifier}". Please check agent configuration.`,
             callType,
             agentIdentifier,
-            customerNumber,
-          }
+            customerNumber
+          };
         }
-
-        console.log(`✅ [AGENT-FETCH] INBOUND agent found successfully!`)
-        console.log(`   🏷️  Agent Name: "${agentConfig.agentName}"`)
-        console.log(`   🆔 Client ID: "${agentConfig.clientId}"`)
-        console.log(`   🏢 Account SID: "${agentConfig.accountSid}"`)
-        console.log(`   🌍 Language: "${agentConfig.language}"`)
-        console.log(`   🎵 Voice: "${agentConfig.voiceSelection}"`)
-        console.log(`   📝 Category: "${agentConfig.category}"`)
-        console.log(`   👤 Personality: "${agentConfig.personality}"`)
-        console.log(`   💬 First Message: "${agentConfig.firstMessage}"`)
+        
+        console.log(`✅ [AGENT-FETCH] INBOUND agent found successfully!`);
+        console.log(`   🏷️  Agent Name: "${agentConfig.agentName}"`);
+        console.log(`   🆔 Client ID: "${agentConfig.clientId}"`);
+        console.log(`   🏢 Account SID: "${agentConfig.accountSid}"`);
+        console.log(`   🌍 Language: "${agentConfig.language}"`);
+        console.log(`   🎵 Voice: "${agentConfig.voiceSelection}"`);
+        console.log(`   📝 Category: "${agentConfig.category}"`);
+        console.log(`   👤 Personality: "${agentConfig.personality}"`);
+        console.log(`   💬 First Message: "${agentConfig.firstMessage}"`);
       }
-
-      console.log(`📋 [AGENT-FETCH] Complete agent configuration loaded:`)
-      console.log(`   🎯 STT Selection: "${agentConfig.sttSelection}"`)
-      console.log(`   🔊 TTS Selection: "${agentConfig.ttsSelection}"`)
-      console.log(`   🤖 LLM Selection: "${agentConfig.llmSelection}"`)
-      console.log(`   📅 Created: ${agentConfig.createdAt}`)
-      console.log(`   🔄 Updated: ${agentConfig.updatedAt}`)
-
+      
+      // Log complete agent configuration
+      console.log(`📋 [AGENT-FETCH] Complete agent configuration loaded:`);
+      console.log(`   🎯 STT Selection: "${agentConfig.sttSelection}"`);
+      console.log(`   🔊 TTS Selection: "${agentConfig.ttsSelection}"`);
+      console.log(`   🤖 LLM Selection: "${agentConfig.llmSelection}"`);
+      console.log(`   📅 Created: ${agentConfig.createdAt}`);
+      console.log(`   🔄 Updated: ${agentConfig.updatedAt}`);
+      
       if (agentConfig.systemPrompt) {
-        console.log(`   📝 System Prompt: "${agentConfig.systemPrompt.substring(0, 100)}..."`)
+        console.log(`   📝 System Prompt: "${agentConfig.systemPrompt.substring(0, 100)}..."`);
       }
-
+      
       if (agentConfig.audioBytes) {
-        console.log(`   🎵 Audio Bytes Length: ${agentConfig.audioBytes.length} characters`)
+        console.log(`   🎵 Audio Bytes Length: ${agentConfig.audioBytes.length} characters`);
       }
-
-      console.log(`🔍 [AGENT-FETCH] ==========================================\n`)
-
-      return {
-        success: true,
-        agentConfig,
+      
+      console.log(`🔍 [AGENT-FETCH] ==========================================\n`);
+      
+      return { 
+        success: true, 
+        agentConfig, 
         callType,
         agentIdentifier,
-        customerNumber,
-      }
+        customerNumber
+      };
+      
     } catch (error) {
-      console.error(`❌ [AGENT-FETCH] Database error: ${error.message}`)
-      console.error(`❌ [AGENT-FETCH] Stack trace:`, error.stack)
-
-      return {
-        success: false,
+      console.error(`❌ [AGENT-FETCH] Database error: ${error.message}`);
+      console.error(`❌ [AGENT-FETCH] Stack trace:`, error.stack);
+      
+      return { 
+        success: false, 
         error: `Database error: ${error.message}`,
         callType,
         agentIdentifier,
-        customerNumber,
-      }
+        customerNumber
+      };
     }
   }
 
+  // NEW: Method to validate agent configuration
   static validateAgentConfig(agentConfig) {
-    const requiredFields = ["clientId", "agentName", "language", "firstMessage"]
-    const missingFields = []
-
+    const requiredFields = ['clientId', 'agentName', 'language', 'firstMessage'];
+    const missingFields = [];
+    
     for (const field of requiredFields) {
       if (!agentConfig[field]) {
-        missingFields.push(field)
+        missingFields.push(field);
       }
     }
-
+    
     if (missingFields.length > 0) {
-      console.warn(`⚠️ [AGENT-VALIDATION] Missing required fields: ${missingFields.join(", ")}`)
-      return { valid: false, missingFields }
+      console.warn(`⚠️ [AGENT-VALIDATION] Missing required fields: ${missingFields.join(', ')}`);
+      return { valid: false, missingFields };
     }
-
-    console.log(`✅ [AGENT-VALIDATION] Agent configuration is valid`)
-    return { valid: true, missingFields: [] }
+    
+    console.log(`✅ [AGENT-VALIDATION] Agent configuration is valid`);
+    return { valid: true, missingFields: [] };
   }
 
+  // NEW: Method to log caller ID connection status
   static logCallerIdConnection(sipData, agentConfig) {
-    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData)
-    const callType = SIPHeaderDecoder.determineCallType(sipData)
-    const agentIdentifier = SIPHeaderDecoder.getAgentIdentifier(sipData)
-
-    console.log(`\n🎯 [CALLER-ID-MATCH] ==========================================`)
-    console.log(`📞 [CALLER-ID-MATCH] Call Type: ${callType}`)
-    console.log(`📱 [CALLER-ID-MATCH] Customer Number: ${customerNumber}`)
-
-    if (callType === "outbound") {
-      console.log(`🔍 [CALLER-ID-MATCH] Searched for callerId: "${agentIdentifier}"`)
-      console.log(`✅ [CALLER-ID-MATCH] Matched callerId: "${agentConfig.callerId}"`)
-      console.log(`🎯 [CALLER-ID-MATCH] Connection Status: SUCCESSFUL - Agent "${agentConfig.agentName}" connected`)
+    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData);
+    const callType = SIPHeaderDecoder.determineCallType(sipData);
+    const agentIdentifier = SIPHeaderDecoder.getAgentIdentifier(sipData);
+    
+    console.log(`\n🎯 [CALLER-ID-MATCH] ==========================================`);
+    console.log(`📞 [CALLER-ID-MATCH] Call Type: ${callType}`);
+    console.log(`📱 [CALLER-ID-MATCH] Customer Number: ${customerNumber}`);
+    
+    if (callType === 'outbound') {
+      console.log(`🔍 [CALLER-ID-MATCH] Searched for callerId: "${agentIdentifier}"`);
+      console.log(`✅ [CALLER-ID-MATCH] Matched callerId: "${agentConfig.callerId}"`);
+      console.log(`🎯 [CALLER-ID-MATCH] Connection Status: SUCCESSFUL - Agent "${agentConfig.agentName}" connected`);
     } else {
-      console.log(`🔍 [CALLER-ID-MATCH] Searched for accountSid: "${agentIdentifier}"`)
-      console.log(`✅ [CALLER-ID-MATCH] Matched accountSid: "${agentConfig.accountSid}"`)
-      console.log(`🎯 [CALLER-ID-MATCH] Connection Status: SUCCESSFUL - Agent "${agentConfig.agentName}" connected`)
+      console.log(`🔍 [CALLER-ID-MATCH] Searched for accountSid: "${agentIdentifier}"`);
+      console.log(`✅ [CALLER-ID-MATCH] Matched accountSid: "${agentConfig.accountSid}"`);
+      console.log(`🎯 [CALLER-ID-MATCH] Connection Status: SUCCESSFUL - Agent "${agentConfig.agentName}" connected`);
     }
-
-    console.log(`🏷️  [CALLER-ID-MATCH] Agent Details:`)
-    console.log(`   • Name: ${agentConfig.agentName}`)
-    console.log(`   • Client ID: ${agentConfig.clientId}`)
-    console.log(`   • Language: ${agentConfig.language}`)
-    console.log(`   • Voice: ${agentConfig.voiceSelection}`)
-    console.log(`   • Category: ${agentConfig.category}`)
-    console.log(`🎯 [CALLER-ID-MATCH] ==========================================\n`)
+    
+    console.log(`🏷️  [CALLER-ID-MATCH] Agent Details:`);
+    console.log(`   • Name: ${agentConfig.agentName}`);
+    console.log(`   • Client ID: ${agentConfig.clientId}`);
+    console.log(`   • Language: ${agentConfig.language}`);
+    console.log(`   • Voice: ${agentConfig.voiceSelection}`);
+    console.log(`   • Category: ${agentConfig.category}`);
+    console.log(`🎯 [CALLER-ID-MATCH] ==========================================\n`);
   }
 }
 
-// MAIN: Enhanced WebSocket server setup with both inbound and outbound support
+// Main WebSocket server setup with enhanced call logging and SIP header parsing
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [UNIFIED-V3] Voice Server started with inbound/outbound support and circuit breaker")
+  console.log("🚀 [ENHANCED] Voice Server started with SIP header parsing and inbound/outbound call support");
 
-  // Log pool stats periodically
-  setInterval(() => {
-    const stats = smartDeepgramManager.getStats()
-    if (stats.activeConnections > 0 || stats.circuitBreakerState !== "CLOSED") {
-      console.log(
-        `📊 [SMART-STATS] Connections: ${stats.activeConnections}/${stats.maxConnections}, Circuit: ${stats.circuitBreakerState}, Failures: ${stats.circuitBreakerFailures}`,
-      )
-
-      if (stats.circuitBreakerState === "OPEN") {
-        console.log(`🔇 [SMART-STATS] TTS-only mode - ${Math.round(stats.timeUntilNextAttempt / 1000)}s until retry`)
-      }
-    }
-  }, 30000) // Every 30 seconds
-
-  wss.on("connection", (ws, req) => {
-    const connectionTime = new Date()
-    const clientIP = req.socket.remoteAddress
-
-    console.log(`\n🔗 [CONNECTION] ==========================================`)
-    console.log(`🔗 [CONNECTION] New unified WebSocket connection (v3)`)
-    console.log(`🌐 [CONNECTION] Client IP: ${clientIP}`)
-    console.log(`⏰ [CONNECTION] Time: ${connectionTime.toISOString()}`)
-    console.log(`📡 [CONNECTION] User Agent: ${req.headers["user-agent"] || "unknown"}`)
-    console.log(`🔗 [CONNECTION] URL: ${req.url || "unknown"}`)
-
-    // Parse SIP data from connection URL
-    let sipData = null
-    try {
-      if (req.url) {
-        console.log(`🔍 [CONNECTION] Parsing URL for SIP parameters...`)
-        sipData = SIPHeaderDecoder.parseConnectionURL(req.url)
-
-        if (sipData) {
-          console.log(`✅ [CONNECTION] SIP parameters detected - this is a SIP call`)
-          SIPHeaderDecoder.logSIPData(sipData)
-          ws.sipData = sipData
-
-          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData)
-          const callType = SIPHeaderDecoder.determineCallType(sipData)
-          const agentIdentifier = SIPHeaderDecoder.getAgentIdentifier(sipData)
-
-          console.log(`🎯 [CONNECTION] Call Analysis:`)
-          console.log(`   • Customer Number: ${customerNumber}`)
-          console.log(`   • Call Type: ${callType}`)
-          console.log(`   • Agent Identifier: ${agentIdentifier}`)
-          console.log(`   • DID: ${sipData.did}`)
-          console.log(`   • Session ID: ${sipData.session_id}`)
-        } else {
-          console.log(`ℹ️ [CONNECTION] Non-SIP WebSocket connection (no SIP parameters found)`)
-        }
+  // Enhanced WebSocket connection handler with detailed SIP and agent logging
+wss.on("connection", (ws, req) => {
+  const connectionTime = new Date();
+  const clientIP = req.socket.remoteAddress;
+  
+  console.log(`\n🔗 [CONNECTION] ==========================================`);
+  console.log(`🔗 [CONNECTION] New enhanced WebSocket connection`);
+  console.log(`🌐 [CONNECTION] Client IP: ${clientIP}`);
+  console.log(`⏰ [CONNECTION] Time: ${connectionTime.toISOString()}`);
+  console.log(`📡 [CONNECTION] User Agent: ${req.headers['user-agent'] || 'unknown'}`);
+  console.log(`🔗 [CONNECTION] URL: ${req.url || 'unknown'}`);
+  
+  // Parse SIP data from connection URL (handle gracefully if not SIP)
+  let sipData = null;
+  try {
+    if (req.url) {
+      console.log(`🔍 [CONNECTION] Parsing URL for SIP parameters...`);
+      sipData = SIPHeaderDecoder.parseConnectionURL(req.url);
+      
+      if (sipData) {
+        console.log(`✅ [CONNECTION] SIP parameters detected - this is a SIP call`);
+        SIPHeaderDecoder.logSIPData(sipData);
+        ws.sipData = sipData; // Store SIP data in WebSocket session
+        
+        // Enhanced SIP data logging
+        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData);
+        const callType = SIPHeaderDecoder.determineCallType(sipData);
+        const agentIdentifier = SIPHeaderDecoder.getAgentIdentifier(sipData);
+        
+        console.log(`🎯 [CONNECTION] Call Analysis:`);
+        console.log(`   • Customer Number: ${customerNumber}`);
+        console.log(`   • Call Type: ${callType}`);
+        console.log(`   • Agent Identifier: ${agentIdentifier}`);
+        console.log(`   • DID: ${sipData.did}`);
+        console.log(`   • Session ID: ${sipData.session_id}`);
+        
+        // Pre-validate agent existence (optional early check)
+        console.log(`🔍 [CONNECTION] Pre-checking agent configuration...`);
+        AgentConfigFetcher.fetchAgentConfig(sipData)
+          .then(result => {
+            if (result.success) {
+              console.log(`✅ [PRE-CHECK] Agent "${result.agentConfig.agentName}" available for connection`);
+              console.log(`✅ [PRE-CHECK] Client ID: "${result.agentConfig.clientId}"`);
+              console.log(`✅ [PRE-CHECK] Language: "${result.agentConfig.language}"`);
+            } else {
+              console.warn(`⚠️ [PRE-CHECK] Agent configuration issue: ${result.error}`);
+            }
+          })
+          .catch(error => {
+            console.error(`❌ [PRE-CHECK] Error checking agent: ${error.message}`);
+          });
+          
       } else {
-        console.log(`ℹ️ [CONNECTION] No URL provided in connection request`)
+        console.log(`ℹ️ [CONNECTION] Non-SIP WebSocket connection (no SIP parameters found)`);
+        console.log(`ℹ️ [CONNECTION] This might be a direct WebSocket connection or different protocol`);
       }
+    } else {
+      console.log(`ℹ️ [CONNECTION] No URL provided in connection request`);
+    }
+  } catch (error) {
+    console.log(`ℹ️ [CONNECTION] Error parsing URL for SIP data: ${error.message}`);
+    console.log(`ℹ️ [CONNECTION] Continuing with non-SIP connection handling`);
+  }
+
+  console.log(`🔗 [CONNECTION] ==========================================\n`);
+
+  // Session state
+  let streamSid = null;
+  let conversationHistory = [];
+  let isProcessing = false;
+  let userUtteranceBuffer = "";
+  let lastProcessedText = "";
+  let optimizedTTS = null;
+  let currentLanguage = undefined;
+  let processingRequestId = 0;
+  let callLogger = null; // Call logger instance
+
+  // Deepgram WebSocket connection
+  let deepgramWs = null;
+  let deepgramReady = false;
+  let deepgramAudioQueue = [];
+
+  // Optimized Deepgram connection
+  const connectToDeepgram = async () => {
+    try {
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.log(`🔌 [DEEPGRAM] Connecting for customer ${customerNumber}...`);
+      
+      const deepgramLanguage = getDeepgramLanguage(currentLanguage);
+      console.log(`🌍 [DEEPGRAM] Using language: ${deepgramLanguage} for ${customerNumber}`);
+      
+      const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen");
+      deepgramUrl.searchParams.append("sample_rate", "8000");
+      deepgramUrl.searchParams.append("channels", "1");
+      deepgramUrl.searchParams.append("encoding", "linear16");
+      deepgramUrl.searchParams.append("model", "nova-2");
+      deepgramUrl.searchParams.append("language", deepgramLanguage);
+      deepgramUrl.searchParams.append("interim_results", "true");
+      deepgramUrl.searchParams.append("smart_format", "true");
+      deepgramUrl.searchParams.append("endpointing", "300");
+
+      deepgramWs = new WebSocket(deepgramUrl.toString(), {
+        headers: { Authorization: `Token ${API_KEYS.deepgram}` },
+      });
+
+      deepgramWs.onopen = () => {
+        deepgramReady = true;
+        console.log(`✅ [DEEPGRAM] Connected successfully for ${customerNumber}`);
+        console.log(`📦 [DEEPGRAM] Processing ${deepgramAudioQueue.length} queued audio buffers`);
+        
+        deepgramAudioQueue.forEach((buffer, index) => {
+          deepgramWs.send(buffer);
+          console.log(`📤 [DEEPGRAM] Sent queued buffer ${index + 1}/${deepgramAudioQueue.length} for ${customerNumber}`);
+        });
+        deepgramAudioQueue = [];
+      };
+
+      deepgramWs.onmessage = async (event) => {
+        const data = JSON.parse(event.data);
+        await handleDeepgramResponse(data);
+      };
+
+      deepgramWs.onerror = (error) => {
+        console.error(`❌ [DEEPGRAM] Error for ${customerNumber}:`, error);
+        deepgramReady = false;
+      };
+
+      deepgramWs.onclose = () => {
+        console.log(`🔌 [DEEPGRAM] Connection closed for ${customerNumber}`);
+        deepgramReady = false;
+      };
+
     } catch (error) {
-      console.log(`ℹ️ [CONNECTION] Error parsing URL for SIP data: ${error.message}`)
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.error(`❌ [DEEPGRAM] Setup error for ${customerNumber}: ${error.message}`);
     }
+  };
 
-    console.log(`🔗 [CONNECTION] ==========================================\n`)
-
-    // Session state
-    let streamSid = null
-    let conversationHistory = []
-    let isProcessing = false
-    let userUtteranceBuffer = ""
-    let lastProcessedText = ""
-    let optimizedTTS = null
-    let currentLanguage = undefined
-    let processingRequestId = 0
-    let callLogger = null
-
-    // OPTIMIZED: Single pooled Deepgram connection
-    let deepgramConnection = null
-
-    // OPTIMIZED: Initialize pooled Deepgram connection
-    const initializeDeepgramConnection = async (language, customerNumber) => {
-      try {
-        console.log(`🔌 [SMART] Requesting connection for ${customerNumber}`)
-
-        deepgramConnection = await smartDeepgramManager.getConnection(
-          customerNumber,
-          language,
-          async (transcript, is_final, confidence, type) => {
-            await handleDeepgramResponse(transcript, is_final, confidence, type)
-          },
-          (error) => {
-            console.error(`❌ [SMART] Error for ${customerNumber}:`, error.message)
-          },
-        )
-
-        const status = deepgramConnection.getStatus()
-        if (status.isTTSOnly) {
-          console.log(`🔇 [SMART] TTS-only mode active for ${customerNumber}`)
-        } else {
-          console.log(`✅ [SMART] Deepgram connection established for ${customerNumber}`)
-        }
-
-        return true
-      } catch (error) {
-        console.error(`❌ [SMART] Failed to get connection for ${customerNumber}: ${error.message}`)
-        return false
-      }
-    }
-
-    // Enhanced Deepgram response handler
-    const handleDeepgramResponse = async (transcript, is_final, confidence, type) => {
-      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-
-      if (type === "utterance_end") {
-        console.log(`🔚 [DEEPGRAM-POOL] Utterance end detected for ${customerNumber}`)
-
-        if (userUtteranceBuffer.trim()) {
-          if (callLogger && userUtteranceBuffer.trim()) {
-            const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim())
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
-
-            console.log(
-              `📝 [UTTERANCE-END] Customer (${customerNumber}): "${userUtteranceBuffer.trim()}" (${detectedLang})`,
-            )
-          }
-
-          await processUserUtterance(userUtteranceBuffer)
-          userUtteranceBuffer = ""
-        }
-        return
-      }
-
+  // Handle Deepgram responses with enhanced logging
+  const handleDeepgramResponse = async (data) => {
+    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+    
+    if (data.type === "Results") {
+      const transcript = data.channel?.alternatives?.[0]?.transcript;
+      const is_final = data.is_final;
+      const confidence = data.channel?.alternatives?.[0]?.confidence;
+      
       if (transcript?.trim()) {
-        console.log(
-          `🎤 [DEEPGRAM-POOL] ${is_final ? "FINAL" : "interim"} transcript from ${customerNumber}: "${transcript}" (confidence: ${confidence || "unknown"})`,
-        )
-
+        console.log(`🎤 [DEEPGRAM] ${is_final ? 'FINAL' : 'interim'} transcript from ${customerNumber}: "${transcript}" (confidence: ${confidence || 'unknown'})`);
+        
         // Interrupt current TTS if new speech detected
         if (optimizedTTS && (isProcessing || optimizedTTS.isProcessing)) {
-          console.log(`🛑 [INTERRUPT] New speech from ${customerNumber} detected, interrupting current response`)
-          optimizedTTS.interrupt()
-          isProcessing = false
-          processingRequestId++
+          console.log(`🛑 [INTERRUPT] New speech from ${customerNumber} detected, interrupting current response`);
+          optimizedTTS.interrupt();
+          isProcessing = false;
+          processingRequestId++; // Invalidate current processing
         }
-
+        
         if (is_final) {
-          userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
-
+          userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
+          
+          // Log the final transcript to call logger with SIP context
           if (callLogger && transcript.trim()) {
-            const detectedLang = await detectLanguageWithOpenAI(transcript.trim())
-            callLogger.logUserTranscript(transcript.trim(), detectedLang)
-
-            console.log(`📝 [TRANSCRIPT] Customer (${customerNumber}): "${transcript.trim()}" (${detectedLang})`)
+            const detectedLang = await detectLanguageWithOpenAI(transcript.trim());
+            callLogger.logUserTranscript(transcript.trim(), detectedLang);
+            
+            // Enhanced logging with SIP data
+            console.log(`📝 [TRANSCRIPT] Customer (${customerNumber}): "${transcript.trim()}" (${detectedLang})`);
           }
-
-          await processUserUtterance(userUtteranceBuffer)
-          userUtteranceBuffer = ""
+          
+          await processUserUtterance(userUtteranceBuffer);
+          userUtteranceBuffer = "";
         }
+      }
+    } else if (data.type === "UtteranceEnd") {
+      console.log(`🔚 [DEEPGRAM] Utterance end detected for ${customerNumber}`);
+      
+      if (userUtteranceBuffer.trim()) {
+        // Log the utterance end transcript with SIP context
+        if (callLogger && userUtteranceBuffer.trim()) {
+          const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim());
+          callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang);
+          
+          console.log(`📝 [UTTERANCE-END] Customer (${customerNumber}): "${userUtteranceBuffer.trim()}" (${detectedLang})`);
+        }
+        
+        await processUserUtterance(userUtteranceBuffer);
+        userUtteranceBuffer = "";
+      }
+    } else if (data.type === "Metadata") {
+      console.log(`📊 [DEEPGRAM] Metadata for ${customerNumber}:`, {
+        request_id: data.request_id,
+        model_info: data.model_info
+      });
+    }
+  };
+
+  // Enhanced utterance processing with SIP context logging
+  const processUserUtterance = async (text) => {
+    if (!text.trim() || text === lastProcessedText) return;
+
+    // Interrupt any ongoing processing
+    if (optimizedTTS) {
+      optimizedTTS.interrupt();
+    }
+    
+    isProcessing = true;
+    lastProcessedText = text;
+    const currentRequestId = ++processingRequestId;
+    const timer = createTimer("UTTERANCE_PROCESSING");
+
+    try {
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      const callType = SIPHeaderDecoder.determineCallType(sipData);
+      const agentName = ws.sessionAgentConfig?.agentName || 'unknown';
+      
+      console.log(`\n🎤 [USER] ==========================================`);
+      console.log(`🎤 [USER] Processing utterance from ${customerNumber}`);
+      console.log(`📞 [USER] Call Type: ${callType}`);
+      console.log(`🤖 [USER] Agent: ${agentName}`);
+      console.log(`📝 [USER] Text: "${text}"`);
+      console.log(`📍 [USER] DID: ${sipData?.did || 'unknown'}`);
+      console.log(`🆔 [USER] Session: ${sipData?.session_id || 'unknown'}`);
+
+      // Step 1: Detect language using OpenAI
+      const detectedLanguage = await detectLanguageWithOpenAI(text);
+      
+      // Step 2: Update current language and initialize TTS processor
+      if (detectedLanguage !== currentLanguage) {
+        console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage} for ${customerNumber}`);
+        currentLanguage = detectedLanguage;
+      }
+
+      // Create new TTS processor with detected language
+      optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger);
+
+      // Step 3: Check for interruption function
+      const checkInterruption = () => {
+        return processingRequestId !== currentRequestId;
+      };
+
+      console.log(`🤖 [PROCESSING] Starting OpenAI processing for ${customerNumber}...`);
+
+      // Step 4: Process with OpenAI streaming
+      const response = await processWithOpenAIStreaming(
+        text,
+        conversationHistory,
+        detectedLanguage,
+        (phrase, lang) => {
+          // Handle phrase chunks - only if not interrupted
+          if (processingRequestId === currentRequestId && !checkInterruption()) {
+            console.log(`📤 [PHRASE] "${phrase}" (${lang}) -> ${customerNumber}`);
+            optimizedTTS.addPhrase(phrase, lang);
+          }
+        },
+        (fullResponse) => {
+          // Handle completion - only if not interrupted
+          if (processingRequestId === currentRequestId && !checkInterruption()) {
+            console.log(`✅ [COMPLETE] "${fullResponse}" -> ${customerNumber}`);
+            optimizedTTS.complete();
+            
+            const stats = optimizedTTS.getStats();
+            console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk for ${customerNumber}`);
+            
+            // Update conversation history
+            conversationHistory.push(
+              { role: "user", content: text },
+              { role: "assistant", content: fullResponse }
+            );
+
+            // Keep last 10 messages for context
+            if (conversationHistory.length > 10) {
+              conversationHistory = conversationHistory.slice(-10);
+            }
+          }
+        },
+        checkInterruption,
+        callLogger // Pass call logger to OpenAI processing
+      );
+
+      console.log(`⚡ [TOTAL] Processing completed in ${timer.end()}ms for ${customerNumber}`);
+      console.log(`🎤 [USER] ==========================================\n`);
+
+    } catch (error) {
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.error(`❌ [PROCESSING] Error for ${customerNumber}: ${error.message}`);
+      console.error(`❌ [PROCESSING] Stack trace:`, error.stack);
+    } finally {
+      if (processingRequestId === currentRequestId) {
+        isProcessing = false;
       }
     }
+  };
 
-    // Enhanced utterance processing with SIP context logging
-    const processUserUtterance = async (text) => {
-      if (!text.trim() || text === lastProcessedText) return
-
-      if (optimizedTTS) {
-        optimizedTTS.interrupt()
-      }
-
-      isProcessing = true
-      lastProcessedText = text
-      const currentRequestId = ++processingRequestId
-      const timer = createTimer("UTTERANCE_PROCESSING")
-
-      try {
-        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-        const callType = SIPHeaderDecoder.determineCallType(sipData)
-        const agentName = ws.sessionAgentConfig?.agentName || "unknown"
-
-        console.log(`\n🎤 [USER] ==========================================`)
-        console.log(`🎤 [USER] Processing utterance from ${customerNumber}`)
-        console.log(`📞 [USER] Call Type: ${callType}`)
-        console.log(`🤖 [USER] Agent: ${agentName}`)
-        console.log(`📝 [USER] Text: "${text}"`)
-        console.log(`📍 [USER] DID: ${sipData?.did || "unknown"}`)
-        console.log(`🆔 [USER] Session: ${sipData?.session_id || "unknown"}`)
-
-        const detectedLanguage = await detectLanguageWithOpenAI(text)
-
-        if (detectedLanguage !== currentLanguage) {
-          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage} for ${customerNumber}`)
-          currentLanguage = detectedLanguage
-
-          // Update Deepgram language if needed
-          if (deepgramConnection) {
-            deepgramConnection.updateLanguage(detectedLanguage)
-          }
-        }
-
-        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-
-        const checkInterruption = () => {
-          return processingRequestId !== currentRequestId
-        }
-
-        console.log(`🤖 [PROCESSING] Starting OpenAI processing for ${customerNumber}...`)
-
-        const response = await processWithOpenAIStreaming(
-          text,
-          conversationHistory,
-          detectedLanguage,
-          (phrase, lang) => {
-            if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`📤 [PHRASE] "${phrase}" (${lang}) -> ${customerNumber}`)
-              optimizedTTS.addPhrase(phrase, lang)
-            }
-          },
-          (fullResponse) => {
-            if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`✅ [COMPLETE] "${fullResponse}" -> ${customerNumber}`)
-              optimizedTTS.complete()
-
-              const stats = optimizedTTS.getStats()
-              console.log(
-                `📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk for ${customerNumber}`,
-              )
-
-              conversationHistory.push({ role: "user", content: text }, { role: "assistant", content: fullResponse })
-
-              if (conversationHistory.length > 10) {
-                conversationHistory = conversationHistory.slice(-10)
-              }
-            }
-          },
-          checkInterruption,
-          callLogger,
-        )
-
-        console.log(`⚡ [TOTAL] Processing completed in ${timer.end()}ms for ${customerNumber}`)
-        console.log(`🎤 [USER] ==========================================\n`)
-      } catch (error) {
-        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-        console.error(`❌ [PROCESSING] Error for ${customerNumber}: ${error.message}`)
-        console.error(`❌ [PROCESSING] Stack trace:`, error.stack)
-      } finally {
-        if (processingRequestId === currentRequestId) {
-          isProcessing = false
-        }
-      }
+    // Enhanced WebSocket message handling with better error handling and caller ID logging
+ws.on("message", async (message) => {
+  try {
+    // Handle empty or invalid messages gracefully
+    if (!message || message.length === 0) {
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.log(`ℹ️ [MESSAGE] Received empty message from ${customerNumber}`);
+      return;
     }
 
-    // Enhanced WebSocket message handling with both inbound and outbound support
-    ws.on("message", async (message) => {
+    let messageString;
+    try {
+      messageString = message.toString();
+      if (!messageString || messageString.trim() === '') {
+        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        console.log(`ℹ️ [MESSAGE] Received empty string message from ${customerNumber}`);
+        return;
+      }
+    } catch (error) {
+      console.log(`⚠️ [MESSAGE] Failed to convert message to string: ${error.message}`);
+      return;
+    }
+
+    // Check if message is binary data (audio) vs JSON
+    const isBinaryData = /[\x00-\x08\x0E-\x1F\x7F-\xFF]/.test(messageString);
+    
+    if (isBinaryData || messageString.includes('\x00') || messageString.includes('��')) {
+      // This is likely audio data, handle it as media
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.log(`🎵 [BINARY-DATA] Received binary audio data from ${customerNumber} (${messageString.length} bytes)`);
+      
+      // Try to extract base64 audio payload if this is a raw audio stream
       try {
-        if (!message || message.length === 0) {
-          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-          console.log(`ℹ️ [MESSAGE] Received empty message from ${customerNumber}`)
-          return
+        const audioBuffer = Buffer.from(message);
+        console.log(`🎵 [AUDIO-STREAM] Processing raw audio buffer (${audioBuffer.length} bytes) from ${customerNumber}`);
+        
+        if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+          deepgramWs.send(audioBuffer);
+          console.log(`📤 [AUDIO-STREAM] Sent ${audioBuffer.length} bytes to Deepgram for ${customerNumber}`);
+        } else {
+          deepgramAudioQueue.push(audioBuffer);
+          console.log(`📦 [AUDIO-QUEUE] Queued ${audioBuffer.length} bytes for ${customerNumber} (Deepgram not ready)`);
+        }
+      } catch (audioError) {
+        console.error(`❌ [AUDIO-STREAM] Error processing audio data from ${customerNumber}: ${audioError.message}`);
+      }
+      return;
+    }
+
+    let data;
+    try {
+      data = JSON.parse(messageString);
+    } catch (jsonError) {
+      // Enhanced error handling for different message types
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      
+      // Check if it's a common non-JSON message type
+      if (messageString.startsWith('<') || messageString.includes('HTTP/')) {
+        console.log(`ℹ️ [MESSAGE] Received non-JSON message (likely HTTP/HTML) from ${customerNumber}: ${messageString.substring(0, 50)}...`);
+        return;
+      }
+      
+      // Check if it's WebRTC signaling data
+      if (messageString.includes('candidate') || messageString.includes('sdp')) {
+        console.log(`ℹ️ [MESSAGE] Received WebRTC signaling data from ${customerNumber}: ${messageString.substring(0, 50)}...`);
+        return;
+      }
+      
+      // Check if it's partial JSON (streaming)
+      if (messageString.includes('{') || messageString.includes('}')) {
+        console.log(`⚠️ [MESSAGE] Partial/malformed JSON from ${customerNumber}: ${jsonError.message}`);
+        console.log(`⚠️ [MESSAGE] Raw message (first 200 chars): "${messageString.substring(0, 200)}..."`);
+      } else {
+        console.log(`⚠️ [MESSAGE] Non-JSON message from ${customerNumber}: "${messageString.substring(0, 100)}..."`);
+      }
+      return;
+    }
+
+    // Ensure data is an object with an event property
+    if (!data || typeof data !== 'object' || !data.event) {
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.log(`⚠️ [MESSAGE] Invalid message format from ${customerNumber}:`, data);
+      return;
+    }
+
+    let customerNumber;
+
+    switch (data.event) {
+      case "connected":
+        customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        console.log(`🔗 [ENHANCED] Connected from ${customerNumber} - Protocol: ${data.protocol}`);
+        console.log(`🔗 [ENHANCED] Version: ${data.version || 'unknown'}`);
+        break;
+
+      case "start": {
+        streamSid = data.streamSid || data.start?.streamSid;
+        const accountSid = data.start?.accountSid;
+        customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData);
+        const callType = SIPHeaderDecoder.determineCallType(sipData);
+        
+        console.log(`\n🎯 [ENHANCED] Stream started:`);
+        console.log(`   • StreamSid: ${streamSid}`);
+        console.log(`   • AccountSid: ${accountSid}`);
+        console.log(`   • Customer Number: ${customerNumber}`);
+        console.log(`   • Call Type: ${callType}`);
+        
+        if (sipData) {
+          console.log(`   • SIP App ID: ${sipData.app_id}`);
+          console.log(`   • SIP DID: ${sipData.did}`);
+          console.log(`   • SIP Session ID: ${sipData.session_id}`);
+          console.log(`   • SIP Direction: ${sipData.extra?.CallDirection || sipData.direction}`);
+          console.log(`   • VA ID: ${sipData.extra?.CallVaId}`);
         }
 
-        let messageString
-        try {
-          messageString = message.toString()
-          if (!messageString || messageString.trim() === "") {
-            const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`ℹ️ [MESSAGE] Received empty string message from ${customerNumber}`)
-            return
-          }
-        } catch (error) {
-          console.log(`⚠️ [MESSAGE] Failed to convert message to string: ${error.message}`)
-          return
+        // Enhanced agent config fetching with detailed logging
+        const fetchResult = await AgentConfigFetcher.fetchAgentConfig(sipData);
+        
+        if (!fetchResult.success) {
+          console.error(`❌ [AGENT-CONFIG] ${fetchResult.error}`);
+          
+          // Send detailed error response
+          const errorResponse = {
+            event: 'error',
+            message: fetchResult.error,
+            details: {
+              callType: fetchResult.callType,
+              agentIdentifier: fetchResult.agentIdentifier,
+              customerNumber: fetchResult.customerNumber,
+              sipData: sipData
+            }
+          };
+          
+          ws.send(JSON.stringify(errorResponse));
+          
+          console.log(`🔌 [AGENT-CONFIG] Closing connection due to missing agent configuration`);
+          ws.close();
+          return;
         }
+        
+        const agentConfig = fetchResult.agentConfig;
+        const detectedCallType = fetchResult.callType;
+        
+        // Log successful caller ID match
+        AgentConfigFetcher.logCallerIdConnection(sipData, agentConfig);
+        
+        // Validate agent configuration
+        const validation = AgentConfigFetcher.validateAgentConfig(agentConfig);
+        if (!validation.valid) {
+          console.warn(`⚠️ [AGENT-VALIDATION] Agent configuration has issues but continuing...`);
+        }
+        
+        console.log(`✅ [AGENT-CONFIG] Successfully loaded for ${detectedCallType} call:`);
+        console.log(`   • Client ID: ${agentConfig.clientId}`);
+        console.log(`   • Agent Name: ${agentConfig.agentName}`);
+        console.log(`   • Language: ${agentConfig.language}`);
+        console.log(`   • Voice: ${agentConfig.voiceSelection}`);
+        console.log(`   • STT: ${agentConfig.sttSelection}`);
+        console.log(`   • TTS: ${agentConfig.ttsSelection}`);
+        console.log(`   • LLM: ${agentConfig.llmSelection}`);
+        
+        if (detectedCallType === 'outbound') {
+          console.log(`   • Caller ID: ${agentConfig.callerId}`);
+        } else {
+          console.log(`   • Account SID: ${agentConfig.accountSid}`);
+        }
+        
+        ws.sessionAgentConfig = agentConfig;
+        currentLanguage = agentConfig.language || 'hi';
 
-        const isBinaryData = /[\x00-\x08\x0E-\x1F\x7F-\xFF]/.test(messageString)
+        // Initialize enhanced call logger with SIP data
+        callLogger = new CallLogger(agentConfig.clientId || accountSid, sipData);
+        console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, customer: ${customerNumber}, call type: ${detectedCallType}`);
 
-        if (isBinaryData || messageString.includes("\x00") || messageString.includes("")) {
-          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-          console.log(
-            `🎵 [BINARY-DATA] Received binary audio data from ${customerNumber} (${messageString.length} bytes)`,
-          )
+        // Log connection establishment with agent details
+        console.log(`\n🎉 [CONNECTION-SUCCESS] ==========================================`);
+        console.log(`✅ [CONNECTION-SUCCESS] Agent "${agentConfig.agentName}" successfully connected!`);
+        console.log(`📞 [CONNECTION-SUCCESS] Call Type: ${detectedCallType}`);
+        console.log(`📱 [CONNECTION-SUCCESS] Customer: ${customerNumber}`);
+        console.log(`🏷️  [CONNECTION-SUCCESS] Matched ID: ${detectedCallType === 'outbound' ? agentConfig.callerId : agentConfig.accountSid}`);
+        console.log(`🎯 [CONNECTION-SUCCESS] ==========================================\n`);
 
+        await connectToDeepgram();
+        
+        // Use agent's firstMessage for greeting and log it
+        const greeting = agentConfig.firstMessage || "Hello! How can I help you today?";
+        console.log(`👋 [GREETING] "${greeting}" -> ${customerNumber || 'unknown customer'} (${detectedCallType})`);
+        
+        // Log the initial greeting with enhanced context
+        if (callLogger) {
+          callLogger.logAIResponse(greeting, currentLanguage);
+        }
+        
+        const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger);
+        await tts.synthesizeAndStream(greeting);
+        break;
+      }
+
+      case "media":
+        customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        
+        if (data.media?.payload) {
           try {
-            const audioBuffer = Buffer.from(message)
-            console.log(
-              `🎵 [AUDIO-STREAM] Processing raw audio buffer (${audioBuffer.length} bytes) from ${customerNumber}`,
-            )
-
-            if (deepgramConnection) {
-              const success = deepgramConnection.sendAudio(audioBuffer)
-              if (!success) {
-                console.log(`⚠️ [AUDIO-STREAM] Failed to send audio to pooled Deepgram for ${customerNumber}`)
-              }
+            const audioBuffer = Buffer.from(data.media.payload, "base64");
+            console.log(`🎵 [MEDIA] Received ${audioBuffer.length} bytes from ${customerNumber}`);
+            
+            if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+              deepgramWs.send(audioBuffer);
+              console.log(`📤 [MEDIA] Sent to Deepgram for ${customerNumber}`);
             } else {
-              console.log(`⚠️ [AUDIO-STREAM] No pooled Deepgram connection available for ${customerNumber}`)
-            }
-          } catch (audioError) {
-            console.error(`❌ [AUDIO-STREAM] Error processing audio data from ${customerNumber}: ${audioError.message}`)
-          }
-          return
-        }
-
-        let data
-        try {
-          data = JSON.parse(messageString)
-        } catch (jsonError) {
-          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-
-          if (messageString.startsWith("<") || messageString.includes("HTTP/")) {
-            console.log(
-              `ℹ️ [MESSAGE] Received non-JSON message (likely HTTP/HTML) from ${customerNumber}: ${messageString.substring(0, 50)}...`,
-            )
-            return
-          }
-
-          if (messageString.includes("candidate") || messageString.includes("sdp")) {
-            console.log(
-              `ℹ️ [MESSAGE] Received WebRTC signaling data from ${customerNumber}: ${messageString.substring(0, 50)}...`,
-            )
-            return
-          }
-
-          if (messageString.includes("{") || messageString.includes("}")) {
-            console.log(`⚠️ [MESSAGE] Partial/malformed JSON from ${customerNumber}: ${jsonError.message}`)
-            console.log(`⚠️ [MESSAGE] Raw message (first 200 chars): "${messageString.substring(0, 200)}..."`)
-          } else {
-            console.log(`⚠️ [MESSAGE] Non-JSON message from ${customerNumber}: "${messageString.substring(0, 100)}..."`)
-          }
-          return
-        }
-
-        if (!data || typeof data !== "object" || !data.event) {
-          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-          console.log(`⚠️ [MESSAGE] Invalid message format from ${customerNumber}:`, data)
-          return
-        }
-
-        let customerNumber
-
-        switch (data.event) {
-          case "connected":
-            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`🔗 [UNIFIED-V3] Connected from ${customerNumber} - Protocol: ${data.protocol}`)
-            console.log(`🔗 [UNIFIED-V3] Version: ${data.version || "unknown"}`)
-            break
-
-          case "start": {
-            streamSid = data.streamSid || data.start?.streamSid
-            const accountSid = data.start?.accountSid
-            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData)
-            const callType = SIPHeaderDecoder.determineCallType(sipData)
-
-            console.log(`\n🎯 [UNIFIED-V3] Stream started:`)
-            console.log(`   • StreamSid: ${streamSid}`)
-            console.log(`   • AccountSid: ${accountSid}`)
-            console.log(`   • Customer Number: ${customerNumber}`)
-            console.log(`   • Call Type: ${callType}`)
-
-            if (sipData) {
-              console.log(`   • SIP App ID: ${sipData.app_id}`)
-              console.log(`   • SIP DID: ${sipData.did}`)
-              console.log(`   • SIP Session ID: ${sipData.session_id}`)
-              console.log(`   • SIP Direction: ${sipData.extra?.CallDirection || sipData.direction}`)
-              console.log(`   • VA ID: ${sipData.extra?.CallVaId}`)
-            }
-
-            const fetchResult = await AgentConfigFetcher.fetchAgentConfig(sipData)
-
-            if (!fetchResult.success) {
-              console.error(`❌ [AGENT-CONFIG] ${fetchResult.error}`)
-
-              const errorResponse = {
-                event: "error",
-                message: fetchResult.error,
-                details: {
-                  callType: fetchResult.callType,
-                  agentIdentifier: fetchResult.agentIdentifier,
-                  customerNumber: fetchResult.customerNumber,
-                  sipData: sipData,
-                },
-              }
-
-              ws.send(JSON.stringify(errorResponse))
-
-              console.log(`🔌 [AGENT-CONFIG] Closing connection due to missing agent configuration`)
-              ws.close()
-              return
-            }
-
-            const agentConfig = fetchResult.agentConfig
-            const detectedCallType = fetchResult.callType
-
-            AgentConfigFetcher.logCallerIdConnection(sipData, agentConfig)
-
-            const validation = AgentConfigFetcher.validateAgentConfig(agentConfig)
-            if (!validation.valid) {
-              console.warn(`⚠️ [AGENT-VALIDATION] Agent configuration has issues but continuing...`)
-            }
-
-            console.log(`✅ [AGENT-CONFIG] Successfully loaded for ${detectedCallType} call:`)
-            console.log(`   • Client ID: ${agentConfig.clientId}`)
-            console.log(`   • Agent Name: ${agentConfig.agentName}`)
-            console.log(`   • Language: ${agentConfig.language}`)
-            console.log(`   • Voice: ${agentConfig.voiceSelection}`)
-            console.log(`   • STT: ${agentConfig.sttSelection}`)
-            console.log(`   • TTS: ${agentConfig.ttsSelection}`)
-            console.log(`   • LLM: ${agentConfig.llmSelection}`)
-
-            if (detectedCallType === "outbound") {
-              console.log(`   • Caller ID: ${agentConfig.callerId}`)
-            } else {
-              console.log(`   • Account SID: ${agentConfig.accountSid}`)
-            }
-
-            ws.sessionAgentConfig = agentConfig
-            currentLanguage = agentConfig.language || "hi"
-
-            callLogger = new CallLogger(agentConfig.clientId || accountSid, sipData)
-            console.log(
-              `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, customer: ${customerNumber}, call type: ${detectedCallType}`,
-            )
-
-            // OPTIMIZED: Initialize pooled Deepgram connection
-            const connectionSuccess = await initializeDeepgramConnection(currentLanguage, customerNumber)
-
-            if (!connectionSuccess) {
-              console.error(`❌ [POOL] Failed to establish Deepgram connection for ${customerNumber}`)
-              // Continue without Deepgram - the call can still work with TTS only
-            }
-
-            console.log(`\n🎉 [CONNECTION-SUCCESS] ==========================================`)
-            console.log(`✅ [CONNECTION-SUCCESS] Agent "${agentConfig.agentName}" successfully connected!`)
-            console.log(`📞 [CONNECTION-SUCCESS] Call Type: ${detectedCallType}`)
-            console.log(`📱 [CONNECTION-SUCCESS] Customer: ${customerNumber}`)
-            console.log(
-              `🏷️  [CONNECTION-SUCCESS] Matched ID: ${detectedCallType === "outbound" ? agentConfig.callerId : agentConfig.accountSid}`,
-            )
-            console.log(`🎉 [CONNECTION-SUCCESS] ==========================================\n`)
-
-            const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
-            console.log(`👋 [GREETING] "${greeting}" -> ${customerNumber || "unknown customer"} (${detectedCallType})`)
-
-            if (callLogger) {
-              callLogger.logAIResponse(greeting, currentLanguage)
-            }
-
-            // IMPORTANT: Send greeting through Sarvam TTS and stream to SIP as base64 chunks
-            console.log(`🎵 [GREETING-TTS] Processing greeting through Sarvam TTS for ${customerNumber}`)
-            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-            await tts.synthesizeAndStream(greeting)
-            console.log(`✅ [GREETING-TTS] Greeting sent as ~160 byte base64 chunks to SIP for ${customerNumber}`)
-            break
-          }
-
-          case "media":
-            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-
-            if (data.media?.payload) {
-              try {
-                const audioBuffer = Buffer.from(data.media.payload, "base64")
-                console.log(`🎵 [MEDIA] Received ${audioBuffer.length} bytes from ${customerNumber}`)
-
-                if (deepgramConnection) {
-                  const success = deepgramConnection.sendAudio(audioBuffer)
-                  if (success) {
-                    console.log(`📤 [MEDIA] Sent to pooled Deepgram for ${customerNumber}`)
-                  } else {
-                    console.log(`⚠️ [MEDIA] Failed to send to pooled Deepgram for ${customerNumber}`)
-                  }
-                } else {
-                  console.log(`⚠️ [MEDIA] No pooled Deepgram connection available for ${customerNumber}`)
-                }
-              } catch (mediaError) {
-                console.error(`❌ [MEDIA] Error processing media from ${customerNumber}: ${mediaError.message}`)
-              }
-            } else {
-              console.log(`⚠️ [MEDIA] No payload in media message from ${customerNumber}`)
-            }
-            break
-
-          case "stop":
-            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            const callType = SIPHeaderDecoder.determineCallType(sipData)
-            console.log(`\n📞 [UNIFIED-V3] Stream stopped for ${customerNumber} (${callType} call)`)
-
-            if (callLogger) {
-              try {
-                const savedLog = await callLogger.saveToDatabase("completed")
-                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`)
-
-                const stats = callLogger.getStats()
-                console.log(`\n📊 [FINAL-STATS] Call Summary:`)
-                console.log(`   • Duration: ${stats.duration}s`)
-                console.log(`   • User Messages: ${stats.userMessages}`)
-                console.log(`   • AI Responses: ${stats.aiResponses}`)
-                console.log(`   • Languages: ${stats.languages.join(", ")}`)
-                console.log(`   • Customer: ${customerNumber}`)
-                console.log(`   • DID: ${sipData?.did || "unknown"}`)
-                console.log(`   • Call Type: ${stats.callType}`)
-                console.log(`   • Session ID: ${sipData?.session_id || "unknown"}`)
-
-                if (sipData?.extra) {
-                  console.log(`   • VA ID: ${sipData.extra.CallVaId || "unknown"}`)
-                  console.log(`   • Service App ID: ${sipData.extra.CZSERVICEAPPID || "unknown"}`)
-                }
-              } catch (error) {
-                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`)
+              deepgramAudioQueue.push(audioBuffer);
+              console.log(`📦 [MEDIA] Queued for ${customerNumber} (${deepgramAudioQueue.length} items in queue)`);
+              
+              if (!deepgramReady) {
+                console.log(`⚠️ [MEDIA] Deepgram not ready for ${customerNumber}, attempting reconnection...`);
+                await connectToDeepgram();
               }
             }
-
-            // OPTIMIZED: Cleanup pooled Deepgram connection
-            if (deepgramConnection) {
-              deepgramConnection.cleanup()
-              console.log(`🔌 [POOL] Cleaned up connection for ${customerNumber}`)
-            }
-            break
-
-          case "mark":
-            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`🏁 [MARK] Received mark event from ${customerNumber}: ${data.mark?.name || "unnamed"}`)
-            break
-
-          default:
-            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`❓ [UNIFIED-V3] Unknown event: ${data.event} from ${customerNumber}`)
-            console.log(`❓ [UNIFIED-V3] Event data:`, JSON.stringify(data, null, 2))
+          } catch (mediaError) {
+            console.error(`❌ [MEDIA] Error processing media from ${customerNumber}: ${mediaError.message}`);
+          }
+        } else {
+          console.log(`⚠️ [MEDIA] No payload in media message from ${customerNumber}`);
         }
+        break;
+
+      case "stop":
+        customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        const callType = SIPHeaderDecoder.determineCallType(sipData);
+        console.log(`\n📞 [ENHANCED] Stream stopped for ${customerNumber} (${callType} call)`);
+        
+        // Enhanced call log saving with SIP context
+        if (callLogger) {
+          try {
+            const savedLog = await callLogger.saveToDatabase('completed'); // Status for normal completion
+            console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
+            
+            // Print enhanced call statistics with SIP data
+            const stats = callLogger.getStats();
+            console.log(`\n📊 [FINAL-STATS] Call Summary:`);
+            console.log(`   • Duration: ${stats.duration}s`);
+            console.log(`   • User Messages: ${stats.userMessages}`);
+            console.log(`   • AI Responses: ${stats.aiResponses}`);
+            console.log(`   • Languages: ${stats.languages.join(', ')}`);
+            console.log(`   • Customer: ${customerNumber}`);
+            console.log(`   • DID: ${sipData?.did || 'unknown'}`);
+            console.log(`   • Call Type: ${stats.callType}`);
+            console.log(`   • Session ID: ${sipData?.session_id || 'unknown'}`);
+            
+            if (sipData?.extra) {
+              console.log(`   • VA ID: ${sipData.extra.CallVaId || 'unknown'}`);
+              console.log(`   • Service App ID: ${sipData.extra.CZSERVICEAPPID || 'unknown'}`);
+            }
+            
+          } catch (error) {
+            console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`);
+          }
+        }
+        
+        if (deepgramWs?.readyState === WebSocket.OPEN) {
+          deepgramWs.close();
+        }
+        break;
+
+      case "mark":
+        customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        console.log(`🏁 [MARK] Received mark event from ${customerNumber}: ${data.mark?.name || 'unnamed'}`);
+        break;
+
+      default:
+        customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        console.log(`❓ [ENHANCED] Unknown event: ${data.event} from ${customerNumber}`);
+        console.log(`❓ [ENHANCED] Event data:`, JSON.stringify(data, null, 2));
+    }
+  } catch (error) {
+    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+    console.error(`❌ [ENHANCED] Unexpected error processing message from ${customerNumber}: ${error.message}`);
+    console.error(`❌ [ENHANCED] Stack trace:`, error.stack);
+    
+    // Log the problematic message for debugging
+    try {
+      const messagePreview = message.toString().substring(0, 200);
+      console.error(`❌ [ENHANCED] Problematic message preview: "${messagePreview}..."`);
+    } catch (previewError) {
+      console.error(`❌ [ENHANCED] Could not preview message: ${previewError.message}`);
+    }
+  }
+});
+
+    // Enhanced connection cleanup with SIP context
+    // Enhanced connection cleanup with SIP context and detailed logging
+  ws.on("close", async (code, reason) => {
+    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+    const callType = SIPHeaderDecoder.determineCallType(sipData);
+    const agentName = ws.sessionAgentConfig?.agentName || 'unknown';
+    const connectionDuration = Date.now() - connectionTime.getTime();
+    
+    console.log(`\n🔗 [DISCONNECT] ==========================================`);
+    console.log(`🔗 [DISCONNECT] Connection closed for ${customerNumber}`);
+    console.log(`📞 [DISCONNECT] Call Type: ${callType}`);
+    console.log(`🤖 [DISCONNECT] Agent: ${agentName}`);
+    console.log(`⏰ [DISCONNECT] Connection Duration: ${Math.round(connectionDuration / 1000)}s`);
+    console.log(`🔢 [DISCONNECT] Close Code: ${code || 'unknown'}`);
+    console.log(`📝 [DISCONNECT] Close Reason: ${reason || 'no reason provided'}`);
+    
+    if (sipData) {
+      console.log(`📍 [DISCONNECT] DID: ${sipData.did}`);
+      console.log(`🆔 [DISCONNECT] Session ID: ${sipData.session_id}`);
+      console.log(`🏢 [DISCONNECT] App ID: ${sipData.app_id}`);
+      
+      if (sipData.extra) {
+        console.log(`📱 [DISCONNECT] VA ID: ${sipData.extra.CallVaId}`);
+        console.log(`🔄 [DISCONNECT] Call Direction: ${sipData.extra.CallDirection}`);
+      }
+    }
+    
+    // Save call log before cleanup if not already saved
+    if (callLogger) {
+      try {
+        console.log(`💾 [DISCONNECT] Saving call log for ${customerNumber}...`);
+        
+        // Determine disconnect reason for logging
+        let disconnectReason = 'disconnected';
+        if (code === 1000) disconnectReason = 'normal_closure';
+        else if (code === 1001) disconnectReason = 'going_away';
+        else if (code === 1006) disconnectReason = 'abnormal_closure';
+        else if (code === 1011) disconnectReason = 'server_error';
+        
+        const savedLog = await callLogger.saveToDatabase(disconnectReason);
+        
+        console.log(`✅ [DISCONNECT] Call log saved successfully`);
+        console.log(`   • Log ID: ${savedLog._id}`);
+        console.log(`   • Customer: ${customerNumber}`);
+        console.log(`   • Agent: ${agentName}`);
+        console.log(`   • Call Type: ${callType}`);
+        console.log(`   • Status: ${disconnectReason}`);
+        
+        // Print final statistics
+        const stats = callLogger.getStats();
+        console.log(`📊 [DISCONNECT] Final Call Statistics:`);
+        console.log(`   • Total Duration: ${stats.duration}s`);
+        console.log(`   • User Messages: ${stats.userMessages}`);
+        console.log(`   • AI Responses: ${stats.aiResponses}`);
+        console.log(`   • Languages Used: ${stats.languages.join(', ')}`);
+        console.log(`   • Customer Number: ${stats.customerNumber}`);
+        console.log(`   • Call Type: ${stats.callType}`);
+        
       } catch (error) {
-        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-        console.error(`❌ [UNIFIED-V3] Unexpected error processing message from ${customerNumber}: ${error.message}`)
-        console.error(`❌ [UNIFIED-V3] Stack trace:`, error.stack)
-
-        try {
-          const messagePreview = message.toString().substring(0, 200)
-          console.error(`❌ [UNIFIED-V3] Problematic message preview: "${messagePreview}..."`)
-        } catch (previewError) {
-          console.error(`❌ [UNIFIED-V3] Could not preview message: ${previewError.message}`)
-        }
+        console.error(`❌ [DISCONNECT] Failed to save call log for ${customerNumber}: ${error.message}`);
+        console.error(`❌ [DISCONNECT] Call log error details:`, error.stack);
       }
-    })
-
-    // Enhanced connection cleanup with pooled connection cleanup
-    ws.on("close", async (code, reason) => {
-      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-      const callType = SIPHeaderDecoder.determineCallType(sipData)
-      const agentName = ws.sessionAgentConfig?.agentName || "unknown"
-      const connectionDuration = Date.now() - connectionTime.getTime()
-
-      console.log(`\n🔗 [DISCONNECT] ==========================================`)
-      console.log(`🔗 [DISCONNECT] Connection closed for ${customerNumber}`)
-      console.log(`📞 [DISCONNECT] Call Type: ${callType}`)
-      console.log(`🤖 [DISCONNECT] Agent: ${agentName}`)
-      console.log(`⏰ [DISCONNECT] Connection Duration: ${Math.round(connectionDuration / 1000)}s`)
-      console.log(`🔢 [DISCONNECT] Close Code: ${code || "unknown"}`)
-      console.log(`📝 [DISCONNECT] Close Reason: ${reason || "no reason provided"}`)
-
-      if (sipData) {
-        console.log(`📍 [DISCONNECT] DID: ${sipData.did}`)
-        console.log(`🆔 [DISCONNECT] Session ID: ${sipData.session_id}`)
-        console.log(`🏢 [DISCONNECT] App ID: ${sipData.app_id}`)
-
-        if (sipData.extra) {
-          console.log(`📱 [DISCONNECT] VA ID: ${sipData.extra.CallVaId}`)
-          console.log(`🔄 [DISCONNECT] Call Direction: ${sipData.extra.CallDirection}`)
-        }
-      }
-
-      if (callLogger) {
-        try {
-          console.log(`💾 [DISCONNECT] Saving call log for ${customerNumber}...`)
-
-          let disconnectReason = "disconnected"
-          if (code === 1000) disconnectReason = "normal_closure"
-          else if (code === 1001) disconnectReason = "going_away"
-          else if (code === 1006) disconnectReason = "abnormal_closure"
-          else if (code === 1011) disconnectReason = "server_error"
-
-          const savedLog = await callLogger.saveToDatabase(disconnectReason)
-
-          console.log(`✅ [DISCONNECT] Call log saved successfully`)
-          console.log(`   • Log ID: ${savedLog._id}`)
-          console.log(`   • Customer: ${customerNumber}`)
-          console.log(`   • Agent: ${agentName}`)
-          console.log(`   • Call Type: ${callType}`)
-          console.log(`   • Status: ${disconnectReason}`)
-
-          const stats = callLogger.getStats()
-          console.log(`📊 [DISCONNECT] Final Call Statistics:`)
-          console.log(`   • Total Duration: ${stats.duration}s`)
-          console.log(`   • User Messages: ${stats.userMessages}`)
-          console.log(`   • AI Responses: ${stats.aiResponses}`)
-          console.log(`   • Languages Used: ${stats.languages.join(", ")}`)
-          console.log(`   • Customer Number: ${stats.customerNumber}`)
-          console.log(`   • Call Type: ${stats.callType}`)
-        } catch (error) {
-          console.error(`❌ [DISCONNECT] Failed to save call log for ${customerNumber}: ${error.message}`)
-          console.error(`❌ [DISCONNECT] Call log error details:`, error.stack)
-        }
+    } else {
+      console.log(`ℹ️ [DISCONNECT] No call logger instance found for ${customerNumber}`);
+    }
+    
+    // Cleanup Deepgram connection
+    if (deepgramWs) {
+      if (deepgramWs.readyState === WebSocket.OPEN) {
+        console.log(`🔌 [DISCONNECT] Closing Deepgram connection for ${customerNumber}`);
+        deepgramWs.close();
       } else {
-        console.log(`ℹ️ [DISCONNECT] No call logger instance found for ${customerNumber}`)
+        console.log(`ℹ️ [DISCONNECT] Deepgram connection already closed for ${customerNumber}`);
       }
+    }
 
-      // OPTIMIZED: Cleanup pooled Deepgram connection
-      if (deepgramConnection) {
-        console.log(`🔌 [DISCONNECT] Cleaning up pooled Deepgram connection for ${customerNumber}`)
-        deepgramConnection.cleanup()
+    // Cleanup TTS processor
+    if (optimizedTTS) {
+      console.log(`🔊 [DISCONNECT] Interrupting TTS processor for ${customerNumber}`);
+      optimizedTTS.interrupt();
+    }
 
-        const status = deepgramConnection.getStatus()
-        console.log(
-          `📊 [DISCONNECT] Final Deepgram status: Connected: ${status.isConnected}, Queue: ${status.queueSize}, Attempts: ${status.connectionAttempts}`,
-        )
-      } else {
-        console.log(`ℹ️ [DISCONNECT] No pooled Deepgram connection found for ${customerNumber}`)
-      }
+    // Reset all state variables
+    streamSid = null;
+    conversationHistory = [];
+    isProcessing = false;
+    userUtteranceBuffer = "";
+    lastProcessedText = "";
+    deepgramReady = false;
+    deepgramAudioQueue = [];
+    optimizedTTS = null;
+    currentLanguage = undefined;
+    processingRequestId = 0;
+    callLogger = null;
+    
+    console.log(`🧹 [DISCONNECT] Cleaned up all session data for ${customerNumber}`);
+    console.log(`🔗 [DISCONNECT] ==========================================\n`);
+  });
 
-      if (optimizedTTS) {
-        console.log(`🔊 [DISCONNECT] Interrupting TTS processor for ${customerNumber}`)
-        optimizedTTS.interrupt()
-      }
+  ws.on("error", (error) => {
+    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+    const callType = SIPHeaderDecoder.determineCallType(sipData);
+    const agentName = ws.sessionAgentConfig?.agentName || 'unknown';
+    
+    console.log(`\n❌ [ERROR] ==========================================`);
+    console.error(`❌ [ERROR] WebSocket error for ${customerNumber}`);
+    console.error(`📞 [ERROR] Call Type: ${callType}`);
+    console.error(`🤖 [ERROR] Agent: ${agentName}`);
+    console.error(`📝 [ERROR] Error Message: ${error.message}`);
+    console.error(`🔍 [ERROR] Error Code: ${error.code || 'unknown'}`);
+    
+    if (sipData) {
+      console.error(`📍 [ERROR] DID: ${sipData.did}`);
+      console.error(`🆔 [ERROR] Session ID: ${sipData.session_id}`);
+    }
+    
+    console.error(`📚 [ERROR] Stack Trace:`, error.stack);
+    console.log(`❌ [ERROR] ==========================================\n`);
+    
+    // Emergency call log save if error occurs
+    if (callLogger) {
+      callLogger.saveToDatabase('error').catch(logError => {
+        console.error(`❌ [ERROR] Failed to save emergency call log: ${logError.message}`);
+      });
+    }
+  });
 
-      // Reset all state variables
-      streamSid = null
-      conversationHistory = []
-      isProcessing = false
-      userUtteranceBuffer = ""
-      lastProcessedText = ""
-      optimizedTTS = null
-      currentLanguage = undefined
-      processingRequestId = 0
-      callLogger = null
-      deepgramConnection = null
+  // Optional: Add ping/pong heartbeat for connection monitoring
+  const heartbeatInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.log(`💓 [HEARTBEAT] Connection alive for ${customerNumber}`);
+      ws.ping();
+    } else {
+      clearInterval(heartbeatInterval);
+    }
+  }, 30000); // Every 30 seconds
 
-      console.log(`🧹 [DISCONNECT] Cleaned up all session data for ${customerNumber}`)
-      console.log(`🔗 [DISCONNECT] ==========================================\n`)
-    })
+  ws.on('pong', () => {
+    const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+    console.log(`💓 [PONG] Heartbeat response from ${customerNumber}`);
+  });
 
-    ws.on("error", (error) => {
-      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-      const callType = SIPHeaderDecoder.determineCallType(sipData)
-      const agentName = ws.sessionAgentConfig?.agentName || "unknown"
+  // Clear heartbeat on connection close
+  ws.on('close', () => {
+    clearInterval(heartbeatInterval);
+  });
+});
+};
 
-      console.log(`\n❌ [ERROR] ==========================================`)
-      console.error(`❌ [ERROR] WebSocket error for ${customerNumber}`)
-      console.error(`📞 [ERROR] Call Type: ${callType}`)
-      console.error(`🤖 [ERROR] Agent: ${agentName}`)
-      console.error(`📝 [ERROR] Error Message: ${error.message}`)
-      console.error(`🔍 [ERROR] Error Code: ${error.code || "unknown"}`)
-
-      if (sipData) {
-        console.error(`📍 [ERROR] DID: ${sipData.did}`)
-        console.error(`🆔 [ERROR] Session ID: ${sipData.session_id}`)
-      }
-
-      console.error(`📚 [ERROR] Stack Trace:`, error.stack)
-      console.log(`❌ [ERROR] ==========================================\n`)
-
-      if (callLogger) {
-        callLogger.saveToDatabase("error").catch((logError) => {
-          console.error(`❌ [ERROR] Failed to save emergency call log: ${logError.message}`)
-        })
-      }
-
-      // OPTIMIZED: Cleanup pooled Deepgram on error
-      if (deepgramConnection) {
-        console.log(`🔌 [ERROR] Cleaning up pooled Deepgram connection due to error for ${customerNumber}`)
-        deepgramConnection.cleanup()
-      }
-    })
-
-    // Optional: Add ping/pong heartbeat for connection monitoring
-    const heartbeatInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-        console.log(`💓 [HEARTBEAT] Connection alive for ${customerNumber}`)
-
-        // Also check pooled Deepgram status
-        if (deepgramConnection) {
-          const status = deepgramConnection.getStatus()
-          console.log(
-            `💓 [HEARTBEAT] Pooled Deepgram status for ${customerNumber}: Connected: ${status.isConnected}, Queue: ${status.queueSize}`,
-          )
-        }
-
-        ws.ping()
-      } else {
-        clearInterval(heartbeatInterval)
-      }
-    }, 30000)
-
-    ws.on("pong", () => {
-      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-      console.log(`💓 [PONG] Heartbeat response from ${customerNumber}`)
-    })
-
-    ws.on("close", () => {
-      clearInterval(heartbeatInterval)
-    })
-  })
-
-  // Graceful shutdown handler
-  process.on("SIGTERM", () => {
-    console.log("🛑 [SHUTDOWN] Received SIGTERM, cleaning up smart manager...")
-    smartDeepgramManager.cleanup()
-    process.exit(0)
-  })
-
-  process.on("SIGINT", () => {
-    console.log("🛑 [SHUTDOWN] Received SIGINT, cleaning up smart manager...")
-    smartDeepgramManager.cleanup()
-    process.exit(0)
-  })
-}
-
-module.exports = {
-  setupUnifiedVoiceServer,
-  SIPHeaderDecoder,
-  CallLogger,
-  AgentConfigFetcher,
-  DeepgramConnectionPool: SmartDeepgramManager, // Export the SmartDeepgramManager as DeepgramConnectionPool for compatibility
-  OptimizedDeepgramConnection,
-}
+module.exports = { setupUnifiedVoiceServer, SIPHeaderDecoder, CallLogger, AgentConfigFetcher };
