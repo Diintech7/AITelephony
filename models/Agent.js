@@ -75,8 +75,8 @@ const agentSchema = new mongoose.Schema({
     }
   ],
 
-  // Telephony
-  accountSid: { type: String },
+  // Telephony - Enhanced for both inbound and outbound
+  accountSid: { type: String, index: true }, // For inbound calls (Twilio AccountSid)
   serviceProvider: {
     type: String,
     enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
@@ -109,8 +109,10 @@ const agentSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 })
 
-// Compound index for client + agent name uniqueness
+// Enhanced indexing for both inbound and outbound call lookups
 agentSchema.index({ clientId: 1, agentName: 1 }, { unique: true })
+agentSchema.index({ accountSid: 1 }, { unique: true, sparse: true }) // For inbound calls
+agentSchema.index({ clientId: 1 }, { unique: false }) // For outbound calls (allow multiple agents per client)
 
 // Update the updatedAt field before saving
 agentSchema.pre("save", function (next) {
@@ -154,6 +156,90 @@ agentSchema.methods.setAudioFromBase64 = function(base64String) {
     const byteSize = Math.ceil((base64String.length * 3) / 4)
     this.audioMetadata.size = byteSize
   }
+}
+
+// Static method to find agent by call type and identifiers
+agentSchema.statics.findByCallData = async function(callType, identifiers) {
+  const { accountSid, clientId, callerId } = identifiers;
+  
+  console.log(`🔍 [AGENT_MODEL] Looking up agent for ${callType} call`);
+  console.log(`   • AccountSid: ${accountSid}`);
+  console.log(`   • ClientId: ${clientId}`);
+  console.log(`   • CallerId: ${callerId}`);
+  
+  let agent = null;
+  
+  try {
+    if (callType === 'inbound' && accountSid) {
+      // For inbound calls, use accountSid
+      agent = await this.findOne({ accountSid }).lean();
+      if (agent) {
+        console.log(`✅ [AGENT_MODEL] Found inbound agent by accountSid: ${accountSid}`);
+        return agent;
+      }
+    }
+    
+    if (callType === 'outbound' && (clientId || callerId)) {
+      // For outbound calls, try clientId first, then callerId
+      const searchId = clientId || callerId;
+      agent = await this.findOne({ clientId: searchId }).lean();
+      if (agent) {
+        console.log(`✅ [AGENT_MODEL] Found outbound agent by clientId: ${searchId}`);
+        return agent;
+      }
+    }
+    
+    // Fallback: try both methods regardless of call type
+    console.log(`🔄 [AGENT_MODEL] Primary lookup failed, trying fallback methods`);
+    
+    if (accountSid) {
+      agent = await this.findOne({ accountSid }).lean();
+      if (agent) {
+        console.log(`✅ [AGENT_MODEL] Found agent by accountSid (fallback): ${accountSid}`);
+        return agent;
+      }
+    }
+    
+    if (clientId || callerId) {
+      const searchId = clientId || callerId;
+      agent = await this.findOne({ clientId: searchId }).lean();
+      if (agent) {
+        console.log(`✅ [AGENT_MODEL] Found agent by clientId (fallback): ${searchId}`);
+        return agent;
+      }
+    }
+    
+    console.log(`❌ [AGENT_MODEL] No agent found for any provided identifiers`);
+    return null;
+    
+  } catch (error) {
+    console.error(`❌ [AGENT_MODEL] Database error during lookup: ${error.message}`);
+    throw error;
+  }
+}
+
+// Instance method to determine if agent supports call type
+agentSchema.methods.supportsCallType = function(callType) {
+  if (callType === 'inbound') {
+    return !!this.accountSid;
+  } else if (callType === 'outbound') {
+    return !!this.clientId;
+  }
+  return false;
+}
+
+// Instance method to get agent summary for logging
+agentSchema.methods.getSummary = function() {
+  return {
+    id: this._id,
+    clientId: this.clientId,
+    accountSid: this.accountSid,
+    agentName: this.agentName,
+    language: this.language,
+    voiceSelection: this.voiceSelection,
+    supportsInbound: !!this.accountSid,
+    supportsOutbound: !!this.clientId
+  };
 }
 
 module.exports = mongoose.model("Agent", agentSchema)

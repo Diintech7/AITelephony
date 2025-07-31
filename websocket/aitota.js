@@ -111,6 +111,7 @@ class SIPHeaderDecoder {
       console.log(`📋 [SIP-HEADERS] Extra Data:`);
       console.log(`   • Call CLI: ${sipData.extra.CallCli}`);
       console.log(`   • Call Session ID: ${sipData.extra.CallSessionId}`);
+      console.log(`   • Call Direction: ${sipData.extra.CallDirection}`);
       console.log(`   • Call VA ID: ${sipData.extra.CallVaId}`);
       console.log(`   • DID (from extra): ${sipData.extra.DID}`);
       console.log(`   • CZ Service App ID: ${sipData.extra.CZSERVICEAPPID}`);
@@ -119,14 +120,23 @@ class SIPHeaderDecoder {
   }
 
   static determineCallType(sipData) {
-    // Logic to determine if it's inbound or outbound
+    // Check CallDirection from extra data first
+    if (sipData.extra?.CallDirection) {
+      const direction = sipData.extra.CallDirection.toLowerCase();
+      if (direction === 'outdial') return 'outbound';
+      if (direction === 'indial' || direction === 'inbound') return 'inbound';
+    }
+    
+    // Check direction parameter
     if (sipData.direction) {
-      return sipData.direction.toLowerCase();
+      const direction = sipData.direction.toLowerCase();
+      if (direction === 'outdial' || direction === 'outbound') return 'outbound';
+      if (direction === 'indial' || direction === 'inbound') return 'inbound';
     }
     
     // Fallback logic based on available data
     if (sipData.extra?.CallVaId) {
-      return 'inbound'; // Assumption: VA ID present means inbound
+      return 'outbound'; // Assumption: VA ID present means outbound
     }
     
     return 'unknown';
@@ -834,6 +844,89 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
+// Enhanced Agent lookup function for both inbound and outbound calls
+const findAgentConfig = async (data, sipData) => {
+  const callType = SIPHeaderDecoder.determineCallType(sipData);
+  console.log(`🔍 [AGENT-LOOKUP] Call type detected: ${callType}`);
+  
+  let agentConfig = null;
+  let lookupMethod = '';
+  let lookupValue = '';
+  
+  try {
+    if (callType === 'inbound') {
+      // For inbound calls, use accountSid from start event
+      const accountSid = data.start?.accountSid;
+      if (!accountSid) {
+        throw new Error('Missing accountSid for inbound call');
+      }
+      
+      lookupMethod = 'accountSid';
+      lookupValue = accountSid;
+      
+      console.log(`🔍 [AGENT-LOOKUP] Inbound call - Looking up agent by accountSid: ${accountSid}`);
+      agentConfig = await Agent.findOne({ accountSid }).lean();
+      
+    } else if (callType === 'outbound') {
+      // For outbound calls, use CallVaId from SIP extra data
+      const callerId = sipData?.extra?.CallVaId || sipData?.app_id;
+      if (!callerId) {
+        throw new Error('Missing CallVaId/app_id for outbound call');
+      }
+      
+      lookupMethod = 'clientId';
+      lookupValue = callerId;
+      
+      console.log(`🔍 [AGENT-LOOKUP] Outbound call - Looking up agent by clientId: ${callerId}`);
+      agentConfig = await Agent.findOne({ clientId: callerId }).lean();
+      
+    } else {
+      // Unknown call type - try both methods
+      console.log(`🔍 [AGENT-LOOKUP] Unknown call type - Trying multiple lookup methods`);
+      
+      const accountSid = data.start?.accountSid;
+      const callerId = sipData?.extra?.CallVaId || sipData?.app_id;
+      
+      if (accountSid) {
+        console.log(`🔍 [AGENT-LOOKUP] Trying accountSid: ${accountSid}`);
+        agentConfig = await Agent.findOne({ accountSid }).lean();
+        if (agentConfig) {
+          lookupMethod = 'accountSid';
+          lookupValue = accountSid;
+        }
+      }
+      
+      if (!agentConfig && callerId) {
+        console.log(`🔍 [AGENT-LOOKUP] Trying clientId: ${callerId}`);
+        agentConfig = await Agent.findOne({ clientId: callerId }).lean();
+        if (agentConfig) {
+          lookupMethod = 'clientId';
+          lookupValue = callerId;
+        }
+      }
+    }
+    
+    if (!agentConfig) {
+      const errorMsg = `No agent found for ${callType} call using ${lookupMethod}: ${lookupValue}`;
+      console.error(`❌ [AGENT-LOOKUP] ${errorMsg}`);
+      throw new Error(errorMsg);
+    }
+    
+    console.log(`✅ [AGENT-LOOKUP] Agent found for ${callType} call`);
+    console.log(`   • Method: ${lookupMethod} = ${lookupValue}`);
+    console.log(`   • Client ID: ${agentConfig.clientId}`);
+    console.log(`   • Agent Name: ${agentConfig.agentName}`);
+    console.log(`   • Language: ${agentConfig.language || 'hi'}`);
+    console.log(`   • Voice: ${agentConfig.voiceSelection || 'pavithra'}`);
+    
+    return agentConfig;
+    
+  } catch (error) {
+    console.error(`❌ [AGENT-LOOKUP] Database error: ${error.message}`);
+    throw error;
+  }
+};
+
 // Main WebSocket server setup with enhanced call logging and SIP header parsing
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 [ENHANCED] Voice Server started with SIP header parsing and call logging");
@@ -1099,12 +1192,10 @@ const setupUnifiedVoiceServer = (wss) => {
 
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid;
-            const accountSid = data.start?.accountSid;
             const mobile = data.start?.from || sipData?.caller_id || null; // Use SIP data as fallback
             
             console.log(`\n🎯 [ENHANCED] Stream started:`);
             console.log(`   • StreamSid: ${streamSid}`);
-            console.log(`   • AccountSid: ${accountSid}`);
             console.log(`   • Mobile: ${mobile}`);
             
             if (sipData) {
@@ -1114,29 +1205,13 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log(`   • Call Type: ${SIPHeaderDecoder.determineCallType(sipData)}`);
             }
 
-            // Fetch agent config from DB using accountSid (MANDATORY)
+            // Enhanced agent config lookup for both inbound and outbound calls
             let agentConfig = null;
-            if (accountSid) {
-              try {
-                agentConfig = await Agent.findOne({ accountSid }).lean();
-                if (!agentConfig) {
-                  console.error(`❌ [DB] No agent found for accountSid: ${accountSid}`);
-                  ws.send(JSON.stringify({ event: 'error', message: `No agent found for accountSid: ${accountSid}` }));
-                  ws.close();
-                  return;
-                }
-                
-                console.log(`✅ [DB] Agent config loaded for client: ${agentConfig.clientId}`);
-                
-              } catch (err) {
-                console.error(`❌ [DB] Database error for accountSid: ${accountSid}`, err);
-                ws.send(JSON.stringify({ event: 'error', message: `DB error for accountSid: ${accountSid}` }));
-                ws.close();
-                return;
-              }
-            } else {
-              console.error(`❌ [SIP] Missing accountSid in start event`);
-              ws.send(JSON.stringify({ event: 'error', message: 'Missing accountSid in start event' }));
+            try {
+              agentConfig = await findAgentConfig(data, sipData);
+            } catch (err) {
+              console.error(`❌ [AGENT-LOOKUP] ${err.message}`);
+              ws.send(JSON.stringify({ event: 'error', message: err.message }));
               ws.close();
               return;
             }
@@ -1145,7 +1220,7 @@ const setupUnifiedVoiceServer = (wss) => {
             currentLanguage = agentConfig.language || 'hi';
 
             // Initialize enhanced call logger with SIP data
-            callLogger = new CallLogger(agentConfig.clientId || accountSid, sipData);
+            callLogger = new CallLogger(agentConfig.clientId, sipData);
             console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, DID: ${sipData?.did || 'unknown'}`);
 
             await connectToDeepgram();
