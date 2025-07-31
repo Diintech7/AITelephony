@@ -290,7 +290,7 @@ class OptimizedDeepgramConnection {
       this.deepgramWs = new WebSocket(deepgramUrl.toString(), {
         headers: {
           Authorization: `Token ${API_KEYS.deepgram}`,
-          "User-Agent": `VoiceServer/2.0 Customer-${this.customerNumber}`,
+          "User-Agent": `VoiceServer/3.0 Customer-${this.customerNumber}`,
         },
       })
 
@@ -336,20 +336,12 @@ class OptimizedDeepgramConnection {
           console.error(`❌ [DEEPGRAM] WebSocket error for ${this.customerNumber}:`, error.message)
           this.isConnected = false
 
-          // Check for rate limit error
-          if (error.message && error.message.includes("429")) {
-            console.error(`🚨 [DEEPGRAM] Rate limit error for ${this.customerNumber}`)
-            //this.pool.handleRateLimit() // Removed rate limit handling from here
-          }
-
           if (this.onError) {
             this.onError(error)
           }
 
           reject(error)
         }
-
-        // In the onclose handler of OptimizedDeepgramConnection, replace the reconnection logic:
 
         this.deepgramWs.onclose = (event) => {
           clearTimeout(connectionTimeout)
@@ -546,7 +538,7 @@ class OptimizedDeepgramConnection {
   }
 }
 
-// SIP Header Decoder Utility (unchanged from previous version)
+// SIP Header Decoder Utility
 class SIPHeaderDecoder {
   static decodeBase64Extra(base64String) {
     try {
@@ -725,7 +717,7 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return voiceMapping[voiceSelection] || "pavithra"
 }
 
-// Language detection with OpenAI (unchanged)
+// Language detection with OpenAI
 const detectLanguageWithOpenAI = async (text) => {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -782,7 +774,7 @@ Return only the language code, nothing else.`,
   }
 }
 
-// Enhanced Call logging utility class (unchanged from previous version)
+// Enhanced Call logging utility class
 class CallLogger {
   constructor(clientId, sipData = null) {
     this.clientId = clientId
@@ -902,7 +894,7 @@ class CallLogger {
   }
 }
 
-// OpenAI streaming processing (unchanged from previous version)
+// OpenAI streaming processing
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -925,7 +917,7 @@ const processWithOpenAIStreaming = async (
 
         te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
 
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுததுங்கள்.",
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்.",
 
         mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
       }
@@ -1062,7 +1054,7 @@ const shouldSendPhrase = (buffer) => {
   return false
 }
 
-// TTS processor (unchanged from previous version)
+// TTS processor
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
@@ -1287,9 +1279,9 @@ class OptimizedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // ~160 bytes per chunk
 
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`)
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ~160 byte chunks`)
 
     let position = 0
     let chunkIndex = 0
@@ -1299,7 +1291,9 @@ class OptimizedSarvamTTSProcessor {
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
       const chunk = audioBuffer.slice(position, position + chunkSize)
 
-      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`)
+      console.log(
+        `📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (base64: ${chunk.toString("base64").length} chars)`,
+      )
 
       const mediaMessage = {
         event: "media",
@@ -1326,7 +1320,7 @@ class OptimizedSarvamTTSProcessor {
     if (this.isInterrupted || streamingSession.interrupt) {
       console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`)
     } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`)
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks (~160 bytes each)`)
     }
 
     this.currentAudioStreaming = null
@@ -1356,7 +1350,7 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// Agent configuration fetcher (unchanged from previous version)
+// Agent configuration fetcher
 class AgentConfigFetcher {
   static async fetchAgentConfig(sipData) {
     const callType = SIPHeaderDecoder.determineCallType(sipData)
@@ -1560,9 +1554,9 @@ class AgentConfigFetcher {
   }
 }
 
-// MAIN: Enhanced WebSocket server setup with connection pooling
+// MAIN: Enhanced WebSocket server setup with both inbound and outbound support
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [RATE-LIMIT-FIX] Voice Server started with connection pooling and rate limit handling")
+  console.log("🚀 [UNIFIED-V3] Voice Server started with inbound/outbound support and circuit breaker")
 
   // Log pool stats periodically
   setInterval(() => {
@@ -1583,7 +1577,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const clientIP = req.socket.remoteAddress
 
     console.log(`\n🔗 [CONNECTION] ==========================================`)
-    console.log(`🔗 [CONNECTION] New rate-limit-optimized WebSocket connection`)
+    console.log(`🔗 [CONNECTION] New unified WebSocket connection (v3)`)
     console.log(`🌐 [CONNECTION] Client IP: ${clientIP}`)
     console.log(`⏰ [CONNECTION] Time: ${connectionTime.toISOString()}`)
     console.log(`📡 [CONNECTION] User Agent: ${req.headers["user-agent"] || "unknown"}`)
@@ -1809,7 +1803,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced WebSocket message handling
+    // Enhanced WebSocket message handling with both inbound and outbound support
     ws.on("message", async (message) => {
       try {
         if (!message || message.length === 0) {
@@ -1899,8 +1893,8 @@ const setupUnifiedVoiceServer = (wss) => {
         switch (data.event) {
           case "connected":
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`🔗 [RATE-LIMIT-FIX] Connected from ${customerNumber} - Protocol: ${data.protocol}`)
-            console.log(`🔗 [RATE-LIMIT-FIX] Version: ${data.version || "unknown"}`)
+            console.log(`🔗 [UNIFIED-V3] Connected from ${customerNumber} - Protocol: ${data.protocol}`)
+            console.log(`🔗 [UNIFIED-V3] Version: ${data.version || "unknown"}`)
             break
 
           case "start": {
@@ -1909,7 +1903,7 @@ const setupUnifiedVoiceServer = (wss) => {
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData)
             const callType = SIPHeaderDecoder.determineCallType(sipData)
 
-            console.log(`\n🎯 [RATE-LIMIT-FIX] Stream started:`)
+            console.log(`\n🎯 [UNIFIED-V3] Stream started:`)
             console.log(`   • StreamSid: ${streamSid}`)
             console.log(`   • AccountSid: ${accountSid}`)
             console.log(`   • Customer Number: ${customerNumber}`)
@@ -2003,8 +1997,11 @@ const setupUnifiedVoiceServer = (wss) => {
               callLogger.logAIResponse(greeting, currentLanguage)
             }
 
+            // IMPORTANT: Send greeting through Sarvam TTS and stream to SIP as base64 chunks
+            console.log(`🎵 [GREETING-TTS] Processing greeting through Sarvam TTS for ${customerNumber}`)
             const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
+            console.log(`✅ [GREETING-TTS] Greeting sent as ~160 byte base64 chunks to SIP for ${customerNumber}`)
             break
           }
 
@@ -2037,7 +2034,7 @@ const setupUnifiedVoiceServer = (wss) => {
           case "stop":
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
             const callType = SIPHeaderDecoder.determineCallType(sipData)
-            console.log(`\n📞 [RATE-LIMIT-FIX] Stream stopped for ${customerNumber} (${callType} call)`)
+            console.log(`\n📞 [UNIFIED-V3] Stream stopped for ${customerNumber} (${callType} call)`)
 
             if (callLogger) {
               try {
@@ -2078,21 +2075,19 @@ const setupUnifiedVoiceServer = (wss) => {
 
           default:
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`❓ [RATE-LIMIT-FIX] Unknown event: ${data.event} from ${customerNumber}`)
-            console.log(`❓ [RATE-LIMIT-FIX] Event data:`, JSON.stringify(data, null, 2))
+            console.log(`❓ [UNIFIED-V3] Unknown event: ${data.event} from ${customerNumber}`)
+            console.log(`❓ [UNIFIED-V3] Event data:`, JSON.stringify(data, null, 2))
         }
       } catch (error) {
         const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-        console.error(
-          `❌ [RATE-LIMIT-FIX] Unexpected error processing message from ${customerNumber}: ${error.message}`,
-        )
-        console.error(`❌ [RATE-LIMIT-FIX] Stack trace:`, error.stack)
+        console.error(`❌ [UNIFIED-V3] Unexpected error processing message from ${customerNumber}: ${error.message}`)
+        console.error(`❌ [UNIFIED-V3] Stack trace:`, error.stack)
 
         try {
           const messagePreview = message.toString().substring(0, 200)
-          console.error(`❌ [RATE-LIMIT-FIX] Problematic message preview: "${messagePreview}..."`)
+          console.error(`❌ [UNIFIED-V3] Problematic message preview: "${messagePreview}..."`)
         } catch (previewError) {
-          console.error(`❌ [RATE-LIMIT-FIX] Could not preview message: ${previewError.message}`)
+          console.error(`❌ [UNIFIED-V3] Could not preview message: ${previewError.message}`)
         }
       }
     })
