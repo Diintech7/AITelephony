@@ -111,35 +111,63 @@ class SIPHeaderDecoder {
       console.log(`📋 [SIP-HEADERS] Extra Data:`);
       console.log(`   • Call CLI: ${sipData.extra.CallCli}`);
       console.log(`   • Call Session ID: ${sipData.extra.CallSessionId}`);
-      console.log(`   • Call Direction: ${sipData.extra.CallDirection}`);
       console.log(`   • Call VA ID: ${sipData.extra.CallVaId}`);
       console.log(`   • DID (from extra): ${sipData.extra.DID}`);
       console.log(`   • CZ Service App ID: ${sipData.extra.CZSERVICEAPPID}`);
+      console.log(`   • Call Direction: ${sipData.extra.CallDirection}`);
     }
     console.log(`🌐 [SIP-HEADERS] ==========================================\n`);
   }
 
   static determineCallType(sipData) {
-    // Check CallDirection from extra data first
+    // Check direction from extra data first
     if (sipData.extra?.CallDirection) {
       const direction = sipData.extra.CallDirection.toLowerCase();
       if (direction === 'outdial') return 'outbound';
-      if (direction === 'indial' || direction === 'inbound') return 'inbound';
+      if (direction === 'indial') return 'inbound';
     }
     
-    // Check direction parameter
+    // Check main direction field
     if (sipData.direction) {
       const direction = sipData.direction.toLowerCase();
-      if (direction === 'outdial' || direction === 'outbound') return 'outbound';
-      if (direction === 'indial' || direction === 'inbound') return 'inbound';
+      if (direction === 'outbound' || direction === 'outdial') return 'outbound';
+      if (direction === 'inbound' || direction === 'indial') return 'inbound';
     }
     
     // Fallback logic based on available data
     if (sipData.extra?.CallVaId) {
-      return 'outbound'; // Assumption: VA ID present means outbound
+      return 'inbound'; // Assumption: VA ID present means inbound
     }
     
     return 'unknown';
+  }
+
+  // NEW: Extract actual customer number from SIP data
+  static getCustomerNumber(sipData) {
+    // For outbound calls, customer number is in CallCli
+    if (sipData.extra?.CallCli) {
+      return sipData.extra.CallCli;
+    }
+    
+    // For inbound calls, it might be in caller_id
+    if (sipData.caller_id && sipData.caller_id !== sipData.extra?.CallVaId) {
+      return sipData.caller_id;
+    }
+    
+    return null;
+  }
+
+  // NEW: Get agent identifier based on call type
+  static getAgentIdentifier(sipData) {
+    const callType = this.determineCallType(sipData);
+    
+    if (callType === 'outbound') {
+      // For outbound, use CallVaId as the agent identifier (caller ID in agent table)
+      return sipData.extra?.CallVaId || sipData.caller_id;
+    } else {
+      // For inbound, use traditional accountSid approach
+      return sipData.app_id; // This should map to accountSid
+    }
   }
 }
 
@@ -257,7 +285,7 @@ class CallLogger {
   constructor(clientId, sipData = null) {
     this.clientId = clientId;
     this.sipData = sipData;
-    this.mobile = sipData?.caller_id || null;
+    this.mobile = SIPHeaderDecoder.getCustomerNumber(sipData) || sipData?.caller_id || null;
     this.callStartTime = new Date();
     this.transcripts = [];
     this.responses = [];
@@ -266,6 +294,7 @@ class CallLogger {
     // Log SIP data initialization
     if (sipData) {
       console.log(`📝 [CALL-LOG] Initialized with SIP data for client: ${clientId}`);
+      console.log(`📱 [CALL-LOG] Customer number: ${this.mobile}`);
       SIPHeaderDecoder.logSIPData(sipData);
     }
   }
@@ -335,7 +364,8 @@ class CallLogger {
           did: this.sipData?.did,
           appId: this.sipData?.app_id,
           sessionId: this.sipData?.session_id,
-          extraData: this.sipData?.extra
+          extraData: this.sipData?.extra,
+          customerNumber: this.mobile
         }
       };
 
@@ -346,7 +376,7 @@ class CallLogger {
       console.log(`📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`);
       
       if (this.sipData) {
-        console.log(`📞 [CALL-LOG] SIP Data - Type: ${SIPHeaderDecoder.determineCallType(this.sipData)}, DID: ${this.sipData.did}, Mobile: ${this.mobile}`);
+        console.log(`📞 [CALL-LOG] SIP Data - Type: ${SIPHeaderDecoder.determineCallType(this.sipData)}, DID: ${this.sipData.did}, Customer: ${this.mobile}`);
       }
       
       return savedLog;
@@ -365,7 +395,8 @@ class CallLogger {
       languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
       startTime: this.callStartTime,
       sipData: this.sipData,
-      callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : 'unknown'
+      callType: this.sipData ? SIPHeaderDecoder.determineCallType(this.sipData) : 'unknown',
+      customerNumber: this.mobile
     };
   }
 }
@@ -844,92 +875,54 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// Enhanced Agent lookup function for both inbound and outbound calls
-const findAgentConfig = async (data, sipData) => {
-  const callType = SIPHeaderDecoder.determineCallType(sipData);
-  console.log(`🔍 [AGENT-LOOKUP] Call type detected: ${callType}`);
-  
-  let agentConfig = null;
-  let lookupMethod = '';
-  let lookupValue = '';
-  
-  try {
-    if (callType === 'inbound') {
-      // For inbound calls, use accountSid from start event
-      const accountSid = data.start?.accountSid;
-      if (!accountSid) {
-        throw new Error('Missing accountSid for inbound call');
-      }
-      
-      lookupMethod = 'accountSid';
-      lookupValue = accountSid;
-      
-      console.log(`🔍 [AGENT-LOOKUP] Inbound call - Looking up agent by accountSid: ${accountSid}`);
-      agentConfig = await Agent.findOne({ accountSid }).lean();
-      
-    } else if (callType === 'outbound') {
-      // For outbound calls, use CallVaId from SIP extra data
-      const callerId = sipData?.extra?.CallVaId || sipData?.app_id;
-      if (!callerId) {
-        throw new Error('Missing CallVaId/app_id for outbound call');
-      }
-      
-      lookupMethod = 'clientId';
-      lookupValue = callerId;
-      
-      console.log(`🔍 [AGENT-LOOKUP] Outbound call - Looking up agent by clientId: ${callerId}`);
-      agentConfig = await Agent.findOne({ clientId: callerId }).lean();
-      
-    } else {
-      // Unknown call type - try both methods
-      console.log(`🔍 [AGENT-LOOKUP] Unknown call type - Trying multiple lookup methods`);
-      
-      const accountSid = data.start?.accountSid;
-      const callerId = sipData?.extra?.CallVaId || sipData?.app_id;
-      
-      if (accountSid) {
-        console.log(`🔍 [AGENT-LOOKUP] Trying accountSid: ${accountSid}`);
-        agentConfig = await Agent.findOne({ accountSid }).lean();
-        if (agentConfig) {
-          lookupMethod = 'accountSid';
-          lookupValue = accountSid;
+// NEW: Enhanced agent configuration fetcher
+class AgentConfigFetcher {
+  static async fetchAgentConfig(sipData) {
+    const callType = SIPHeaderDecoder.determineCallType(sipData);
+    const agentIdentifier = SIPHeaderDecoder.getAgentIdentifier(sipData);
+    
+    console.log(`🔍 [AGENT-FETCH] Call type: ${callType}, Identifier: ${agentIdentifier}`);
+    
+    let agentConfig = null;
+    
+    try {
+      if (callType === 'outbound') {
+        // For outbound calls, search by callerId field
+        console.log(`📤 [AGENT-FETCH] Searching for outbound agent with callerId: ${agentIdentifier}`);
+        agentConfig = await Agent.findOne({ callerId: agentIdentifier }).lean();
+        
+        if (!agentConfig) {
+          console.error(`❌ [AGENT-FETCH] No outbound agent found for callerId: ${agentIdentifier}`);
+          return { success: false, error: `No outbound agent found for callerId: ${agentIdentifier}` };
         }
+        
+        console.log(`✅ [AGENT-FETCH] Outbound agent found: ${agentConfig.clientId} (${agentConfig.agentName})`);
+        
+      } else {
+        // For inbound calls, search by accountSid field (existing logic)
+        console.log(`📥 [AGENT-FETCH] Searching for inbound agent with accountSid: ${agentIdentifier}`);
+        agentConfig = await Agent.findOne({ accountSid: agentIdentifier }).lean();
+        
+        if (!agentConfig) {
+          console.error(`❌ [AGENT-FETCH] No inbound agent found for accountSid: ${agentIdentifier}`);
+          return { success: false, error: `No inbound agent found for accountSid: ${agentIdentifier}` };
+        }
+        
+        console.log(`✅ [AGENT-FETCH] Inbound agent found: ${agentConfig.clientId} (${agentConfig.agentName})`);
       }
       
-      if (!agentConfig && callerId) {
-        console.log(`🔍 [AGENT-LOOKUP] Trying clientId: ${callerId}`);
-        agentConfig = await Agent.findOne({ clientId: callerId }).lean();
-        if (agentConfig) {
-          lookupMethod = 'clientId';
-          lookupValue = callerId;
-        }
-      }
+      return { success: true, agentConfig, callType };
+      
+    } catch (error) {
+      console.error(`❌ [AGENT-FETCH] Database error: ${error.message}`);
+      return { success: false, error: `Database error: ${error.message}` };
     }
-    
-    if (!agentConfig) {
-      const errorMsg = `No agent found for ${callType} call using ${lookupMethod}: ${lookupValue}`;
-      console.error(`❌ [AGENT-LOOKUP] ${errorMsg}`);
-      throw new Error(errorMsg);
-    }
-    
-    console.log(`✅ [AGENT-LOOKUP] Agent found for ${callType} call`);
-    console.log(`   • Method: ${lookupMethod} = ${lookupValue}`);
-    console.log(`   • Client ID: ${agentConfig.clientId}`);
-    console.log(`   • Agent Name: ${agentConfig.agentName}`);
-    console.log(`   • Language: ${agentConfig.language || 'hi'}`);
-    console.log(`   • Voice: ${agentConfig.voiceSelection || 'pavithra'}`);
-    
-    return agentConfig;
-    
-  } catch (error) {
-    console.error(`❌ [AGENT-LOOKUP] Database error: ${error.message}`);
-    throw error;
   }
-};
+}
 
 // Main WebSocket server setup with enhanced call logging and SIP header parsing
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with SIP header parsing and call logging");
+  console.log("🚀 [ENHANCED] Voice Server started with SIP header parsing and inbound/outbound call support");
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
@@ -1038,7 +1031,8 @@ const setupUnifiedVoiceServer = (wss) => {
               callLogger.logUserTranscript(transcript.trim(), detectedLang);
               
               // Enhanced logging with SIP data
-              console.log(`📝 [TRANSCRIPT] Customer (${sipData?.caller_id || 'unknown'}): "${transcript.trim()}" (${detectedLang})`);
+              const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+              console.log(`📝 [TRANSCRIPT] Customer (${customerNumber}): "${transcript.trim()}" (${detectedLang})`);
             }
             
             await processUserUtterance(userUtteranceBuffer);
@@ -1052,7 +1046,8 @@ const setupUnifiedVoiceServer = (wss) => {
             const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim());
             callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang);
             
-            console.log(`📝 [UTTERANCE-END] Customer (${sipData?.caller_id || 'unknown'}): "${userUtteranceBuffer.trim()}" (${detectedLang})`);
+            const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+            console.log(`📝 [UTTERANCE-END] Customer (${customerNumber}): "${userUtteranceBuffer.trim()}" (${detectedLang})`);
           }
           
           await processUserUtterance(userUtteranceBuffer);
@@ -1076,14 +1071,16 @@ const setupUnifiedVoiceServer = (wss) => {
       const timer = createTimer("UTTERANCE_PROCESSING");
 
       try {
-        console.log(`🎤 [USER] Processing: "${text}" from ${sipData?.caller_id || 'unknown'} via DID ${sipData?.did || 'unknown'}`);
+        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        const callType = SIPHeaderDecoder.determineCallType(sipData);
+        console.log(`🎤 [USER] Processing: "${text}" from ${customerNumber} (${callType} call) via DID ${sipData?.did || 'unknown'}`);
 
         // Step 1: Detect language using OpenAI
         const detectedLanguage = await detectLanguageWithOpenAI(text);
         
         // Step 2: Update current language and initialize TTS processor
         if (detectedLanguage !== currentLanguage) {
-          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage} for ${sipData?.caller_id || 'unknown'}`);
+          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage} for ${customerNumber}`);
           currentLanguage = detectedLanguage;
         }
 
@@ -1103,18 +1100,18 @@ const setupUnifiedVoiceServer = (wss) => {
           (phrase, lang) => {
             // Handle phrase chunks - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`📤 [PHRASE] "${phrase}" (${lang}) -> ${sipData?.caller_id || 'unknown'}`);
+              console.log(`📤 [PHRASE] "${phrase}" (${lang}) -> ${customerNumber}`);
               optimizedTTS.addPhrase(phrase, lang);
             }
           },
           (fullResponse) => {
             // Handle completion - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`✅ [COMPLETE] "${fullResponse}" -> ${sipData?.caller_id || 'unknown'}`);
+              console.log(`✅ [COMPLETE] "${fullResponse}" -> ${customerNumber}`);
               optimizedTTS.complete();
               
               const stats = optimizedTTS.getStats();
-              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk for ${sipData?.caller_id || 'unknown'}`);
+              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk for ${customerNumber}`);
               
               // Update conversation history
               conversationHistory.push(
@@ -1132,10 +1129,11 @@ const setupUnifiedVoiceServer = (wss) => {
           callLogger // Pass call logger to OpenAI processing
         );
 
-        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms for ${sipData?.caller_id || 'unknown'}`);
+        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms for ${customerNumber}`);
 
       } catch (error) {
-        console.error(`❌ [PROCESSING] Error for ${sipData?.caller_id || 'unknown'}: ${error.message}`);
+        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        console.error(`❌ [PROCESSING] Error for ${customerNumber}: ${error.message}`);
       } finally {
         if (processingRequestId === currentRequestId) {
           isProcessing = false;
@@ -1148,7 +1146,8 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         // Handle empty or invalid messages gracefully
         if (!message || message.length === 0) {
-          console.log(`ℹ️ [MESSAGE] Received empty message from ${sipData?.caller_id || 'unknown'}`);
+          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+          console.log(`ℹ️ [MESSAGE] Received empty message from ${customerNumber}`);
           return;
         }
 
@@ -1156,7 +1155,8 @@ const setupUnifiedVoiceServer = (wss) => {
         try {
           messageString = message.toString();
           if (!messageString || messageString.trim() === '') {
-            console.log(`ℹ️ [MESSAGE] Received empty string message from ${sipData?.caller_id || 'unknown'}`);
+            const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+            console.log(`ℹ️ [MESSAGE] Received empty string message from ${customerNumber}`);
             return;
           }
         } catch (error) {
@@ -1174,16 +1174,19 @@ const setupUnifiedVoiceServer = (wss) => {
             return;
           }
           
-          console.log(`⚠️ [MESSAGE] Invalid JSON from ${sipData?.caller_id || 'unknown'}: ${jsonError.message}`);
+          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+          console.log(`⚠️ [MESSAGE] Invalid JSON from ${customerNumber}: ${jsonError.message}`);
           console.log(`⚠️ [MESSAGE] Raw message (first 100 chars): "${messageString.substring(0, 100)}..."`);
           return;
         }
 
         // Ensure data is an object with an event property
         if (!data || typeof data !== 'object' || !data.event) {
-          console.log(`⚠️ [MESSAGE] Invalid message format from ${sipData?.caller_id || 'unknown'}:`, data);
+          const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+          console.log(`⚠️ [MESSAGE] Invalid message format from ${customerNumber}:`, data);
           return;
         }
+        let customerNumber;
 
         switch (data.event) {
           case "connected":
@@ -1192,42 +1195,61 @@ const setupUnifiedVoiceServer = (wss) => {
 
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid;
-            const mobile = data.start?.from || sipData?.caller_id || null; // Use SIP data as fallback
+            const accountSid = data.start?.accountSid;
+            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData);
+            const callType = SIPHeaderDecoder.determineCallType(sipData);
             
             console.log(`\n🎯 [ENHANCED] Stream started:`);
             console.log(`   • StreamSid: ${streamSid}`);
-            console.log(`   • Mobile: ${mobile}`);
+            console.log(`   • AccountSid: ${accountSid}`);
+            console.log(`   • Customer Number: ${customerNumber}`);
+            console.log(`   • Call Type: ${callType}`);
             
             if (sipData) {
               console.log(`   • SIP App ID: ${sipData.app_id}`);
               console.log(`   • SIP DID: ${sipData.did}`);
               console.log(`   • SIP Session ID: ${sipData.session_id}`);
-              console.log(`   • Call Type: ${SIPHeaderDecoder.determineCallType(sipData)}`);
+              console.log(`   • SIP Direction: ${sipData.extra?.CallDirection || sipData.direction}`);
+              console.log(`   • VA ID: ${sipData.extra?.CallVaId}`);
             }
 
-            // Enhanced agent config lookup for both inbound and outbound calls
-            let agentConfig = null;
-            try {
-              agentConfig = await findAgentConfig(data, sipData);
-            } catch (err) {
-              console.error(`❌ [AGENT-LOOKUP] ${err.message}`);
-              ws.send(JSON.stringify({ event: 'error', message: err.message }));
+            // NEW: Enhanced agent config fetching with call type support
+            const fetchResult = await AgentConfigFetcher.fetchAgentConfig(sipData);
+            
+            if (!fetchResult.success) {
+              console.error(`❌ [AGENT-CONFIG] ${fetchResult.error}`);
+              ws.send(JSON.stringify({ event: 'error', message: fetchResult.error }));
               ws.close();
               return;
+            }
+            
+            const agentConfig = fetchResult.agentConfig;
+            const detectedCallType = fetchResult.callType;
+            
+            console.log(`✅ [AGENT-CONFIG] Loaded for ${detectedCallType} call:`);
+            console.log(`   • Client ID: ${agentConfig.clientId}`);
+            console.log(`   • Agent Name: ${agentConfig.agentName}`);
+            console.log(`   • Language: ${agentConfig.language}`);
+            console.log(`   • Voice: ${agentConfig.voiceSelection}`);
+            
+            if (detectedCallType === 'outbound') {
+              console.log(`   • Caller ID: ${agentConfig.callerId}`);
+            } else {
+              console.log(`   • Account SID: ${agentConfig.accountSid}`);
             }
             
             ws.sessionAgentConfig = agentConfig;
             currentLanguage = agentConfig.language || 'hi';
 
             // Initialize enhanced call logger with SIP data
-            callLogger = new CallLogger(agentConfig.clientId, sipData);
-            console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, DID: ${sipData?.did || 'unknown'}`);
+            callLogger = new CallLogger(agentConfig.clientId || accountSid, sipData);
+            console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, customer: ${customerNumber}, call type: ${detectedCallType}`);
 
             await connectToDeepgram();
             
             // Use agent's firstMessage for greeting and log it
             const greeting = agentConfig.firstMessage || "Hello! How can I help you today?";
-            console.log(`👋 [GREETING] "${greeting}" -> ${mobile || 'unknown customer'}`);
+            console.log(`👋 [GREETING] "${greeting}" -> ${customerNumber || 'unknown customer'} (${detectedCallType})`);
             
             // Log the initial greeting with enhanced context
             if (callLogger) {
@@ -1252,7 +1274,9 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case "stop":
-            console.log(`\n📞 [ENHANCED] Stream stopped for ${sipData?.caller_id || 'unknown'}`);
+            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+            const callType = SIPHeaderDecoder.determineCallType(sipData);
+            console.log(`\n📞 [ENHANCED] Stream stopped for ${customerNumber} (${callType} call)`);
             
             // Enhanced call log saving with SIP context
             if (callLogger) {
@@ -1267,7 +1291,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log(`   • User Messages: ${stats.userMessages}`);
                 console.log(`   • AI Responses: ${stats.aiResponses}`);
                 console.log(`   • Languages: ${stats.languages.join(', ')}`);
-                console.log(`   • Customer: ${sipData?.caller_id || 'unknown'}`);
+                console.log(`   • Customer: ${customerNumber}`);
                 console.log(`   • DID: ${sipData?.did || 'unknown'}`);
                 console.log(`   • Call Type: ${stats.callType}`);
                 console.log(`   • Session ID: ${sipData?.session_id || 'unknown'}`);
@@ -1288,25 +1312,29 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           default:
-            console.log(`❓ [ENHANCED] Unknown event: ${data.event} from ${sipData?.caller_id || 'unknown'}`);
+            customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+            console.log(`❓ [ENHANCED] Unknown event: ${data.event} from ${customerNumber}`);
         }
       } catch (error) {
-        console.error(`❌ [ENHANCED] Unexpected error processing message from ${sipData?.caller_id || 'unknown'}: ${error.message}`);
+        const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+        console.error(`❌ [ENHANCED] Unexpected error processing message from ${customerNumber}: ${error.message}`);
         console.error(`❌ [ENHANCED] Stack trace:`, error.stack);
       }
     });
 
     // Enhanced connection cleanup with SIP context
     ws.on("close", async () => {
-      console.log(`🔗 [ENHANCED] Connection closed for ${sipData?.caller_id || 'unknown'}`);
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      const callType = SIPHeaderDecoder.determineCallType(sipData);
+      console.log(`🔗 [ENHANCED] Connection closed for ${customerNumber} (${callType} call)`);
       
       // Save call log before cleanup if not already saved
       if (callLogger) {
         try {
           const savedLog = await callLogger.saveToDatabase('disconnected'); // Status for unexpected disconnection
-          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id} for ${sipData?.caller_id || 'unknown'}`);
+          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id} for ${customerNumber}`);
         } catch (error) {
-          console.error(`❌ [CALL-LOG] Emergency save failed for ${sipData?.caller_id || 'unknown'}: ${error.message}`);
+          console.error(`❌ [CALL-LOG] Emergency save failed for ${customerNumber}: ${error.message}`);
         }
       }
       
@@ -1329,9 +1357,10 @@ const setupUnifiedVoiceServer = (wss) => {
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [ENHANCED] WebSocket error for ${sipData?.caller_id || 'unknown'}: ${error.message}`);
+      const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || 'unknown';
+      console.error(`❌ [ENHANCED] WebSocket error for ${customerNumber}: ${error.message}`);
     });
   });
 };
 
-module.exports = { setupUnifiedVoiceServer, SIPHeaderDecoder, CallLogger };
+module.exports = { setupUnifiedVoiceServer, SIPHeaderDecoder, CallLogger, AgentConfigFetcher };
