@@ -716,6 +716,37 @@ const setupUnifiedVoiceServer = (wss) => {
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
+    
+    // ===== ENHANCED LOGGING - Connection Details =====
+    const connectionDetails = {
+      timestamp: new Date().toISOString(),
+      clientIP: req.socket.remoteAddress,
+      userAgent: req.headers["user-agent"],
+      origin: req.headers.origin,
+      host: req.headers.host,
+      protocol: req.headers["sec-websocket-protocol"],
+      extensions: req.headers["sec-websocket-extensions"],
+      key: req.headers["sec-websocket-key"],
+      version: req.headers["sec-websocket-version"],
+      url: req.url,
+      method: req.method,
+      headers: req.headers
+    };
+    
+    console.log(`📋 [WS-CONNECTION] Full Connection Details:`);
+    console.log(`   🕐 Timestamp: ${connectionDetails.timestamp}`);
+    console.log(`   🌐 Client IP: ${connectionDetails.clientIP}`);
+    console.log(`   🔗 URL: ${connectionDetails.url}`);
+    console.log(`   📱 User Agent: ${connectionDetails.userAgent}`);
+    console.log(`   🏠 Origin: ${connectionDetails.origin}`);
+    console.log(`   🖥️  Host: ${connectionDetails.host}`);
+    console.log(`   📄 Method: ${connectionDetails.method}`);
+    console.log(`   🔧 Protocol: ${connectionDetails.protocol}`);
+    console.log(`   📦 Extensions: ${connectionDetails.extensions}`);
+    console.log(`   🔑 WebSocket Key: ${connectionDetails.key}`);
+    console.log(`   📊 WebSocket Version: ${connectionDetails.version}`);
+    console.log(`   📋 All Headers:`, JSON.stringify(connectionDetails.headers, null, 2));
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
     // Session state
     let streamSid = null;
@@ -905,14 +936,39 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // WebSocket message handling with call logging
+    // ===== ENHANCED LOGGING - WebSocket Message Handling =====
     ws.on("message", async (message) => {
       try {
-        const data = JSON.parse(message.toString());
+        // Log raw message details
+        console.log(`\n📨 [WS-INCOMING] New Message Received:`);
+        console.log(`   🕐 Timestamp: ${new Date().toISOString()}`);
+        console.log(`   📏 Message Size: ${message.length} bytes`);
+        console.log(`   📦 Message Type: ${typeof message}`);
+        console.log(`   🔤 Message Buffer Type: ${Buffer.isBuffer(message) ? 'Buffer' : 'String'}`);
+        
+        // Try to parse as JSON and log both raw and parsed data
+        let data;
+        let rawMessageString = message.toString();
+        
+        console.log(`   📄 Raw Message (first 500 chars): ${rawMessageString.substring(0, 500)}${rawMessageString.length > 500 ? '...' : ''}`);
+        
+        try {
+          data = JSON.parse(rawMessageString);
+          console.log(`   ✅ Successfully parsed JSON`);
+          console.log(`   📋 Parsed Data:`, JSON.stringify(data, null, 2));
+        } catch (parseError) {
+          console.log(`   ❌ JSON Parse Error: ${parseError.message}`);
+          console.log(`   🔤 Raw String: "${rawMessageString}"`);
+          return;
+        }
 
+        // Log event-specific details
+        console.log(`   🎯 Event Type: "${data.event}"`);
+        
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`);
+            console.log(`   🔗 [EVENT-CONNECTED] Protocol: ${data.protocol}`);
+            console.log(`   📋 Full Connected Data:`, JSON.stringify(data, null, 2));
             break;
 
           case "start": {
@@ -920,25 +976,35 @@ const setupUnifiedVoiceServer = (wss) => {
             const accountSid = data.start?.accountSid;
             const mobile = data.start?.from || null; // Extract mobile number from call data
             
-            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}, Mobile: ${mobile}`);
+            console.log(`   🎯 [EVENT-START] Stream Details:`);
+            console.log(`      📡 StreamSid: ${streamSid}`);
+            console.log(`      🏢 AccountSid: ${accountSid}`);
+            console.log(`      📱 Mobile: ${mobile}`);
+            console.log(`      📋 Complete Start Data:`, JSON.stringify(data, null, 2));
 
             // Fetch agent config from DB using accountSid (MANDATORY)
             let agentConfig = null;
             if (accountSid) {
               try {
+                console.log(`   🔍 [DB-QUERY] Searching for agent with accountSid: ${accountSid}`);
                 agentConfig = await Agent.findOne({ accountSid }).lean();
                 if (!agentConfig) {
+                  console.log(`   ❌ [DB-ERROR] No agent found for accountSid: ${accountSid}`);
                   ws.send(JSON.stringify({ event: 'error', message: `No agent found for accountSid: ${accountSid}` }));
                   ws.close();
                   return;
+                } else {
+                  console.log(`   ✅ [DB-SUCCESS] Agent found:`, JSON.stringify(agentConfig, null, 2));
                 }
                 
               } catch (err) {
+                console.log(`   ❌ [DB-ERROR] Database error for accountSid: ${accountSid}`, err);
                 ws.send(JSON.stringify({ event: 'error', message: `DB error for accountSid: ${accountSid}` }));
                 ws.close();
                 return;
               }
             } else {
+              console.log(`   ❌ [VALIDATION-ERROR] Missing accountSid in start event`);
               ws.send(JSON.stringify({ event: 'error', message: 'Missing accountSid in start event' }));
               ws.close();
               return;
@@ -946,16 +1012,17 @@ const setupUnifiedVoiceServer = (wss) => {
             
             ws.sessionAgentConfig = agentConfig;
             currentLanguage = agentConfig.language || 'hi';
+            console.log(`   🌍 [LANGUAGE] Set to: ${currentLanguage}`);
 
             // Initialize call logger
             callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile);
-            console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}`);
+            console.log(`   📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}`);
 
             await connectToDeepgram();
             
             // Use agent's firstMessage for greeting and log it
             const greeting = agentConfig.firstMessage || "Hello! How can I help you today?";
-            console.log(`👋 [GREETING] ${greeting}`);
+            console.log(`   👋 [GREETING] "${greeting}"`);
             
             // Log the initial greeting
             if (callLogger) {
@@ -968,31 +1035,46 @@ const setupUnifiedVoiceServer = (wss) => {
           }
 
           case "media":
-            if (data.media?.payload) {
-              const audioBuffer = Buffer.from(data.media.payload, "base64");
+            const mediaPayload = data.media?.payload;
+            const mediaTimestamp = data.media?.timestamp;
+            
+            console.log(`   🎵 [EVENT-MEDIA] Media Details:`);
+            console.log(`      📡 StreamSid: ${data.streamSid}`);
+            console.log(`      🕐 Timestamp: ${mediaTimestamp}`);
+            console.log(`      📦 Payload Length: ${mediaPayload ? mediaPayload.length : 0} chars`);
+            console.log(`      🔤 Payload Sample (first 100 chars): ${mediaPayload ? mediaPayload.substring(0, 100) + '...' : 'null'}`);
+            
+            if (mediaPayload) {
+              const audioBuffer = Buffer.from(mediaPayload, "base64");
+              console.log(`      📊 Audio Buffer Size: ${audioBuffer.length} bytes`);
               
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+                console.log(`      ✅ [DEEPGRAM] Sending audio to Deepgram`);
                 deepgramWs.send(audioBuffer);
               } else {
+                console.log(`      ⏳ [DEEPGRAM] Queueing audio (not ready yet)`);
                 deepgramAudioQueue.push(audioBuffer);
               }
+            } else {
+              console.log(`      ❌ [MEDIA-ERROR] No payload in media event`);
             }
             break;
 
           case "stop":
-            console.log(`📞 [ENHANCED] Stream stopped`);
+            console.log(`   📞 [EVENT-STOP] Stream stopped`);
+            console.log(`   📋 Stop Data:`, JSON.stringify(data, null, 2));
             
             // Save call log to database before closing
             if (callLogger) {
               try {
                 const savedLog = await callLogger.saveToDatabase('medium'); // Default lead status
-                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
+                console.log(`   💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
                 
                 // Print call statistics
                 const stats = callLogger.getStats();
-                console.log(`📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(', ')}`);
+                console.log(`   📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(', ')}`);
               } catch (error) {
-                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`);
+                console.error(`   ❌ [CALL-LOG] Failed to save final log: ${error.message}`);
               }
             }
             
@@ -1001,25 +1083,46 @@ const setupUnifiedVoiceServer = (wss) => {
             }
             break;
 
+          case "mark":
+            console.log(`   🏷️  [EVENT-MARK] Mark Details:`);
+            console.log(`   📋 Mark Data:`, JSON.stringify(data, null, 2));
+            break;
+
+          case "dtmf":
+            console.log(`   📱 [EVENT-DTMF] DTMF Details:`);
+            console.log(`      🔢 Digit: ${data.dtmf?.digit}`);
+            console.log(`   📋 DTMF Data:`, JSON.stringify(data, null, 2));
+            break;
+
           default:
-            console.log(`❓ [ENHANCED] Unknown event: ${data.event}`);
+            console.log(`   ❓ [EVENT-UNKNOWN] Unknown event: ${data.event}`);
+            console.log(`   📋 Unknown Event Data:`, JSON.stringify(data, null, 2));
         }
+        
+        console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+        
       } catch (error) {
-        console.error(`❌ [ENHANCED] Message error: ${error.message}`);
+        console.error(`❌ [WS-MESSAGE-ERROR] Error processing message: ${error.message}`);
+        console.error(`❌ [WS-MESSAGE-ERROR] Stack trace:`, error.stack);
+        console.error(`❌ [WS-MESSAGE-ERROR] Raw message:`, message.toString());
       }
     });
 
     // Enhanced connection cleanup with call logging
-    ws.on("close", async () => {
-      console.log("🔗 [ENHANCED] Connection closed");
+    ws.on("close", async (code, reason) => {
+      console.log(`\n🔗 [WS-CLOSE] Connection Closed:`);
+      console.log(`   🕐 Timestamp: ${new Date().toISOString()}`);
+      console.log(`   🔢 Close Code: ${code}`);
+      console.log(`   📝 Close Reason: ${reason || 'No reason provided'}`);
+      console.log(`   📊 Connection Duration: ${Date.now() - (ws.connectedAt?.getTime() || Date.now())}ms`);
       
       // Save call log before cleanup if not already saved
       if (callLogger) {
         try {
           const savedLog = await callLogger.saveToDatabase('not_connected'); // Status for unexpected disconnection
-          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}`);
+          console.log(`   💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}`);
         } catch (error) {
-          console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`);
+          console.error(`   ❌ [CALL-LOG] Emergency save failed: ${error.message}`);
         }
       }
       
@@ -1039,10 +1142,18 @@ const setupUnifiedVoiceServer = (wss) => {
       currentLanguage = undefined;
       processingRequestId = 0;
       callLogger = null;
+      
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`);
+      console.log(`\n❌ [WS-ERROR] WebSocket Error:`);
+      console.log(`   🕐 Timestamp: ${new Date().toISOString()}`);
+      console.log(`   📝 Error Message: ${error.message}`);
+      console.log(`   📋 Error Stack:`, error.stack);
+      console.log(`   🔧 Error Code: ${error.code}`);
+      console.log(`   📊 Error Type: ${error.type || 'Unknown'}`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     });
   });
 };
