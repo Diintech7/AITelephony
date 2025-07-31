@@ -29,7 +29,524 @@ const createTimer = (label) => {
   }
 }
 
-// SIP Header Decoder Utility (unchanged)
+// CIRCUIT BREAKER: Global Deepgram Circuit Breaker
+class DeepgramCircuitBreaker {
+  constructor() {
+    this.state = "CLOSED" // CLOSED, OPEN, HALF_OPEN
+    this.failureCount = 0
+    this.failureThreshold = 3 // Open circuit after 3 failures
+    this.timeout = 300000 // 5 minutes before trying again
+    this.nextAttempt = 0
+    this.lastFailureTime = 0
+
+    console.log(`🔒 [CIRCUIT-BREAKER] Initialized - State: ${this.state}`)
+  }
+
+  canAttempt() {
+    const now = Date.now()
+
+    switch (this.state) {
+      case "CLOSED":
+        return true
+
+      case "OPEN":
+        if (now >= this.nextAttempt) {
+          console.log(`🔄 [CIRCUIT-BREAKER] Moving to HALF_OPEN state`)
+          this.state = "HALF_OPEN"
+          return true
+        }
+        return false
+
+      case "HALF_OPEN":
+        return true
+
+      default:
+        return false
+    }
+  }
+
+  recordSuccess() {
+    console.log(`✅ [CIRCUIT-BREAKER] Success recorded - Resetting to CLOSED`)
+    this.failureCount = 0
+    this.state = "CLOSED"
+  }
+
+  recordFailure(error) {
+    this.failureCount++
+    this.lastFailureTime = Date.now()
+
+    console.log(`❌ [CIRCUIT-BREAKER] Failure ${this.failureCount}/${this.failureThreshold} - Error: ${error.message}`)
+
+    if (this.failureCount >= this.failureThreshold) {
+      this.state = "OPEN"
+      this.nextAttempt = Date.now() + this.timeout
+
+      console.log(`🚨 [CIRCUIT-BREAKER] CIRCUIT OPENED - No Deepgram attempts for ${this.timeout / 1000}s`)
+      console.log(`🔇 [CIRCUIT-BREAKER] Switching to TTS-ONLY mode`)
+    }
+  }
+
+  getStatus() {
+    return {
+      state: this.state,
+      failureCount: this.failureCount,
+      nextAttempt: this.nextAttempt,
+      timeUntilNextAttempt: Math.max(0, this.nextAttempt - Date.now()),
+      canAttempt: this.canAttempt(),
+    }
+  }
+}
+
+// Global circuit breaker instance
+const deepgramCircuitBreaker = new DeepgramCircuitBreaker()
+
+// SIMPLIFIED: TTS-Only Connection Manager
+class TTSOnlyConnectionManager {
+  constructor(customerNumber) {
+    this.customerNumber = customerNumber
+    this.isActive = true
+
+    console.log(`🔇 [TTS-ONLY] Initialized for ${customerNumber} - Speech recognition disabled`)
+  }
+
+  sendAudio(audioBuffer) {
+    // Silently ignore audio - no speech recognition
+    return false
+  }
+
+  updateLanguage(newLanguage) {
+    console.log(`🔄 [TTS-ONLY] Language updated to ${newLanguage} for ${this.customerNumber}`)
+  }
+
+  disconnect() {
+    this.isActive = false
+    console.log(`🔌 [TTS-ONLY] Disconnected for ${this.customerNumber}`)
+  }
+
+  cleanup() {
+    this.disconnect()
+  }
+
+  getStatus() {
+    return {
+      isConnected: false,
+      isTTSOnly: true,
+      customerNumber: this.customerNumber,
+      isActive: this.isActive,
+    }
+  }
+}
+
+// OPTIMIZED: Smart Connection Manager with Circuit Breaker
+class SmartDeepgramManager {
+  constructor() {
+    this.connections = new Map()
+    this.maxConnections = 3 // Drastically reduced
+  }
+
+  async getConnection(customerNumber, language, onTranscript, onError) {
+    // Check circuit breaker first
+    if (!deepgramCircuitBreaker.canAttempt()) {
+      const status = deepgramCircuitBreaker.getStatus()
+      console.log(
+        `🚫 [SMART-MANAGER] Circuit breaker OPEN - ${Math.round(status.timeUntilNextAttempt / 1000)}s remaining`,
+      )
+
+      // Return TTS-only connection
+      const ttsOnlyConnection = new TTSOnlyConnectionManager(customerNumber)
+      return ttsOnlyConnection
+    }
+
+    // Check if we already have a connection
+    if (this.connections.has(customerNumber)) {
+      const existingConnection = this.connections.get(customerNumber)
+      if (existingConnection.isConnected) {
+        console.log(`♻️ [SMART-MANAGER] Reusing connection for ${customerNumber}`)
+        return existingConnection
+      } else {
+        this.connections.delete(customerNumber)
+      }
+    }
+
+    // Check connection limit
+    if (this.connections.size >= this.maxConnections) {
+      console.log(`🚫 [SMART-MANAGER] Connection limit reached (${this.connections.size}/${this.maxConnections})`)
+      console.log(`🔇 [SMART-MANAGER] Returning TTS-only connection for ${customerNumber}`)
+
+      const ttsOnlyConnection = new TTSOnlyConnectionManager(customerNumber)
+      return ttsOnlyConnection
+    }
+
+    // Try to create new Deepgram connection
+    try {
+      console.log(`🔌 [SMART-MANAGER] Creating new Deepgram connection for ${customerNumber}`)
+
+      const connection = new OptimizedDeepgramConnection(customerNumber, language, onTranscript, onError, this)
+      await connection.connect()
+
+      this.connections.set(customerNumber, connection)
+      deepgramCircuitBreaker.recordSuccess()
+
+      console.log(`✅ [SMART-MANAGER] Deepgram connection created for ${customerNumber}`)
+      return connection
+    } catch (error) {
+      console.error(`❌ [SMART-MANAGER] Failed to create Deepgram connection: ${error.message}`)
+
+      // Record failure in circuit breaker
+      deepgramCircuitBreaker.recordFailure(error)
+
+      // Return TTS-only connection as fallback
+      console.log(`🔇 [SMART-MANAGER] Falling back to TTS-only for ${customerNumber}`)
+      const ttsOnlyConnection = new TTSOnlyConnectionManager(customerNumber)
+      return ttsOnlyConnection
+    }
+  }
+
+  removeConnection(customerNumber) {
+    if (this.connections.has(customerNumber)) {
+      this.connections.delete(customerNumber)
+      console.log(`🗑️ [SMART-MANAGER] Removed connection for ${customerNumber}`)
+    }
+  }
+
+  getStats() {
+    const circuitStatus = deepgramCircuitBreaker.getStatus()
+
+    return {
+      activeConnections: this.connections.size,
+      maxConnections: this.maxConnections,
+      circuitBreakerState: circuitStatus.state,
+      circuitBreakerFailures: circuitStatus.failureCount,
+      timeUntilNextAttempt: circuitStatus.timeUntilNextAttempt,
+      canAttemptDeepgram: circuitStatus.canAttempt,
+    }
+  }
+
+  cleanup() {
+    console.log(`🧹 [SMART-MANAGER] Cleaning up all connections`)
+
+    for (const [customerNumber, connection] of this.connections) {
+      connection.cleanup()
+    }
+
+    this.connections.clear()
+  }
+}
+
+// Global smart manager instance
+const smartDeepgramManager = new SmartDeepgramManager()
+
+// OPTIMIZED: Single Deepgram Connection with better error handling
+class OptimizedDeepgramConnection {
+  constructor(customerNumber, language, onTranscript, onError, pool) {
+    this.customerNumber = customerNumber
+    this.language = language
+    this.onTranscript = onTranscript
+    this.onError = onError
+    this.pool = pool
+    this.deepgramWs = null
+    this.isConnected = false
+    this.audioQueue = []
+    this.lastActivity = Date.now()
+    this.keepAliveInterval = null
+    this.connectionAttempts = 0
+    this.maxConnectionAttempts = 3 // Reduced from unlimited
+    this.isDestroyed = false
+  }
+
+  async connect() {
+    if (this.isDestroyed) {
+      throw new Error("Connection has been destroyed")
+    }
+
+    if (this.deepgramWs && this.isConnected) {
+      console.log(`✅ [DEEPGRAM] Already connected for ${this.customerNumber}`)
+      return true
+    }
+
+    this.connectionAttempts++
+
+    if (this.connectionAttempts > this.maxConnectionAttempts) {
+      throw new Error(`Max connection attempts (${this.maxConnectionAttempts}) reached for ${this.customerNumber}`)
+    }
+
+    try {
+      console.log(`🔌 [DEEPGRAM] Connecting for ${this.customerNumber} (attempt ${this.connectionAttempts})`)
+
+      const deepgramLanguage = getDeepgramLanguage(this.language)
+      console.log(`🌍 [DEEPGRAM] Using language: ${deepgramLanguage}`)
+
+      const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
+      deepgramUrl.searchParams.append("sample_rate", "8000")
+      deepgramUrl.searchParams.append("channels", "1")
+      deepgramUrl.searchParams.append("encoding", "linear16")
+      deepgramUrl.searchParams.append("model", "nova-2")
+      deepgramUrl.searchParams.append("language", deepgramLanguage)
+      deepgramUrl.searchParams.append("interim_results", "true")
+      deepgramUrl.searchParams.append("smart_format", "true")
+      deepgramUrl.searchParams.append("endpointing", "300")
+      deepgramUrl.searchParams.append("keep_alive", "true")
+
+      this.deepgramWs = new WebSocket(deepgramUrl.toString(), {
+        headers: {
+          Authorization: `Token ${API_KEYS.deepgram}`,
+          "User-Agent": `VoiceServer/2.0 Customer-${this.customerNumber}`,
+        },
+      })
+
+      return new Promise((resolve, reject) => {
+        const connectionTimeout = setTimeout(() => {
+          console.error(`❌ [DEEPGRAM] Connection timeout for ${this.customerNumber}`)
+          this.cleanup()
+          reject(new Error("Connection timeout"))
+        }, 15000) // 15 second timeout
+
+        this.deepgramWs.onopen = () => {
+          clearTimeout(connectionTimeout)
+          this.isConnected = true
+          this.connectionAttempts = 0 // Reset on successful connection
+          this.lastActivity = Date.now()
+
+          console.log(`✅ [DEEPGRAM] Connected successfully for ${this.customerNumber}`)
+
+          // Process queued audio
+          if (this.audioQueue.length > 0) {
+            console.log(`📦 [DEEPGRAM] Processing ${this.audioQueue.length} queued audio buffers`)
+            this.audioQueue.forEach((buffer, index) => {
+              if (this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
+                this.deepgramWs.send(buffer)
+                console.log(`📤 [DEEPGRAM] Sent queued buffer ${index + 1}/${this.audioQueue.length}`)
+              }
+            })
+            this.audioQueue = []
+          }
+
+          this.startKeepAlive()
+          resolve(true)
+        }
+
+        this.deepgramWs.onmessage = (event) => {
+          this.lastActivity = Date.now()
+          const data = JSON.parse(event.data)
+          this.handleMessage(data)
+        }
+
+        this.deepgramWs.onerror = (error) => {
+          clearTimeout(connectionTimeout)
+          console.error(`❌ [DEEPGRAM] WebSocket error for ${this.customerNumber}:`, error.message)
+          this.isConnected = false
+
+          // Check for rate limit error
+          if (error.message && error.message.includes("429")) {
+            console.error(`🚨 [DEEPGRAM] Rate limit error for ${this.customerNumber}`)
+            //this.pool.handleRateLimit() // Removed rate limit handling from here
+          }
+
+          if (this.onError) {
+            this.onError(error)
+          }
+
+          reject(error)
+        }
+
+        // In the onclose handler of OptimizedDeepgramConnection, replace the reconnection logic:
+
+        this.deepgramWs.onclose = (event) => {
+          clearTimeout(connectionTimeout)
+          console.log(
+            `🔌 [DEEPGRAM] Connection closed for ${this.customerNumber} - Code: ${event.code}, Reason: ${event.reason}`,
+          )
+          this.isConnected = false
+          this.stopKeepAlive()
+
+          // STOP AGGRESSIVE RECONNECTION - Only reconnect on normal network issues
+          if (event.code === 1000) {
+            console.log(`ℹ️ [DEEPGRAM] Normal closure for ${this.customerNumber}`)
+            this.pool.removeConnection(this.customerNumber)
+            return
+          }
+
+          // Don't reconnect on rate limit errors (429) or too many failures
+          if (this.connectionAttempts >= this.maxConnectionAttempts) {
+            console.error(`❌ [DEEPGRAM] Max attempts reached for ${this.customerNumber} - Giving up`)
+            this.pool.removeConnection(this.customerNumber)
+            return
+          }
+
+          // Only attempt one more reconnection for network issues
+          if (event.code === 1006 && this.connectionAttempts < 2) {
+            const delay = 5000 // 5 second delay only
+            console.log(`🔄 [DEEPGRAM] Single reconnection attempt for ${this.customerNumber} in ${delay}ms`)
+
+            setTimeout(() => {
+              if (!this.isDestroyed) {
+                this.connect().catch((err) => {
+                  console.error(`❌ [DEEPGRAM] Final reconnection failed for ${this.customerNumber}:`, err.message)
+                  this.pool.removeConnection(this.customerNumber)
+                })
+              }
+            }, delay)
+          } else {
+            console.log(`🛑 [DEEPGRAM] No more reconnection attempts for ${this.customerNumber}`)
+            this.pool.removeConnection(this.customerNumber)
+          }
+        }
+      })
+    } catch (error) {
+      console.error(`❌ [DEEPGRAM] Setup error for ${this.customerNumber}: ${error.message}`)
+      throw error
+    }
+  }
+
+  startKeepAlive() {
+    this.keepAliveInterval = setInterval(() => {
+      if (this.isConnected && this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
+        const idleTime = Date.now() - this.lastActivity
+        if (idleTime > 45000) {
+          // 45 seconds idle
+          console.log(
+            `💓 [DEEPGRAM-KEEP-ALIVE] Ping for ${this.customerNumber} (idle: ${Math.round(idleTime / 1000)}s)`,
+          )
+
+          try {
+            // Send a small audio buffer as keep-alive (silence)
+            const silenceBuffer = Buffer.alloc(320, 0) // 320 bytes of silence
+            this.deepgramWs.send(silenceBuffer)
+            this.lastActivity = Date.now()
+          } catch (error) {
+            console.error(`❌ [DEEPGRAM-KEEP-ALIVE] Failed for ${this.customerNumber}:`, error.message)
+          }
+        }
+      }
+    }, 30000) // Every 30 seconds
+  }
+
+  stopKeepAlive() {
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval)
+      this.keepAliveInterval = null
+    }
+  }
+
+  handleMessage(data) {
+    if (data.type === "Results") {
+      const transcript = data.channel?.alternatives?.[0]?.transcript
+      const is_final = data.is_final
+      const confidence = data.channel?.alternatives?.[0]?.confidence
+
+      if (transcript?.trim()) {
+        console.log(
+          `🎤 [DEEPGRAM] ${is_final ? "FINAL" : "interim"} from ${this.customerNumber}: "${transcript}" (confidence: ${confidence || "unknown"})`,
+        )
+
+        if (this.onTranscript) {
+          this.onTranscript(transcript, is_final, confidence)
+        }
+      }
+    } else if (data.type === "UtteranceEnd") {
+      console.log(`🔚 [DEEPGRAM] Utterance end for ${this.customerNumber}`)
+      if (this.onTranscript) {
+        this.onTranscript(null, true, null, "utterance_end")
+      }
+    } else if (data.type === "Metadata") {
+      console.log(`📊 [DEEPGRAM] Metadata for ${this.customerNumber}:`, {
+        request_id: data.request_id,
+        model_info: data.model_info,
+      })
+    }
+  }
+
+  sendAudio(audioBuffer) {
+    if (this.isDestroyed) {
+      return false
+    }
+
+    if (this.isConnected && this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
+      try {
+        this.deepgramWs.send(audioBuffer)
+        this.lastActivity = Date.now()
+        return true
+      } catch (error) {
+        console.error(`❌ [DEEPGRAM] Error sending audio for ${this.customerNumber}:`, error.message)
+        this.isConnected = false
+        return false
+      }
+    } else {
+      // Queue audio if not connected, but limit queue size
+      if (this.audioQueue.length < 100) {
+        // Limit queue to prevent memory issues
+        this.audioQueue.push(audioBuffer)
+        console.log(`📦 [DEEPGRAM] Queued audio for ${this.customerNumber} (queue: ${this.audioQueue.length})`)
+      } else {
+        console.log(`⚠️ [DEEPGRAM] Audio queue full for ${this.customerNumber}, dropping audio`)
+      }
+
+      // Try to reconnect if not connected and not destroyed
+      if (!this.isConnected && !this.isDestroyed && this.connectionAttempts < this.maxConnectionAttempts) {
+        this.connect().catch((error) => {
+          console.error(`❌ [DEEPGRAM] Auto-reconnect failed for ${this.customerNumber}:`, error.message)
+        })
+      }
+
+      return false
+    }
+  }
+
+  updateLanguage(newLanguage) {
+    if (newLanguage !== this.language && !this.isDestroyed) {
+      console.log(`🔄 [DEEPGRAM] Language change for ${this.customerNumber}: ${this.language} → ${newLanguage}`)
+      this.language = newLanguage
+
+      // Reconnect with new language
+      this.disconnect()
+      this.connect().catch((error) => {
+        console.error(`❌ [DEEPGRAM] Language update reconnection failed for ${this.customerNumber}:`, error.message)
+      })
+    }
+  }
+
+  disconnect() {
+    console.log(`🔌 [DEEPGRAM] Disconnecting for ${this.customerNumber}`)
+
+    this.stopKeepAlive()
+
+    if (this.deepgramWs) {
+      if (this.deepgramWs.readyState === WebSocket.OPEN) {
+        this.deepgramWs.close(1000, "Normal closure")
+      }
+      this.deepgramWs = null
+    }
+
+    this.isConnected = false
+  }
+
+  cleanup() {
+    console.log(`🧹 [DEEPGRAM] Cleaning up connection for ${this.customerNumber}`)
+
+    this.isDestroyed = true
+    this.disconnect()
+    this.audioQueue = []
+    this.onTranscript = null
+    this.onError = null
+
+    // Remove from pool
+    this.pool.removeConnection(this.customerNumber)
+  }
+
+  getStatus() {
+    return {
+      isConnected: this.isConnected,
+      language: this.language,
+      queueSize: this.audioQueue.length,
+      connectionAttempts: this.connectionAttempts,
+      lastActivity: this.lastActivity,
+      customerNumber: this.customerNumber,
+      isDestroyed: this.isDestroyed,
+    }
+  }
+}
+
+// SIP Header Decoder Utility (unchanged from previous version)
 class SIPHeaderDecoder {
   static decodeBase64Extra(base64String) {
     try {
@@ -208,7 +725,7 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return voiceMapping[voiceSelection] || "pavithra"
 }
 
-// Language detection with OpenAI
+// Language detection with OpenAI (unchanged)
 const detectLanguageWithOpenAI = async (text) => {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -265,7 +782,7 @@ Return only the language code, nothing else.`,
   }
 }
 
-// Enhanced Call logging utility class
+// Enhanced Call logging utility class (unchanged from previous version)
 class CallLogger {
   constructor(clientId, sipData = null) {
     this.clientId = clientId
@@ -385,289 +902,7 @@ class CallLogger {
   }
 }
 
-// OPTIMIZED: Persistent Deepgram Connection Manager
-class PersistentDeepgramManager {
-  constructor(language, onTranscript, onError, customerNumber) {
-    this.language = language
-    this.onTranscript = onTranscript
-    this.onError = onError
-    this.customerNumber = customerNumber
-    this.deepgramWs = null
-    this.isConnected = false
-    this.audioQueue = []
-    this.reconnectAttempts = 0
-    this.maxReconnectAttempts = 3
-    this.reconnectDelay = 1000 // Start with 1 second
-    this.connectionTimer = null
-    this.lastActivity = Date.now()
-    this.keepAliveInterval = null
-  }
-
-  async connect() {
-    if (this.deepgramWs && this.isConnected) {
-      console.log(`✅ [DEEPGRAM-PERSISTENT] Already connected for ${this.customerNumber}`)
-      return true
-    }
-
-    try {
-      console.log(
-        `🔌 [DEEPGRAM-PERSISTENT] Connecting for ${this.customerNumber} (attempt ${this.reconnectAttempts + 1})`,
-      )
-
-      const deepgramLanguage = getDeepgramLanguage(this.language)
-      console.log(`🌍 [DEEPGRAM-PERSISTENT] Using language: ${deepgramLanguage}`)
-
-      const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-      deepgramUrl.searchParams.append("sample_rate", "8000")
-      deepgramUrl.searchParams.append("channels", "1")
-      deepgramUrl.searchParams.append("encoding", "linear16")
-      deepgramUrl.searchParams.append("model", "nova-2")
-      deepgramUrl.searchParams.append("language", deepgramLanguage)
-      deepgramUrl.searchParams.append("interim_results", "true")
-      deepgramUrl.searchParams.append("smart_format", "true")
-      deepgramUrl.searchParams.append("endpointing", "300")
-      deepgramUrl.searchParams.append("keep_alive", "true") // Keep connection alive
-
-      this.deepgramWs = new WebSocket(deepgramUrl.toString(), {
-        headers: {
-          Authorization: `Token ${API_KEYS.deepgram}`,
-          "User-Agent": `VoiceServer/1.0 Customer-${this.customerNumber}`,
-        },
-      })
-
-      return new Promise((resolve, reject) => {
-        const connectionTimeout = setTimeout(() => {
-          console.error(`❌ [DEEPGRAM-PERSISTENT] Connection timeout for ${this.customerNumber}`)
-          this.cleanup()
-          reject(new Error("Connection timeout"))
-        }, 10000) // 10 second timeout
-
-        this.deepgramWs.onopen = () => {
-          clearTimeout(connectionTimeout)
-          this.isConnected = true
-          this.reconnectAttempts = 0
-          this.reconnectDelay = 1000 // Reset delay
-          this.lastActivity = Date.now()
-
-          console.log(`✅ [DEEPGRAM-PERSISTENT] Connected successfully for ${this.customerNumber}`)
-
-          // Process queued audio
-          if (this.audioQueue.length > 0) {
-            console.log(`📦 [DEEPGRAM-PERSISTENT] Processing ${this.audioQueue.length} queued audio buffers`)
-            this.audioQueue.forEach((buffer, index) => {
-              this.deepgramWs.send(buffer)
-              console.log(`📤 [DEEPGRAM-PERSISTENT] Sent queued buffer ${index + 1}/${this.audioQueue.length}`)
-            })
-            this.audioQueue = []
-          }
-
-          // Start keep-alive mechanism
-          this.startKeepAlive()
-
-          resolve(true)
-        }
-
-        this.deepgramWs.onmessage = (event) => {
-          this.lastActivity = Date.now()
-          const data = JSON.parse(event.data)
-          this.handleMessage(data)
-        }
-
-        this.deepgramWs.onerror = (error) => {
-          clearTimeout(connectionTimeout)
-          console.error(`❌ [DEEPGRAM-PERSISTENT] WebSocket error for ${this.customerNumber}:`, error)
-          this.isConnected = false
-
-          if (this.onError) {
-            this.onError(error)
-          }
-
-          reject(error)
-        }
-
-        this.deepgramWs.onclose = (event) => {
-          clearTimeout(connectionTimeout)
-          console.log(
-            `🔌 [DEEPGRAM-PERSISTENT] Connection closed for ${this.customerNumber} - Code: ${event.code}, Reason: ${event.reason}`,
-          )
-          this.isConnected = false
-          this.stopKeepAlive()
-
-          // Auto-reconnect logic for unexpected closures
-          if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
-            console.log(
-              `🔄 [DEEPGRAM-PERSISTENT] Attempting reconnection for ${this.customerNumber} in ${this.reconnectDelay}ms`,
-            )
-            setTimeout(() => {
-              this.reconnectAttempts++
-              this.reconnectDelay *= 2 // Exponential backoff
-              this.connect().catch((err) => {
-                console.error(`❌ [DEEPGRAM-PERSISTENT] Reconnection failed for ${this.customerNumber}:`, err.message)
-              })
-            }, this.reconnectDelay)
-          }
-
-          if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error(`❌ [DEEPGRAM-PERSISTENT] Max reconnection attempts reached for ${this.customerNumber}`)
-          }
-        }
-      })
-    } catch (error) {
-      console.error(`❌ [DEEPGRAM-PERSISTENT] Setup error for ${this.customerNumber}: ${error.message}`)
-      throw error
-    }
-  }
-
-  startKeepAlive() {
-    // Send keep-alive messages every 30 seconds
-    this.keepAliveInterval = setInterval(() => {
-      if (this.isConnected && this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
-        // Check if connection has been idle for too long
-        const idleTime = Date.now() - this.lastActivity
-        if (idleTime > 60000) {
-          // 1 minute idle
-          console.log(
-            `💓 [DEEPGRAM-KEEP-ALIVE] Sending keep-alive for ${this.customerNumber} (idle: ${Math.round(idleTime / 1000)}s)`,
-          )
-
-          // Send a small keep-alive message
-          const keepAliveMessage = {
-            type: "KeepAlive",
-            timestamp: Date.now(),
-          }
-
-          try {
-            this.deepgramWs.send(JSON.stringify(keepAliveMessage))
-            this.lastActivity = Date.now()
-          } catch (error) {
-            console.error(
-              `❌ [DEEPGRAM-KEEP-ALIVE] Failed to send keep-alive for ${this.customerNumber}:`,
-              error.message,
-            )
-          }
-        }
-      }
-    }, 30000)
-  }
-
-  stopKeepAlive() {
-    if (this.keepAliveInterval) {
-      clearInterval(this.keepAliveInterval)
-      this.keepAliveInterval = null
-    }
-  }
-
-  handleMessage(data) {
-    if (data.type === "Results") {
-      const transcript = data.channel?.alternatives?.[0]?.transcript
-      const is_final = data.is_final
-      const confidence = data.channel?.alternatives?.[0]?.confidence
-
-      if (transcript?.trim()) {
-        console.log(
-          `🎤 [DEEPGRAM-PERSISTENT] ${is_final ? "FINAL" : "interim"} from ${this.customerNumber}: "${transcript}" (confidence: ${confidence || "unknown"})`,
-        )
-
-        if (this.onTranscript) {
-          this.onTranscript(transcript, is_final, confidence)
-        }
-      }
-    } else if (data.type === "UtteranceEnd") {
-      console.log(`🔚 [DEEPGRAM-PERSISTENT] Utterance end for ${this.customerNumber}`)
-      if (this.onTranscript) {
-        this.onTranscript(null, true, null, "utterance_end")
-      }
-    } else if (data.type === "Metadata") {
-      console.log(`📊 [DEEPGRAM-PERSISTENT] Metadata for ${this.customerNumber}:`, {
-        request_id: data.request_id,
-        model_info: data.model_info,
-      })
-    }
-  }
-
-  sendAudio(audioBuffer) {
-    if (this.isConnected && this.deepgramWs && this.deepgramWs.readyState === WebSocket.OPEN) {
-      try {
-        this.deepgramWs.send(audioBuffer)
-        this.lastActivity = Date.now()
-        console.log(`📤 [DEEPGRAM-PERSISTENT] Sent ${audioBuffer.length} bytes for ${this.customerNumber}`)
-        return true
-      } catch (error) {
-        console.error(`❌ [DEEPGRAM-PERSISTENT] Error sending audio for ${this.customerNumber}:`, error.message)
-        this.isConnected = false
-        return false
-      }
-    } else {
-      // Queue audio if not connected
-      this.audioQueue.push(audioBuffer)
-      console.log(
-        `📦 [DEEPGRAM-PERSISTENT] Queued ${audioBuffer.length} bytes for ${this.customerNumber} (queue size: ${this.audioQueue.length})`,
-      )
-
-      // Try to reconnect if not connected
-      if (!this.isConnected) {
-        this.connect().catch((error) => {
-          console.error(`❌ [DEEPGRAM-PERSISTENT] Auto-reconnect failed for ${this.customerNumber}:`, error.message)
-        })
-      }
-
-      return false
-    }
-  }
-
-  updateLanguage(newLanguage) {
-    if (newLanguage !== this.language) {
-      console.log(
-        `🔄 [DEEPGRAM-PERSISTENT] Language change for ${this.customerNumber}: ${this.language} → ${newLanguage}`,
-      )
-      this.language = newLanguage
-
-      // Reconnect with new language
-      this.disconnect()
-      this.connect().catch((error) => {
-        console.error(
-          `❌ [DEEPGRAM-PERSISTENT] Language update reconnection failed for ${this.customerNumber}:`,
-          error.message,
-        )
-      })
-    }
-  }
-
-  disconnect() {
-    console.log(`🔌 [DEEPGRAM-PERSISTENT] Disconnecting for ${this.customerNumber}`)
-
-    this.stopKeepAlive()
-
-    if (this.deepgramWs) {
-      if (this.deepgramWs.readyState === WebSocket.OPEN) {
-        this.deepgramWs.close(1000, "Normal closure")
-      }
-      this.deepgramWs = null
-    }
-
-    this.isConnected = false
-    this.audioQueue = []
-  }
-
-  cleanup() {
-    this.disconnect()
-    this.onTranscript = null
-    this.onError = null
-  }
-
-  getStatus() {
-    return {
-      isConnected: this.isConnected,
-      language: this.language,
-      queueSize: this.audioQueue.length,
-      reconnectAttempts: this.reconnectAttempts,
-      lastActivity: this.lastActivity,
-      customerNumber: this.customerNumber,
-    }
-  }
-}
-
-// OpenAI streaming processing (unchanged)
+// OpenAI streaming processing (unchanged from previous version)
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -690,7 +925,7 @@ const processWithOpenAIStreaming = async (
 
         te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
 
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுததுங்கள்.",
 
         mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
       }
@@ -827,7 +1062,7 @@ const shouldSendPhrase = (buffer) => {
   return false
 }
 
-// TTS processor (unchanged)
+// TTS processor (unchanged from previous version)
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
@@ -1121,7 +1356,7 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// Agent configuration fetcher (unchanged)
+// Agent configuration fetcher (unchanged from previous version)
 class AgentConfigFetcher {
   static async fetchAgentConfig(sipData) {
     const callType = SIPHeaderDecoder.determineCallType(sipData)
@@ -1325,16 +1560,30 @@ class AgentConfigFetcher {
   }
 }
 
-// MAIN: Enhanced WebSocket server setup with persistent Deepgram connections
+// MAIN: Enhanced WebSocket server setup with connection pooling
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [OPTIMIZED] Voice Server started with persistent Deepgram connections")
+  console.log("🚀 [RATE-LIMIT-FIX] Voice Server started with connection pooling and rate limit handling")
+
+  // Log pool stats periodically
+  setInterval(() => {
+    const stats = smartDeepgramManager.getStats()
+    if (stats.activeConnections > 0 || stats.circuitBreakerState !== "CLOSED") {
+      console.log(
+        `📊 [SMART-STATS] Connections: ${stats.activeConnections}/${stats.maxConnections}, Circuit: ${stats.circuitBreakerState}, Failures: ${stats.circuitBreakerFailures}`,
+      )
+
+      if (stats.circuitBreakerState === "OPEN") {
+        console.log(`🔇 [SMART-STATS] TTS-only mode - ${Math.round(stats.timeUntilNextAttempt / 1000)}s until retry`)
+      }
+    }
+  }, 30000) // Every 30 seconds
 
   wss.on("connection", (ws, req) => {
     const connectionTime = new Date()
     const clientIP = req.socket.remoteAddress
 
     console.log(`\n🔗 [CONNECTION] ==========================================`)
-    console.log(`🔗 [CONNECTION] New optimized WebSocket connection`)
+    console.log(`🔗 [CONNECTION] New rate-limit-optimized WebSocket connection`)
     console.log(`🌐 [CONNECTION] Client IP: ${clientIP}`)
     console.log(`⏰ [CONNECTION] Time: ${connectionTime.toISOString()}`)
     console.log(`📡 [CONNECTION] User Agent: ${req.headers["user-agent"] || "unknown"}`)
@@ -1385,27 +1634,37 @@ const setupUnifiedVoiceServer = (wss) => {
     let processingRequestId = 0
     let callLogger = null
 
-    // OPTIMIZED: Single persistent Deepgram connection
-    let deepgramManager = null
+    // OPTIMIZED: Single pooled Deepgram connection
+    let deepgramConnection = null
 
-    // OPTIMIZED: Initialize persistent Deepgram manager
-    const initializeDeepgramManager = (language, customerNumber) => {
-      if (deepgramManager) {
-        deepgramManager.cleanup()
+    // OPTIMIZED: Initialize pooled Deepgram connection
+    const initializeDeepgramConnection = async (language, customerNumber) => {
+      try {
+        console.log(`🔌 [SMART] Requesting connection for ${customerNumber}`)
+
+        deepgramConnection = await smartDeepgramManager.getConnection(
+          customerNumber,
+          language,
+          async (transcript, is_final, confidence, type) => {
+            await handleDeepgramResponse(transcript, is_final, confidence, type)
+          },
+          (error) => {
+            console.error(`❌ [SMART] Error for ${customerNumber}:`, error.message)
+          },
+        )
+
+        const status = deepgramConnection.getStatus()
+        if (status.isTTSOnly) {
+          console.log(`🔇 [SMART] TTS-only mode active for ${customerNumber}`)
+        } else {
+          console.log(`✅ [SMART] Deepgram connection established for ${customerNumber}`)
+        }
+
+        return true
+      } catch (error) {
+        console.error(`❌ [SMART] Failed to get connection for ${customerNumber}: ${error.message}`)
+        return false
       }
-
-      deepgramManager = new PersistentDeepgramManager(
-        language,
-        async (transcript, is_final, confidence, type) => {
-          await handleDeepgramResponse(transcript, is_final, confidence, type)
-        },
-        (error) => {
-          console.error(`❌ [DEEPGRAM-MANAGER] Error for ${customerNumber}:`, error)
-        },
-        customerNumber,
-      )
-
-      return deepgramManager.connect()
     }
 
     // Enhanced Deepgram response handler
@@ -1413,7 +1672,7 @@ const setupUnifiedVoiceServer = (wss) => {
       const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
 
       if (type === "utterance_end") {
-        console.log(`🔚 [DEEPGRAM-PERSISTENT] Utterance end detected for ${customerNumber}`)
+        console.log(`🔚 [DEEPGRAM-POOL] Utterance end detected for ${customerNumber}`)
 
         if (userUtteranceBuffer.trim()) {
           if (callLogger && userUtteranceBuffer.trim()) {
@@ -1433,7 +1692,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
       if (transcript?.trim()) {
         console.log(
-          `🎤 [DEEPGRAM-PERSISTENT] ${is_final ? "FINAL" : "interim"} transcript from ${customerNumber}: "${transcript}" (confidence: ${confidence || "unknown"})`,
+          `🎤 [DEEPGRAM-POOL] ${is_final ? "FINAL" : "interim"} transcript from ${customerNumber}: "${transcript}" (confidence: ${confidence || "unknown"})`,
         )
 
         // Interrupt current TTS if new speech detected
@@ -1493,8 +1752,8 @@ const setupUnifiedVoiceServer = (wss) => {
           currentLanguage = detectedLanguage
 
           // Update Deepgram language if needed
-          if (deepgramManager) {
-            deepgramManager.updateLanguage(detectedLanguage)
+          if (deepgramConnection) {
+            deepgramConnection.updateLanguage(detectedLanguage)
           }
         }
 
@@ -1574,7 +1833,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         const isBinaryData = /[\x00-\x08\x0E-\x1F\x7F-\xFF]/.test(messageString)
 
-        if (isBinaryData || messageString.includes("\x00") || messageString.includes("��")) {
+        if (isBinaryData || messageString.includes("\x00") || messageString.includes("")) {
           const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
           console.log(
             `🎵 [BINARY-DATA] Received binary audio data from ${customerNumber} (${messageString.length} bytes)`,
@@ -1586,13 +1845,13 @@ const setupUnifiedVoiceServer = (wss) => {
               `🎵 [AUDIO-STREAM] Processing raw audio buffer (${audioBuffer.length} bytes) from ${customerNumber}`,
             )
 
-            if (deepgramManager) {
-              const success = deepgramManager.sendAudio(audioBuffer)
+            if (deepgramConnection) {
+              const success = deepgramConnection.sendAudio(audioBuffer)
               if (!success) {
-                console.log(`⚠️ [AUDIO-STREAM] Failed to send audio to Deepgram for ${customerNumber}`)
+                console.log(`⚠️ [AUDIO-STREAM] Failed to send audio to pooled Deepgram for ${customerNumber}`)
               }
             } else {
-              console.log(`⚠️ [AUDIO-STREAM] No Deepgram manager available for ${customerNumber}`)
+              console.log(`⚠️ [AUDIO-STREAM] No pooled Deepgram connection available for ${customerNumber}`)
             }
           } catch (audioError) {
             console.error(`❌ [AUDIO-STREAM] Error processing audio data from ${customerNumber}: ${audioError.message}`)
@@ -1640,8 +1899,8 @@ const setupUnifiedVoiceServer = (wss) => {
         switch (data.event) {
           case "connected":
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`🔗 [OPTIMIZED] Connected from ${customerNumber} - Protocol: ${data.protocol}`)
-            console.log(`🔗 [OPTIMIZED] Version: ${data.version || "unknown"}`)
+            console.log(`🔗 [RATE-LIMIT-FIX] Connected from ${customerNumber} - Protocol: ${data.protocol}`)
+            console.log(`🔗 [RATE-LIMIT-FIX] Version: ${data.version || "unknown"}`)
             break
 
           case "start": {
@@ -1650,7 +1909,7 @@ const setupUnifiedVoiceServer = (wss) => {
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData)
             const callType = SIPHeaderDecoder.determineCallType(sipData)
 
-            console.log(`\n🎯 [OPTIMIZED] Stream started:`)
+            console.log(`\n🎯 [RATE-LIMIT-FIX] Stream started:`)
             console.log(`   • StreamSid: ${streamSid}`)
             console.log(`   • AccountSid: ${accountSid}`)
             console.log(`   • Customer Number: ${customerNumber}`)
@@ -1720,14 +1979,12 @@ const setupUnifiedVoiceServer = (wss) => {
               `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, customer: ${customerNumber}, call type: ${detectedCallType}`,
             )
 
-            // OPTIMIZED: Initialize persistent Deepgram connection
-            try {
-              await initializeDeepgramManager(currentLanguage, customerNumber)
-              console.log(`✅ [DEEPGRAM-PERSISTENT] Manager initialized for ${customerNumber}`)
-            } catch (deepgramError) {
-              console.error(
-                `❌ [DEEPGRAM-PERSISTENT] Failed to initialize manager for ${customerNumber}: ${deepgramError.message}`,
-              )
+            // OPTIMIZED: Initialize pooled Deepgram connection
+            const connectionSuccess = await initializeDeepgramConnection(currentLanguage, customerNumber)
+
+            if (!connectionSuccess) {
+              console.error(`❌ [POOL] Failed to establish Deepgram connection for ${customerNumber}`)
+              // Continue without Deepgram - the call can still work with TTS only
             }
 
             console.log(`\n🎉 [CONNECTION-SUCCESS] ==========================================`)
@@ -1759,15 +2016,15 @@ const setupUnifiedVoiceServer = (wss) => {
                 const audioBuffer = Buffer.from(data.media.payload, "base64")
                 console.log(`🎵 [MEDIA] Received ${audioBuffer.length} bytes from ${customerNumber}`)
 
-                if (deepgramManager) {
-                  const success = deepgramManager.sendAudio(audioBuffer)
+                if (deepgramConnection) {
+                  const success = deepgramConnection.sendAudio(audioBuffer)
                   if (success) {
-                    console.log(`📤 [MEDIA] Sent to persistent Deepgram for ${customerNumber}`)
+                    console.log(`📤 [MEDIA] Sent to pooled Deepgram for ${customerNumber}`)
                   } else {
-                    console.log(`⚠️ [MEDIA] Failed to send to Deepgram for ${customerNumber}`)
+                    console.log(`⚠️ [MEDIA] Failed to send to pooled Deepgram for ${customerNumber}`)
                   }
                 } else {
-                  console.log(`⚠️ [MEDIA] No Deepgram manager available for ${customerNumber}`)
+                  console.log(`⚠️ [MEDIA] No pooled Deepgram connection available for ${customerNumber}`)
                 }
               } catch (mediaError) {
                 console.error(`❌ [MEDIA] Error processing media from ${customerNumber}: ${mediaError.message}`)
@@ -1780,7 +2037,7 @@ const setupUnifiedVoiceServer = (wss) => {
           case "stop":
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
             const callType = SIPHeaderDecoder.determineCallType(sipData)
-            console.log(`\n📞 [OPTIMIZED] Stream stopped for ${customerNumber} (${callType} call)`)
+            console.log(`\n📞 [RATE-LIMIT-FIX] Stream stopped for ${customerNumber} (${callType} call)`)
 
             if (callLogger) {
               try {
@@ -1807,10 +2064,10 @@ const setupUnifiedVoiceServer = (wss) => {
               }
             }
 
-            // OPTIMIZED: Cleanup persistent Deepgram connection
-            if (deepgramManager) {
-              deepgramManager.disconnect()
-              console.log(`🔌 [DEEPGRAM-PERSISTENT] Disconnected for ${customerNumber}`)
+            // OPTIMIZED: Cleanup pooled Deepgram connection
+            if (deepgramConnection) {
+              deepgramConnection.cleanup()
+              console.log(`🔌 [POOL] Cleaned up connection for ${customerNumber}`)
             }
             break
 
@@ -1821,24 +2078,26 @@ const setupUnifiedVoiceServer = (wss) => {
 
           default:
             customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-            console.log(`❓ [OPTIMIZED] Unknown event: ${data.event} from ${customerNumber}`)
-            console.log(`❓ [OPTIMIZED] Event data:`, JSON.stringify(data, null, 2))
+            console.log(`❓ [RATE-LIMIT-FIX] Unknown event: ${data.event} from ${customerNumber}`)
+            console.log(`❓ [RATE-LIMIT-FIX] Event data:`, JSON.stringify(data, null, 2))
         }
       } catch (error) {
         const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
-        console.error(`❌ [OPTIMIZED] Unexpected error processing message from ${customerNumber}: ${error.message}`)
-        console.error(`❌ [OPTIMIZED] Stack trace:`, error.stack)
+        console.error(
+          `❌ [RATE-LIMIT-FIX] Unexpected error processing message from ${customerNumber}: ${error.message}`,
+        )
+        console.error(`❌ [RATE-LIMIT-FIX] Stack trace:`, error.stack)
 
         try {
           const messagePreview = message.toString().substring(0, 200)
-          console.error(`❌ [OPTIMIZED] Problematic message preview: "${messagePreview}..."`)
+          console.error(`❌ [RATE-LIMIT-FIX] Problematic message preview: "${messagePreview}..."`)
         } catch (previewError) {
-          console.error(`❌ [OPTIMIZED] Could not preview message: ${previewError.message}`)
+          console.error(`❌ [RATE-LIMIT-FIX] Could not preview message: ${previewError.message}`)
         }
       }
     })
 
-    // Enhanced connection cleanup with persistent Deepgram cleanup
+    // Enhanced connection cleanup with pooled connection cleanup
     ws.on("close", async (code, reason) => {
       const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
       const callType = SIPHeaderDecoder.determineCallType(sipData)
@@ -1899,17 +2158,17 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`ℹ️ [DISCONNECT] No call logger instance found for ${customerNumber}`)
       }
 
-      // OPTIMIZED: Cleanup persistent Deepgram connection
-      if (deepgramManager) {
-        console.log(`🔌 [DISCONNECT] Cleaning up persistent Deepgram connection for ${customerNumber}`)
-        deepgramManager.cleanup()
+      // OPTIMIZED: Cleanup pooled Deepgram connection
+      if (deepgramConnection) {
+        console.log(`🔌 [DISCONNECT] Cleaning up pooled Deepgram connection for ${customerNumber}`)
+        deepgramConnection.cleanup()
 
-        const status = deepgramManager.getStatus()
+        const status = deepgramConnection.getStatus()
         console.log(
-          `📊 [DISCONNECT] Final Deepgram status: Connected: ${status.isConnected}, Queue: ${status.queueSize}, Reconnects: ${status.reconnectAttempts}`,
+          `📊 [DISCONNECT] Final Deepgram status: Connected: ${status.isConnected}, Queue: ${status.queueSize}, Attempts: ${status.connectionAttempts}`,
         )
       } else {
-        console.log(`ℹ️ [DISCONNECT] No Deepgram manager found for ${customerNumber}`)
+        console.log(`ℹ️ [DISCONNECT] No pooled Deepgram connection found for ${customerNumber}`)
       }
 
       if (optimizedTTS) {
@@ -1927,7 +2186,7 @@ const setupUnifiedVoiceServer = (wss) => {
       currentLanguage = undefined
       processingRequestId = 0
       callLogger = null
-      deepgramManager = null
+      deepgramConnection = null
 
       console.log(`🧹 [DISCONNECT] Cleaned up all session data for ${customerNumber}`)
       console.log(`🔗 [DISCONNECT] ==========================================\n`)
@@ -1959,10 +2218,10 @@ const setupUnifiedVoiceServer = (wss) => {
         })
       }
 
-      // OPTIMIZED: Cleanup Deepgram on error
-      if (deepgramManager) {
-        console.log(`🔌 [ERROR] Cleaning up Deepgram manager due to error for ${customerNumber}`)
-        deepgramManager.cleanup()
+      // OPTIMIZED: Cleanup pooled Deepgram on error
+      if (deepgramConnection) {
+        console.log(`🔌 [ERROR] Cleaning up pooled Deepgram connection due to error for ${customerNumber}`)
+        deepgramConnection.cleanup()
       }
     })
 
@@ -1972,11 +2231,11 @@ const setupUnifiedVoiceServer = (wss) => {
         const customerNumber = SIPHeaderDecoder.getCustomerNumber(sipData) || "unknown"
         console.log(`💓 [HEARTBEAT] Connection alive for ${customerNumber}`)
 
-        // Also check Deepgram status
-        if (deepgramManager) {
-          const status = deepgramManager.getStatus()
+        // Also check pooled Deepgram status
+        if (deepgramConnection) {
+          const status = deepgramConnection.getStatus()
           console.log(
-            `💓 [HEARTBEAT] Deepgram status for ${customerNumber}: Connected: ${status.isConnected}, Queue: ${status.queueSize}`,
+            `💓 [HEARTBEAT] Pooled Deepgram status for ${customerNumber}: Connected: ${status.isConnected}, Queue: ${status.queueSize}`,
           )
         }
 
@@ -1995,6 +2254,19 @@ const setupUnifiedVoiceServer = (wss) => {
       clearInterval(heartbeatInterval)
     })
   })
+
+  // Graceful shutdown handler
+  process.on("SIGTERM", () => {
+    console.log("🛑 [SHUTDOWN] Received SIGTERM, cleaning up smart manager...")
+    smartDeepgramManager.cleanup()
+    process.exit(0)
+  })
+
+  process.on("SIGINT", () => {
+    console.log("🛑 [SHUTDOWN] Received SIGINT, cleaning up smart manager...")
+    smartDeepgramManager.cleanup()
+    process.exit(0)
+  })
 }
 
 module.exports = {
@@ -2002,5 +2274,6 @@ module.exports = {
   SIPHeaderDecoder,
   CallLogger,
   AgentConfigFetcher,
-  PersistentDeepgramManager,
+  DeepgramConnectionPool: SmartDeepgramManager, // Export the SmartDeepgramManager as DeepgramConnectionPool for compatibility
+  OptimizedDeepgramConnection,
 }
