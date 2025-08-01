@@ -681,18 +681,13 @@ class OptimizedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    // SIP audio specifications - Updated for 160-byte chunks
+    // SIP audio specifications
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
 
-    // Changed from 40ms chunks (640 bytes) to 10ms chunks (160 bytes)
-    const CHUNK_DURATION_MS = 10
-    const OPTIMAL_CHUNK_SIZE = Math.floor(CHUNK_DURATION_MS * BYTES_PER_MS) // 160 bytes
-
-    console.log(
-      `📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ${OPTIMAL_CHUNK_SIZE}-byte chunks to StreamSid: ${this.streamSid}`,
-    )
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes to StreamSid: ${this.streamSid}`)
 
     let position = 0
     let chunkIndex = 0
@@ -729,10 +724,10 @@ class OptimizedSarvamTTSProcessor {
         break
       }
 
-      // Delay between chunks - Updated for 10ms chunks
+      // Delay between chunks
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 1, 5) // Reduced delay for smaller chunks
+        const delayMs = Math.max(chunkDurationMs - 2, 10)
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
@@ -743,9 +738,7 @@ class OptimizedSarvamTTSProcessor {
     if (this.isInterrupted || streamingSession.interrupt) {
       console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`)
     } else {
-      console.log(
-        `✅ [SARVAM-SIP] Completed streaming ${successfulChunks}/${chunkIndex} chunks successfully (${OPTIMAL_CHUNK_SIZE} bytes each)`,
-      )
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${successfulChunks}/${chunkIndex} chunks successfully`)
     }
 
     this.currentAudioStreaming = null
