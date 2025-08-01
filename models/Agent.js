@@ -38,7 +38,7 @@ const agentSchema = new mongoose.Schema({
     enum: [
       "default",
       "male-professional",
-      "female-professional", 
+      "female-professional",
       "male-friendly",
       "female-friendly",
       "neutral",
@@ -60,7 +60,7 @@ const agentSchema = new mongoose.Schema({
       "vidya",
       "arya",
       "karun",
-      "hitesh"
+      "hitesh",
     ],
     default: "default",
   },
@@ -72,12 +72,12 @@ const agentSchema = new mongoose.Schema({
     {
       text: { type: String, required: true },
       audioBase64: { type: String },
-    }
+    },
   ],
 
   // Telephony
   accountSid: { type: String },
-  callerId: { type: String, index: true }, // NEW FIELD: For outbound call matching
+  callerId: { type: String, index: true }, // For outbound call matching
   serviceProvider: {
     type: String,
     enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
@@ -85,14 +85,12 @@ const agentSchema = new mongoose.Schema({
 
   // Audio storage - Store as base64 string instead of Buffer
   audioFile: { type: String }, // File path (legacy support)
-  audioBytes: { 
+  audioBytes: {
     type: String, // Store as base64 string
     validate: {
-      validator: function(v) {
-        return !v || typeof v === 'string'
-      },
-      message: 'audioBytes must be a string'
-    }
+      validator: (v) => !v || typeof v === "string",
+      message: "audioBytes must be a string",
+    },
   },
   audioMetadata: {
     format: { type: String, default: "mp3" },
@@ -113,16 +111,16 @@ const agentSchema = new mongoose.Schema({
 // Compound index for client + agent name uniqueness
 agentSchema.index({ clientId: 1, agentName: 1 }, { unique: true })
 
-// Additional index for callerId lookup
+// Additional index for callerId lookup (outbound calls)
 agentSchema.index({ callerId: 1 })
 
 // Update the updatedAt field before saving
 agentSchema.pre("save", function (next) {
   this.updatedAt = Date.now()
-  
+
   // Validate and convert audioBytes if present
   if (this.audioBytes) {
-    if (typeof this.audioBytes === 'string') {
+    if (typeof this.audioBytes === "string") {
       // Already a string, ensure metadata is updated
       if (!this.audioMetadata) {
         this.audioMetadata = {}
@@ -132,24 +130,24 @@ agentSchema.pre("save", function (next) {
       this.audioMetadata.size = byteSize
       console.log(`[AGENT_MODEL] Audio stored as base64 string: ${this.audioBytes.length} chars (${byteSize} bytes)`)
     } else {
-      return next(new Error('audioBytes must be a string'))
+      return next(new Error("audioBytes must be a string"))
     }
   }
-  
+
   next()
 })
 
 // Method to get audio as base64
-agentSchema.methods.getAudioBase64 = function() {
-  if (this.audioBytes && typeof this.audioBytes === 'string') {
+agentSchema.methods.getAudioBase64 = function () {
+  if (this.audioBytes && typeof this.audioBytes === "string") {
     return this.audioBytes
   }
   return null
 }
 
 // Method to set audio from base64
-agentSchema.methods.setAudioFromBase64 = function(base64String) {
-  if (base64String && typeof base64String === 'string') {
+agentSchema.methods.setAudioFromBase64 = function (base64String) {
+  if (base64String && typeof base64String === "string") {
     this.audioBytes = base64String
     if (!this.audioMetadata) {
       this.audioMetadata = {}

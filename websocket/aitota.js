@@ -88,13 +88,23 @@ const decodeExtraData = (extraBase64) => {
     const decodedString = Buffer.from(extraBase64, "base64").toString("utf-8")
     console.log(`🔍 [DECODE] Raw decoded string: ${decodedString}`)
 
+    // Fix common JSON formatting issues
+    const fixedString = decodedString
+      .replace(/="([^"]*?)"/g, ':"$1"') // Replace = with : in key-value pairs
+      .replace(/=([^",}\s]+)/g, ':"$1"') // Handle unquoted values after =
+      .replace(/,\s*}/g, "}") // Remove trailing commas
+      .replace(/,\s*]/g, "]") // Remove trailing commas in arrays
+
+    console.log(`🔧 [DECODE] Fixed JSON string: ${fixedString}`)
+
     // Parse JSON
-    const parsedData = JSON.parse(decodedString)
+    const parsedData = JSON.parse(fixedString)
     console.log(`✅ [DECODE] Parsed extra data:`, parsedData)
 
     return parsedData
   } catch (error) {
     console.error(`❌ [DECODE] Failed to decode extra data: ${error.message}`)
+    console.error(`❌ [DECODE] Original string: ${extraBase64}`)
     return null
   }
 }
@@ -287,9 +297,9 @@ const processWithOpenAIStreaming = async (
 
         bn: "আপনি আইতোতা, একজন ভদ্র এবং আবেগপ্রবণভাবে বুদ্ধিমান AI গ্রাহক সেবা কর্মকর্তা। আপনি বাংলায় সাবলীলভাবে কথা বলেন। উষ্ণতা এবং সহানুভূতি সহ প্রাকৃতিক, কথোপকথনমূলক ভাষা ব্যবহার করুন।",
 
-        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
+        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగి��చండి।",
 
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரళமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
 
         mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
       }
@@ -677,17 +687,16 @@ class OptimizedSarvamTTSProcessor {
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
 
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`)
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes to StreamSid: ${this.streamSid}`)
 
     let position = 0
     let chunkIndex = 0
+    let successfulChunks = 0
 
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
       const remaining = audioBuffer.length - position
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
       const chunk = audioBuffer.slice(position, position + chunkSize)
-
-      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`)
 
       const mediaMessage = {
         event: "media",
@@ -698,7 +707,21 @@ class OptimizedSarvamTTSProcessor {
       }
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-        this.ws.send(JSON.stringify(mediaMessage))
+        try {
+          this.ws.send(JSON.stringify(mediaMessage))
+          successfulChunks++
+          console.log(
+            `📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}/${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)}: ${chunk.length} bytes sent`,
+          )
+        } catch (error) {
+          console.error(`❌ [SARVAM-SIP] Failed to send chunk ${chunkIndex + 1}: ${error.message}`)
+          break
+        }
+      } else {
+        console.error(
+          `❌ [SARVAM-SIP] WebSocket not ready: readyState=${this.ws.readyState}, interrupted=${this.isInterrupted}`,
+        )
+        break
       }
 
       // Delay between chunks
@@ -715,7 +738,7 @@ class OptimizedSarvamTTSProcessor {
     if (this.isInterrupted || streamingSession.interrupt) {
       console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`)
     } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`)
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${successfulChunks}/${chunkIndex} chunks successfully`)
     }
 
     this.currentAudioStreaming = null
@@ -752,19 +775,20 @@ const findAgentForCall = async (callData) => {
 
     console.log(`🔍 [AGENT-LOOKUP] Direction: ${callDirection}, AccountSid: ${accountSid}`)
 
+    let agent = null
+
     if (callDirection === "inbound") {
       // Inbound call: Use accountSid to find agent
       if (!accountSid) {
         throw new Error("Missing accountSid for inbound call")
       }
 
-      const agent = await Agent.findOne({ accountSid }).lean()
+      agent = await Agent.findOne({ accountSid }).lean()
       if (!agent) {
         throw new Error(`No agent found for accountSid: ${accountSid}`)
       }
 
       console.log(`✅ [AGENT-LOOKUP] Inbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
-      return agent
     } else if (callDirection === "outbound") {
       // Outbound call: Use CallVaId from extraData to match callerId
       if (!extraData || !extraData.CallVaId) {
@@ -774,16 +798,17 @@ const findAgentForCall = async (callData) => {
       const callVaId = extraData.CallVaId
       console.log(`🔍 [AGENT-LOOKUP] Looking for agent with callerId: ${callVaId}`)
 
-      const agent = await Agent.findOne({ callerId: callVaId }).lean()
+      agent = await Agent.findOne({ callerId: callVaId }).lean()
       if (!agent) {
         throw new Error(`No agent found for callerId: ${callVaId}`)
       }
 
       console.log(`✅ [AGENT-LOOKUP] Outbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
-      return agent
     } else {
       throw new Error(`Unknown call direction: ${callDirection}`)
     }
+
+    return agent
   } catch (error) {
     console.error(`❌ [AGENT-LOOKUP] Error: ${error.message}`)
     throw error
@@ -990,7 +1015,15 @@ const setupUnifiedVoiceServer = (wss) => {
     // WebSocket message handling with enhanced inbound/outbound support
     ws.on("message", async (message) => {
       try {
-        const data = JSON.parse(message.toString())
+        const messageStr = message.toString()
+
+        // Skip non-JSON messages (like "EOS" or other control messages)
+        if (messageStr === "EOS" || messageStr === "BOS" || !messageStr.startsWith("{")) {
+          console.log(`📝 [WEBSOCKET] Skipping non-JSON message: ${messageStr}`)
+          return
+        }
+
+        const data = JSON.parse(messageStr)
 
         switch (data.event) {
           case "connected":
@@ -1000,21 +1033,44 @@ const setupUnifiedVoiceServer = (wss) => {
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
-            const mobile = data.start?.from || null // Extract mobile number from call data
-            const to = data.start?.to || null // DID number
+
+            // Extract mobile number from different possible fields
+            let mobile = null
+            if (data.start?.from) {
+              mobile = data.start.from
+            } else if (urlParams.caller_id) {
+              mobile = urlParams.caller_id
+            } else if (data.start?.extraData?.CallCli) {
+              mobile = data.start.extraData.CallCli
+            }
+
+            // Extract DID/To number
+            let to = null
+            if (data.start?.to) {
+              to = data.start.to
+            } else if (urlParams.did) {
+              to = urlParams.did
+            } else if (data.start?.extraData?.DID) {
+              to = data.start.extraData.DID
+            }
+
+            console.log(`📞 [CALL-INFO] Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
 
             // Determine call direction and decode extra data if present
             let extraData = null
-            if (urlParams.extra) {
-              extraData = decodeExtraData(urlParams.extra)
+            if (data.start?.extraData) {
+              extraData = decodeExtraData(data.start.extraData)
             }
 
-            // Determine call direction based on extraData
+            // Determine call direction based on multiple indicators
             if (extraData && extraData.CallDirection === "OutDial") {
               callDirection = "outbound"
               console.log(
                 `📞 [OUTBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, CallVaId: ${extraData.CallVaId}`,
               )
+            } else if (urlParams.direction === "OutDial") {
+              callDirection = "outbound"
+              console.log(`📞 [OUTBOUND] Call detected via URL param - Mobile: ${mobile}, DID: ${to}`)
             } else {
               callDirection = "inbound"
               console.log(`📞 [INBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
