@@ -297,7 +297,7 @@ const processWithOpenAIStreaming = async (
 
         bn: "আপনি আইতোতা, একজন ভদ্র এবং আবেগপ্রবণভাবে বুদ্ধিমান AI গ্রাহক সেবা কর্মকর্তা। আপনি বাংলায় সাবলীলভাবে কথা বলেন। উষ্ণতা এবং সহানুভূতি সহ প্রাকৃতিক, কথোপকথনমূলক ভাষা ব্যবহার করুন।",
 
-        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగి��చండి।",
+        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
 
         ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரళமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
 
@@ -774,6 +774,7 @@ const findAgentForCall = async (callData) => {
     const { accountSid, callDirection, extraData } = callData
 
     console.log(`🔍 [AGENT-LOOKUP] Direction: ${callDirection}, AccountSid: ${accountSid}`)
+    console.log(`🔍 [AGENT-LOOKUP] ExtraData:`, extraData)
 
     let agent = null
 
@@ -791,7 +792,12 @@ const findAgentForCall = async (callData) => {
       console.log(`✅ [AGENT-LOOKUP] Inbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
     } else if (callDirection === "outbound") {
       // Outbound call: Use CallVaId from extraData to match callerId
-      if (!extraData || !extraData.CallVaId) {
+      if (!extraData) {
+        throw new Error("Missing extraData for outbound call")
+      }
+
+      if (!extraData.CallVaId) {
+        console.error(`❌ [AGENT-LOOKUP] ExtraData structure:`, JSON.stringify(extraData, null, 2))
         throw new Error("Missing CallVaId in extraData for outbound call")
       }
 
@@ -1058,8 +1064,20 @@ const setupUnifiedVoiceServer = (wss) => {
 
             // Determine call direction and decode extra data if present
             let extraData = null
+
+            // Try to get extra data from multiple sources
             if (data.start?.extraData) {
               extraData = decodeExtraData(data.start.extraData)
+            } else if (urlParams.extra) {
+              // Decode extra data from URL parameters
+              extraData = decodeExtraData(urlParams.extra)
+              console.log(`🔍 [EXTRA-DATA] Decoded from URL params:`, extraData)
+            }
+
+            // Update mobile number from decoded extra data if available
+            if (extraData?.CallCli && !mobile) {
+              mobile = extraData.CallCli
+              console.log(`📱 [MOBILE-UPDATE] Updated mobile from extraData: ${mobile}`)
             }
 
             // Determine call direction based on multiple indicators
@@ -1071,6 +1089,12 @@ const setupUnifiedVoiceServer = (wss) => {
             } else if (urlParams.direction === "OutDial") {
               callDirection = "outbound"
               console.log(`📞 [OUTBOUND] Call detected via URL param - Mobile: ${mobile}, DID: ${to}`)
+
+              // For outbound calls detected via URL param, ensure we have extraData
+              if (!extraData && urlParams.extra) {
+                extraData = decodeExtraData(urlParams.extra)
+                console.log(`🔍 [EXTRA-DATA] Decoded for outbound call:`, extraData)
+              }
             } else {
               callDirection = "inbound"
               console.log(`📞 [INBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
