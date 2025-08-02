@@ -167,7 +167,7 @@ Return only the language code, nothing else.`,
   }
 }
 
-// Call logging utility class with parallel operations
+// Call logging utility class
 class CallLogger {
   constructor(clientId, mobile = null, callDirection = "inbound") {
     this.clientId = clientId
@@ -177,11 +177,10 @@ class CallLogger {
     this.transcripts = []
     this.responses = []
     this.totalDuration = 0
-    this.pendingSaves = [] // Track pending async operations
   }
 
-  // Log user transcript from Deepgram (async for parallel processing)
-  async logUserTranscript(transcript, language, timestamp = new Date()) {
+  // Log user transcript from Deepgram
+  logUserTranscript(transcript, language, timestamp = new Date()) {
     const entry = {
       type: "user",
       text: transcript,
@@ -192,13 +191,10 @@ class CallLogger {
 
     this.transcripts.push(entry)
     console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`)
-
-    // Parallel processing: Don't wait for this to complete
-    this.pendingSaves.push(this.saveTranscriptChunk(entry))
   }
 
-  // Log AI response from Sarvam (async for parallel processing)
-  async logAIResponse(response, language, timestamp = new Date()) {
+  // Log AI response from Sarvam
+  logAIResponse(response, language, timestamp = new Date()) {
     const entry = {
       type: "ai",
       text: response,
@@ -209,31 +205,6 @@ class CallLogger {
 
     this.responses.push(entry)
     console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`)
-
-    // Parallel processing: Don't wait for this to complete
-    this.pendingSaves.push(this.saveResponseChunk(entry))
-  }
-
-  // Save individual transcript chunks in parallel (non-blocking)
-  async saveTranscriptChunk(entry) {
-    try {
-      // This could be used for real-time transcript streaming to database
-      // For now, we'll just prepare the data structure
-      return Promise.resolve(entry)
-    } catch (error) {
-      console.error(`❌ [CALL-LOG] Chunk save error: ${error.message}`)
-    }
-  }
-
-  // Save individual response chunks in parallel (non-blocking)
-  async saveResponseChunk(entry) {
-    try {
-      // This could be used for real-time response streaming to database
-      // For now, we'll just prepare the data structure
-      return Promise.resolve(entry)
-    } catch (error) {
-      console.error(`❌ [CALL-LOG] Response chunk save error: ${error.message}`)
-    }
   }
 
   // Generate full transcript combining user and AI messages
@@ -251,18 +222,11 @@ class CallLogger {
       .join("\n")
   }
 
-  // Save call log to database with parallel operations
+  // Save call log to database
   async saveToDatabase(leadStatus = "medium") {
     try {
       const callEndTime = new Date()
       this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000) // Duration in seconds
-
-      // Wait for any pending saves to complete
-      if (this.pendingSaves.length > 0) {
-        console.log(`⏳ [CALL-LOG] Waiting for ${this.pendingSaves.length} pending operations...`)
-        await Promise.allSettled(this.pendingSaves)
-        this.pendingSaves = []
-      }
 
       const callLogData = {
         clientId: this.clientId,
@@ -311,7 +275,7 @@ class CallLogger {
   }
 }
 
-// Optimized OpenAI streaming with database-driven prompts
+// Optimized OpenAI streaming with phrase-based chunking and language detection
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -320,15 +284,30 @@ const processWithOpenAIStreaming = async (
   onComplete,
   onInterrupt,
   callLogger,
-  agentConfig, // Pass agent config for database-driven prompts
 ) => {
   const timer = createTimer("OPENAI_STREAMING")
 
   try {
-    // Use system prompt from database instead of hardcoded prompts
-    const systemPrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    // Enhanced system prompt with Marathi support
+    const getSystemPrompt = (lang) => {
+      const prompts = {
+        hi: "आप एआई तोता हैं, एक विनम्र और भावनात्मक रूप से बुद्धिमान AI ग्राहक सेवा कार्यकारी। आप हिंदी में धाराप्रवाह बोलते हैं। प्राकृतिक, बातचीत की भाषा का प्रयोग करें जो गर्मजोशी और सहानुभूति से भरी हो। जवाब छोटे रखें—केवल 1-2 लाइन। ग्राहकों को सुना, समर्थित और मूल्यवान महसूस कराना आपका लक्ष्य है।",
 
-    console.log(`🤖 [SYSTEM-PROMPT] Using database prompt for agent: ${agentConfig.agentName}`)
+        en: "You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. Your goal is to make customers feel heard, supported, and valued.",
+
+        bn: "আপনি আইতোতা, একজন ভদ্র এবং আবেগপ্রবণভাবে বুদ্ধিমান AI গ্রাহক সেবা কর্মকর্তা। আপনি বাংলায় সাবলীলভাবে কথা বলেন। উষ্ণতা এবং সহানুভূতি সহ প্রাকৃতিক, কথোপকথনমূলক ভাষা ব্যবহার করুন।",
+
+        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
+
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரళமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
+
+        mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
+      }
+
+      return prompts[lang] || prompts.en
+    }
+
+    const systemPrompt = getSystemPrompt(detectedLanguage)
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -434,7 +413,7 @@ const processWithOpenAIStreaming = async (
     if (!isInterrupted) {
       console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`)
 
-      // Log AI response to call logger (async, non-blocking)
+      // Log AI response to call logger
       if (callLogger && fullResponse.trim()) {
         callLogger.logAIResponse(fullResponse.trim(), detectedLanguage)
       }
@@ -467,7 +446,7 @@ const shouldSendPhrase = (buffer) => {
   return false
 }
 
-// Enhanced TTS processor with 160-byte chunks
+// Enhanced TTS processor with call logging
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
@@ -695,7 +674,6 @@ class OptimizedSarvamTTSProcessor {
     }
   }
 
-  // OPTIMIZED: 160-byte chunks instead of 640 bytes
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
@@ -703,17 +681,13 @@ class OptimizedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    // SIP audio specifications - OPTIMIZED FOR 160 BYTES
+    // SIP audio specifications
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
 
-    // CHANGED: Reduced from 40ms (640 bytes) to 10ms (160 bytes)
-    const OPTIMAL_CHUNK_SIZE = Math.floor(10 * BYTES_PER_MS) // ~160 bytes
-
-    console.log(
-      `📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes in ${OPTIMAL_CHUNK_SIZE}-byte chunks to StreamSid: ${this.streamSid}`,
-    )
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes to StreamSid: ${this.streamSid}`)
 
     let position = 0
     let chunkIndex = 0
@@ -737,7 +711,7 @@ class OptimizedSarvamTTSProcessor {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
           console.log(
-            `📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}/${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)}: ${chunk.length} bytes sent (160-byte optimized)`,
+            `📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}/${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)}: ${chunk.length} bytes sent`,
           )
         } catch (error) {
           console.error(`❌ [SARVAM-SIP] Failed to send chunk ${chunkIndex + 1}: ${error.message}`)
@@ -750,10 +724,10 @@ class OptimizedSarvamTTSProcessor {
         break
       }
 
-      // OPTIMIZED: Reduced delay for smaller chunks
+      // Delay between chunks
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 1, 5) // Reduced minimum delay
+        const delayMs = Math.max(chunkDurationMs - 2, 10)
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
@@ -764,9 +738,7 @@ class OptimizedSarvamTTSProcessor {
     if (this.isInterrupted || streamingSession.interrupt) {
       console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`)
     } else {
-      console.log(
-        `✅ [SARVAM-SIP] Completed streaming ${successfulChunks}/${chunkIndex} chunks successfully (160-byte optimized)`,
-      )
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${successfulChunks}/${chunkIndex} chunks successfully`)
     }
 
     this.currentAudioStreaming = null
@@ -796,7 +768,7 @@ class OptimizedSarvamTTSProcessor {
   }
 }
 
-// OPTIMIZED: Parallel agent lookup function
+// Enhanced agent lookup function for both inbound and outbound calls
 const findAgentForCall = async (callData) => {
   try {
     const { accountSid, callDirection, extraData } = callData
@@ -805,7 +777,6 @@ const findAgentForCall = async (callData) => {
     console.log(`🔍 [AGENT-LOOKUP] ExtraData:`, extraData)
 
     let agent = null
-    const timer = createTimer("AGENT_LOOKUP")
 
     if (callDirection === "inbound") {
       // Inbound call: Use accountSid to find agent
@@ -813,19 +784,12 @@ const findAgentForCall = async (callData) => {
         throw new Error("Missing accountSid for inbound call")
       }
 
-      // OPTIMIZED: Use lean() for faster queries and add index hint
-      agent = await Agent.findOne({ accountSid })
-        .lean()
-        .hint({ accountSid: 1 }) // Use index hint for better performance
-        .exec()
-
+      agent = await Agent.findOne({ accountSid }).lean()
       if (!agent) {
         throw new Error(`No agent found for accountSid: ${accountSid}`)
       }
 
-      console.log(
-        `✅ [AGENT-LOOKUP] Inbound agent found in ${timer.end()}ms: ${agent.agentName} (Client: ${agent.clientId})`,
-      )
+      console.log(`✅ [AGENT-LOOKUP] Inbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
     } else if (callDirection === "outbound") {
       // Outbound call: Use CallVaId from extraData to match callerId
       if (!extraData) {
@@ -840,19 +804,12 @@ const findAgentForCall = async (callData) => {
       const callVaId = extraData.CallVaId
       console.log(`🔍 [AGENT-LOOKUP] Looking for agent with callerId: ${callVaId}`)
 
-      // OPTIMIZED: Use lean() for faster queries and add index hint
-      agent = await Agent.findOne({ callerId: callVaId })
-        .lean()
-        .hint({ callerId: 1 }) // Use index hint for better performance
-        .exec()
-
+      agent = await Agent.findOne({ callerId: callVaId }).lean()
       if (!agent) {
         throw new Error(`No agent found for callerId: ${callVaId}`)
       }
 
-      console.log(
-        `✅ [AGENT-LOOKUP] Outbound agent found in ${timer.end()}ms: ${agent.agentName} (Client: ${agent.clientId})`,
-      )
+      console.log(`✅ [AGENT-LOOKUP] Outbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
     } else {
       throw new Error(`Unknown call direction: ${callDirection}`)
     }
@@ -864,31 +821,12 @@ const findAgentForCall = async (callData) => {
   }
 }
 
-// OPTIMIZED: Parallel database operations helper
-const performParallelDatabaseOperations = async (operations) => {
-  try {
-    const results = await Promise.allSettled(operations)
-    const successful = results.filter((result) => result.status === "fulfilled").map((result) => result.value)
-    const failed = results.filter((result) => result.status === "rejected").map((result) => result.reason)
-
-    if (failed.length > 0) {
-      console.warn(`⚠️ [PARALLEL-DB] ${failed.length} operations failed:`, failed)
-    }
-
-    console.log(`✅ [PARALLEL-DB] ${successful.length}/${results.length} operations completed successfully`)
-    return { successful, failed }
-  } catch (error) {
-    console.error(`❌ [PARALLEL-DB] Error in parallel operations: ${error.message}`)
-    throw error
-  }
-}
-
-// Main WebSocket server setup with optimizations
+// Main WebSocket server setup with enhanced call logging and outbound support
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [OPTIMIZED] Voice Server started with 160-byte chunks, database prompts, and parallel operations")
+  console.log("🚀 [ENHANCED] Voice Server started with inbound/outbound support, call logging and Marathi support")
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New optimized WebSocket connection")
+    console.log("🔗 [CONNECTION] New enhanced WebSocket connection")
 
     // Parse URL parameters for call direction detection
     const url = new URL(req.url, `http://${req.headers.host}`)
@@ -905,9 +843,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let optimizedTTS = null
     let currentLanguage = undefined
     let processingRequestId = 0
-    let callLogger = null
-    let callDirection = "inbound"
-    let agentConfig = null // Store agent config for database-driven prompts
+    let callLogger = null // Call logger instance
+    let callDirection = "inbound" // Default to inbound
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -961,7 +898,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Handle Deepgram responses with parallel logging
+    // Handle Deepgram responses with call logging
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript
@@ -979,17 +916,10 @@ const setupUnifiedVoiceServer = (wss) => {
           if (is_final) {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
-            // OPTIMIZED: Parallel language detection and logging
+            // Log the final transcript to call logger
             if (callLogger && transcript.trim()) {
-              // Don't wait for language detection - do it in parallel
-              detectLanguageWithOpenAI(transcript.trim())
-                .then((detectedLang) => {
-                  callLogger.logUserTranscript(transcript.trim(), detectedLang)
-                })
-                .catch((err) => {
-                  console.error(`❌ [LANG-DETECT-ASYNC] Error: ${err.message}`)
-                  callLogger.logUserTranscript(transcript.trim(), currentLanguage || "hi")
-                })
+              const detectedLang = await detectLanguageWithOpenAI(transcript.trim())
+              callLogger.logUserTranscript(transcript.trim(), detectedLang)
             }
 
             await processUserUtterance(userUtteranceBuffer)
@@ -998,16 +928,10 @@ const setupUnifiedVoiceServer = (wss) => {
         }
       } else if (data.type === "UtteranceEnd") {
         if (userUtteranceBuffer.trim()) {
-          // OPTIMIZED: Parallel language detection and logging
+          // Log the utterance end transcript
           if (callLogger && userUtteranceBuffer.trim()) {
-            detectLanguageWithOpenAI(userUtteranceBuffer.trim())
-              .then((detectedLang) => {
-                callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
-              })
-              .catch((err) => {
-                console.error(`❌ [LANG-DETECT-ASYNC] Error: ${err.message}`)
-                callLogger.logUserTranscript(userUtteranceBuffer.trim(), currentLanguage || "hi")
-              })
+            const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim())
+            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
           }
 
           await processUserUtterance(userUtteranceBuffer)
@@ -1016,7 +940,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // OPTIMIZED: Enhanced utterance processing with parallel operations
+    // Enhanced utterance processing with call logging
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
@@ -1033,24 +957,10 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`)
 
-        // OPTIMIZED: Parallel language detection (don't block on this)
-        const languageDetectionPromise = detectLanguageWithOpenAI(text)
+        // Step 1: Detect language using OpenAI
+        const detectedLanguage = await detectLanguageWithOpenAI(text)
 
-        // Use current language as fallback while detection runs in parallel
-        let detectedLanguage = currentLanguage || "hi"
-
-        try {
-          // Wait for language detection with timeout
-          detectedLanguage = await Promise.race([
-            languageDetectionPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error("Language detection timeout")), 1000)),
-          ])
-        } catch (error) {
-          console.warn(`⚠️ [LANG-DETECT] Using fallback language due to: ${error.message}`)
-          detectedLanguage = currentLanguage || "hi"
-        }
-
-        // Update current language and initialize TTS processor
+        // Step 2: Update current language and initialize TTS processor
         if (detectedLanguage !== currentLanguage) {
           console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage}`)
           currentLanguage = detectedLanguage
@@ -1059,12 +969,12 @@ const setupUnifiedVoiceServer = (wss) => {
         // Create new TTS processor with detected language
         optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
 
-        // Check for interruption function
+        // Step 3: Check for interruption function
         const checkInterruption = () => {
           return processingRequestId !== currentRequestId
         }
 
-        // OPTIMIZED: Process with OpenAI streaming using database prompts
+        // Step 4: Process with OpenAI streaming
         const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
@@ -1095,8 +1005,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
           },
           checkInterruption,
-          callLogger,
-          agentConfig, // Pass agent config for database-driven prompts
+          callLogger, // Pass call logger to OpenAI processing
         )
 
         console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`)
@@ -1109,12 +1018,12 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // OPTIMIZED: WebSocket message handling with parallel database operations
+    // WebSocket message handling with enhanced inbound/outbound support
     ws.on("message", async (message) => {
       try {
         const messageStr = message.toString()
 
-        // Skip non-JSON messages
+        // Skip non-JSON messages (like "EOS" or other control messages)
         if (messageStr === "EOS" || messageStr === "BOS" || !messageStr.startsWith("{")) {
           console.log(`📝 [WEBSOCKET] Skipping non-JSON message: ${messageStr}`)
           return
@@ -1124,16 +1033,14 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [OPTIMIZED] Connected - Protocol: ${data.protocol}`)
+            console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`)
             break
 
           case "start": {
-            const startTimer = createTimer("CALL_START")
-
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
 
-            // Extract call information
+            // Extract mobile number from different possible fields
             let mobile = null
             if (data.start?.from) {
               mobile = data.start.from
@@ -1143,6 +1050,7 @@ const setupUnifiedVoiceServer = (wss) => {
               mobile = data.start.extraData.CallCli
             }
 
+            // Extract DID/To number
             let to = null
             if (data.start?.to) {
               to = data.start.to
@@ -1154,22 +1062,25 @@ const setupUnifiedVoiceServer = (wss) => {
 
             console.log(`📞 [CALL-INFO] Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
 
-            // Decode extra data
+            // Determine call direction and decode extra data if present
             let extraData = null
+
+            // Try to get extra data from multiple sources
             if (data.start?.extraData) {
               extraData = decodeExtraData(data.start.extraData)
             } else if (urlParams.extra) {
+              // Decode extra data from URL parameters
               extraData = decodeExtraData(urlParams.extra)
               console.log(`🔍 [EXTRA-DATA] Decoded from URL params:`, extraData)
             }
 
-            // Update mobile from extra data if needed
+            // Update mobile number from decoded extra data if available
             if (extraData?.CallCli && !mobile) {
               mobile = extraData.CallCli
               console.log(`📱 [MOBILE-UPDATE] Updated mobile from extraData: ${mobile}`)
             }
 
-            // Determine call direction
+            // Determine call direction based on multiple indicators
             if (extraData && extraData.CallDirection === "OutDial") {
               callDirection = "outbound"
               console.log(
@@ -1178,6 +1089,8 @@ const setupUnifiedVoiceServer = (wss) => {
             } else if (urlParams.direction === "OutDial") {
               callDirection = "outbound"
               console.log(`📞 [OUTBOUND] Call detected via URL param - Mobile: ${mobile}, DID: ${to}`)
+
+              // For outbound calls detected via URL param, ensure we have extraData
               if (!extraData && urlParams.extra) {
                 extraData = decodeExtraData(urlParams.extra)
                 console.log(`🔍 [EXTRA-DATA] Decoded for outbound call:`, extraData)
@@ -1187,19 +1100,16 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log(`📞 [INBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
             }
 
-            console.log(`🎯 [OPTIMIZED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
+            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
 
-            // OPTIMIZED: Parallel agent lookup and call logger initialization
+            // Find appropriate agent based on call direction
+            let agentConfig = null
             try {
-              const parallelOperations = [findAgentForCall({ accountSid, callDirection, extraData })]
-
-              const { successful, failed } = await performParallelDatabaseOperations(parallelOperations)
-
-              if (failed.length > 0 || successful.length === 0) {
-                throw new Error(`Agent lookup failed: ${failed[0]?.message || "Unknown error"}`)
-              }
-
-              agentConfig = successful[0]
+              agentConfig = await findAgentForCall({
+                accountSid,
+                callDirection,
+                extraData,
+              })
 
               if (!agentConfig) {
                 ws.send(
@@ -1211,41 +1121,6 @@ const setupUnifiedVoiceServer = (wss) => {
                 ws.close()
                 return
               }
-
-              ws.sessionAgentConfig = agentConfig
-              currentLanguage = agentConfig.language || "hi"
-
-              // Initialize call logger
-              callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
-              console.log(
-                `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, direction: ${callDirection}`,
-              )
-
-              // OPTIMIZED: Parallel Deepgram connection and TTS initialization
-              const initPromises = [connectToDeepgram()]
-
-              // Don't wait for these to complete - they run in parallel
-              Promise.allSettled(initPromises).then((results) => {
-                const deepgramResult = results[0]
-                if (deepgramResult.status === "rejected") {
-                  console.error(`❌ [DEEPGRAM-INIT] Failed: ${deepgramResult.reason}`)
-                }
-              })
-
-              // Use agent's firstMessage for greeting and log it
-              const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
-              console.log(`👋 [GREETING] ${greeting}`)
-
-              // Log the initial greeting (async, non-blocking)
-              if (callLogger) {
-                callLogger.logAIResponse(greeting, currentLanguage)
-              }
-
-              // Initialize and start TTS for greeting
-              const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-              await tts.synthesizeAndStream(greeting)
-
-              console.log(`⚡ [CALL-START] Total initialization time: ${startTimer.end()}ms`)
             } catch (err) {
               console.error(`❌ [AGENT-LOOKUP] ${err.message}`)
               ws.send(
@@ -1257,6 +1132,29 @@ const setupUnifiedVoiceServer = (wss) => {
               ws.close()
               return
             }
+
+            ws.sessionAgentConfig = agentConfig
+            currentLanguage = agentConfig.language || "hi"
+
+            // Initialize call logger with direction
+            callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
+            console.log(
+              `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, direction: ${callDirection}`,
+            )
+
+            await connectToDeepgram()
+
+            // Use agent's firstMessage for greeting and log it
+            const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
+            console.log(`👋 [GREETING] ${greeting}`)
+
+            // Log the initial greeting
+            if (callLogger) {
+              callLogger.logAIResponse(greeting, currentLanguage)
+            }
+
+            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            await tts.synthesizeAndStream(greeting)
             break
           }
 
@@ -1273,29 +1171,22 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           case "stop":
-            console.log(`📞 [OPTIMIZED] Stream stopped - Direction: ${callDirection}`)
+            console.log(`📞 [ENHANCED] Stream stopped - Direction: ${callDirection}`)
 
-            // OPTIMIZED: Parallel cleanup operations
-            const cleanupOperations = []
-
+            // Save call log to database before closing
             if (callLogger) {
-              cleanupOperations.push(
-                callLogger.saveToDatabase("medium").then((savedLog) => {
-                  console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
-                  const stats = callLogger.getStats()
-                  console.log(
-                    `📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(", ")}, Direction: ${stats.callDirection}`,
-                  )
-                  return savedLog
-                }),
-              )
-            }
+              try {
+                const savedLog = await callLogger.saveToDatabase("medium") // Default lead status
+                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
 
-            // Execute cleanup operations in parallel
-            if (cleanupOperations.length > 0) {
-              performParallelDatabaseOperations(cleanupOperations).catch((error) => {
-                console.error(`❌ [CLEANUP] Failed: ${error.message}`)
-              })
+                // Print call statistics
+                const stats = callLogger.getStats()
+                console.log(
+                  `📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(", ")}, Direction: ${stats.callDirection}`,
+                )
+              } catch (error) {
+                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`)
+              }
             }
 
             if (deepgramWs?.readyState === WebSocket.OPEN) {
@@ -1304,33 +1195,25 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           default:
-            console.log(`❓ [OPTIMIZED] Unknown event: ${data.event}`)
+            console.log(`❓ [ENHANCED] Unknown event: ${data.event}`)
         }
       } catch (error) {
-        console.error(`❌ [OPTIMIZED] Message error: ${error.message}`)
+        console.error(`❌ [ENHANCED] Message error: ${error.message}`)
       }
     })
 
-    // OPTIMIZED: Enhanced connection cleanup with parallel operations
+    // Enhanced connection cleanup with call logging
     ws.on("close", async () => {
-      console.log(`🔗 [OPTIMIZED] Connection closed - Direction: ${callDirection}`)
+      console.log(`🔗 [ENHANCED] Connection closed - Direction: ${callDirection}`)
 
-      // Parallel emergency cleanup
-      const emergencyOperations = []
-
+      // Save call log before cleanup if not already saved
       if (callLogger) {
-        emergencyOperations.push(
-          callLogger.saveToDatabase("not_connected").then((savedLog) => {
-            console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
-            return savedLog
-          }),
-        )
-      }
-
-      if (emergencyOperations.length > 0) {
-        performParallelDatabaseOperations(emergencyOperations).catch((error) => {
-          console.error(`❌ [EMERGENCY-CLEANUP] Failed: ${error.message}`)
-        })
+        try {
+          const savedLog = await callLogger.saveToDatabase("not_connected") // Status for unexpected disconnection
+          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
+        } catch (error) {
+          console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`)
+        }
       }
 
       if (deepgramWs?.readyState === WebSocket.OPEN) {
@@ -1350,11 +1233,10 @@ const setupUnifiedVoiceServer = (wss) => {
       processingRequestId = 0
       callLogger = null
       callDirection = "inbound"
-      agentConfig = null
     })
 
     ws.on("error", (error) => {
-      console.error(`❌ [OPTIMIZED] WebSocket error: ${error.message}`)
+      console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`)
     })
   })
 }
