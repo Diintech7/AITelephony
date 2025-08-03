@@ -322,8 +322,9 @@ const processWithOpenAIStreaming = async (
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 30,
+        max_tokens: 50,
         temperature: 0.3,
+        stream: true,
       }),
     })
 
