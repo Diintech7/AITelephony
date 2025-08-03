@@ -2,7 +2,7 @@ const WebSocket = require("ws")
 require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
-const CallLog = require("../models/CallLog")
+const { EnhancedCallLogger } = require("../scripts/enhanced-call-logger")
 
 // Load API keys from environment variables
 const API_KEYS = {
@@ -164,114 +164,6 @@ Return only the language code, nothing else.`,
   } catch (error) {
     console.error(`❌ [LANG-DETECT] Error: ${error.message}`)
     return "hi" // Default fallback
-  }
-}
-
-// Call logging utility class
-class CallLogger {
-  constructor(clientId, mobile = null, callDirection = "inbound") {
-    this.clientId = clientId
-    this.mobile = mobile
-    this.callDirection = callDirection
-    this.callStartTime = new Date()
-    this.transcripts = []
-    this.responses = []
-    this.totalDuration = 0
-  }
-
-  // Log user transcript from Deepgram
-  logUserTranscript(transcript, language, timestamp = new Date()) {
-    const entry = {
-      type: "user",
-      text: transcript,
-      language: language,
-      timestamp: timestamp,
-      source: "deepgram",
-    }
-
-    this.transcripts.push(entry)
-    console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`)
-  }
-
-  // Log AI response from Sarvam
-  logAIResponse(response, language, timestamp = new Date()) {
-    const entry = {
-      type: "ai",
-      text: response,
-      language: language,
-      timestamp: timestamp,
-      source: "sarvam",
-    }
-
-    this.responses.push(entry)
-    console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`)
-  }
-
-  // Generate full transcript combining user and AI messages
-  generateFullTranscript() {
-    const allEntries = [...this.transcripts, ...this.responses].sort(
-      (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
-    )
-
-    return allEntries
-      .map((entry) => {
-        const speaker = entry.type === "user" ? "User" : "AI"
-        const time = entry.timestamp.toISOString()
-        return `[${time}] ${speaker} (${entry.language}): ${entry.text}`
-      })
-      .join("\n")
-  }
-
-  // Save call log to database
-  async saveToDatabase(leadStatus = "medium") {
-    try {
-      const callEndTime = new Date()
-      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000) // Duration in seconds
-
-      const callLogData = {
-        clientId: this.clientId,
-        mobile: this.mobile,
-        time: this.callStartTime,
-        transcript: this.generateFullTranscript(),
-        duration: this.totalDuration,
-        leadStatus: leadStatus,
-        // Additional metadata
-        metadata: {
-          userTranscriptCount: this.transcripts.length,
-          aiResponseCount: this.responses.length,
-          languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
-          callEndTime: callEndTime,
-          callDirection: this.callDirection,
-        },
-      }
-
-      const callLog = new CallLog(callLogData)
-      const savedLog = await callLog.save()
-
-      console.log(
-        `💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s, Direction: ${this.callDirection}`,
-      )
-      console.log(
-        `📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`,
-      )
-
-      return savedLog
-    } catch (error) {
-      console.error(`❌ [CALL-LOG] Database save error: ${error.message}`)
-      throw error
-    }
-  }
-
-  // Get call statistics
-  getStats() {
-    return {
-      duration: this.totalDuration,
-      userMessages: this.transcripts.length,
-      aiResponses: this.responses.length,
-      languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
-      startTime: this.callStartTime,
-      callDirection: this.callDirection,
-    }
   }
 }
 
@@ -820,8 +712,8 @@ const findAgentForCall = async (callData) => {
 }
 
 // Main WebSocket server setup with enhanced call logging and outbound support
-const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with inbound/outbound support, call logging and Marathi support")
+const setupEnhancedVoiceServer = (wss) => {
+  console.log("🚀 [ENHANCED] Voice Server started with AI-powered call logging and disconnection handling")
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection")
@@ -841,7 +733,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let optimizedTTS = null
     let currentLanguage = undefined
     let processingRequestId = 0
-    let callLogger = null // Call logger instance
+    let callLogger = null // Enhanced call logger instance
     let callDirection = "inbound" // Default to inbound
     let agentConfig = null // Store agent configuration
 
@@ -849,6 +741,9 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramWs = null
     let deepgramReady = false
     let deepgramAudioQueue = []
+
+    // Connection cleanup handlers
+    let cleanupHandlers = []
 
     // Optimized Deepgram connection
     const connectToDeepgram = async () => {
@@ -892,12 +787,19 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("🔌 [DEEPGRAM] Connection closed")
           deepgramReady = false
         }
+
+        // Add to cleanup handlers
+        cleanupHandlers.push(() => {
+          if (deepgramWs?.readyState === WebSocket.OPEN) {
+            deepgramWs.close()
+          }
+        })
       } catch (error) {
         console.error("❌ [DEEPGRAM] Setup error:", error.message)
       }
     }
 
-    // Handle Deepgram responses with call logging
+    // Handle Deepgram responses with enhanced call logging
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript
@@ -915,7 +817,7 @@ const setupUnifiedVoiceServer = (wss) => {
           if (is_final) {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
-            // Log the final transcript to call logger
+            // Log the final transcript to enhanced call logger
             if (callLogger && transcript.trim()) {
               const detectedLang = await detectLanguageWithOpenAI(transcript.trim())
               callLogger.logUserTranscript(transcript.trim(), detectedLang)
@@ -1018,7 +920,59 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // WebSocket message handling with enhanced inbound/outbound support
+    // Enhanced cleanup function
+    const performCleanup = async (reason = "unknown") => {
+      console.log(`🧹 [CLEANUP] Starting cleanup - Reason: ${reason}`)
+
+      try {
+        // Save call log with AI analysis if possible
+        if (callLogger) {
+          try {
+            if (reason === "emergency" || reason === "disconnect") {
+              await callLogger.emergencySave(API_KEYS.openai)
+            } else {
+              await callLogger.saveToDatabase(API_KEYS.openai)
+            }
+          } catch (saveError) {
+            console.error(`❌ [CLEANUP] Call log save failed: ${saveError.message}`)
+          }
+        }
+
+        // Run all cleanup handlers
+        cleanupHandlers.forEach((handler) => {
+          try {
+            handler()
+          } catch (error) {
+            console.error(`❌ [CLEANUP] Handler error: ${error.message}`)
+          }
+        })
+
+        // Reset state
+        streamSid = null
+        conversationHistory = []
+        isProcessing = false
+        userUtteranceBuffer = ""
+        lastProcessedText = ""
+        deepgramReady = false
+        deepgramAudioQueue = []
+        optimizedTTS = null
+        currentLanguage = undefined
+        processingRequestId = 0
+        if (callLogger) {
+          callLogger.cleanup()
+          callLogger = null
+        }
+        callDirection = "inbound"
+        agentConfig = null
+        cleanupHandlers = []
+
+        console.log(`✅ [CLEANUP] Completed successfully`)
+      } catch (error) {
+        console.error(`❌ [CLEANUP] Error: ${error.message}`)
+      }
+    }
+
+    // WebSocket message handling with enhanced logging
     ws.on("message", async (message) => {
       try {
         const messageStr = message.toString()
@@ -1135,10 +1089,16 @@ const setupUnifiedVoiceServer = (wss) => {
             ws.sessionAgentConfig = agentConfig
             currentLanguage = agentConfig.language || "hi"
 
-            // Initialize call logger with direction
-            callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
+            // Initialize enhanced call logger with additional metadata
+            callLogger = new EnhancedCallLogger(
+              agentConfig.clientId || accountSid,
+              mobile,
+              callDirection,
+              extraData?.campaignId || null,
+              agentConfig._id || null,
+            )
             console.log(
-              `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, direction: ${callDirection}`,
+              `📝 [ENHANCED-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, direction: ${callDirection}`,
             )
 
             await connectToDeepgram()
@@ -1171,26 +1131,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
           case "stop":
             console.log(`📞 [ENHANCED] Stream stopped - Direction: ${callDirection}`)
-
-            // Save call log to database before closing
-            if (callLogger) {
-              try {
-                const savedLog = await callLogger.saveToDatabase("medium") // Default lead status
-                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
-
-                // Print call statistics
-                const stats = callLogger.getStats()
-                console.log(
-                  `📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(", ")}, Direction: ${stats.callDirection}`,
-                )
-              } catch (error) {
-                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`)
-              }
-            }
-
-            if (deepgramWs?.readyState === WebSocket.OPEN) {
-              deepgramWs.close()
-            }
+            await performCleanup("normal_stop")
             break
 
           default:
@@ -1201,44 +1142,28 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     })
 
-    // Enhanced connection cleanup with call logging
-    ws.on("close", async () => {
-      console.log(`🔗 [ENHANCED] Connection closed - Direction: ${callDirection}`)
-
-      // Save call log before cleanup if not already saved
-      if (callLogger) {
-        try {
-          const savedLog = await callLogger.saveToDatabase("not_connected") // Status for unexpected disconnection
-          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
-        } catch (error) {
-          console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`)
-        }
-      }
-
-      if (deepgramWs?.readyState === WebSocket.OPEN) {
-        deepgramWs.close()
-      }
-
-      // Reset state
-      streamSid = null
-      conversationHistory = []
-      isProcessing = false
-      userUtteranceBuffer = ""
-      lastProcessedText = ""
-      deepgramReady = false
-      deepgramAudioQueue = []
-      optimizedTTS = null
-      currentLanguage = undefined
-      processingRequestId = 0
-      callLogger = null
-      callDirection = "inbound"
-      agentConfig = null
+    // Enhanced connection cleanup with emergency save
+    ws.on("close", async (code, reason) => {
+      console.log(`🔗 [ENHANCED] Connection closed - Code: ${code}, Reason: ${reason}, Direction: ${callDirection}`)
+      await performCleanup("disconnect")
     })
 
-    ws.on("error", (error) => {
+    ws.on("error", async (error) => {
       console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`)
+      await performCleanup("error")
     })
+
+    // Handle process termination signals for graceful shutdown
+    const handleProcessExit = async (signal) => {
+      console.log(`🛑 [PROCESS] Received ${signal}, performing emergency cleanup`)
+      await performCleanup("emergency")
+    }
+
+    process.on("SIGTERM", handleProcessExit)
+    process.on("SIGINT", handleProcessExit)
+    process.on("uncaughtException", handleProcessExit)
+    process.on("unhandledRejection", handleProcessExit)
   })
 }
 
-module.exports = { setupUnifiedVoiceServer }
+module.exports = { setupEnhancedVoiceServer }
