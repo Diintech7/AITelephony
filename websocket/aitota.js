@@ -284,30 +284,28 @@ const processWithOpenAIStreaming = async (
   onComplete,
   onInterrupt,
   callLogger,
+  agentConfig, // Add agent config parameter
 ) => {
   const timer = createTimer("OPENAI_STREAMING")
 
   try {
-    // Enhanced system prompt with Marathi support
-    const getSystemPrompt = (lang) => {
-      const prompts = {
-        hi: "आप एआई तोता हैं, एक विनम्र और भावनात्मक रूप से बुद्धिमान AI ग्राहक सेवा कार्यकारी। आप हिंदी में धाराप्रवाह बोलते हैं। प्राकृतिक, बातचीत की भाषा का प्रयोग करें जो गर्मजोशी और सहानुभूति से भरी हो। जवाब छोटे रखें—केवल 1-2 लाइन। ग्राहकों को सुना, समर्थित और मूल्यवान महसूस कराना आपका लक्ष्य है।",
+    // Use system prompt from database (limited to 150 bytes)
+    let systemPrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
 
-        en: "You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. Your goal is to make customers feel heard, supported, and valued.",
-
-        bn: "আপনি আইতোতা, একজন ভদ্র এবং আবেগপ্রবণভাবে বুদ্ধিমান AI গ্রাহক সেবা কর্মকর্তা। আপনি বাংলায় সাবলীলভাবে কথা বলেন। উষ্ণতা এবং সহানুভূতি সহ প্রাকৃতিক, কথোপকথনমূলক ভাষা ব্যবহার করুন।",
-
-        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
-
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரళமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
-
-        mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
+    // Truncate system prompt to 150 bytes if it exceeds the limit
+    if (Buffer.byteLength(systemPrompt, "utf8") > 150) {
+      // Truncate to 150 bytes while preserving UTF-8 encoding
+      let truncated = systemPrompt
+      while (Buffer.byteLength(truncated, "utf8") > 150) {
+        truncated = truncated.slice(0, -1)
       }
-
-      return prompts[lang] || prompts.en
+      systemPrompt = truncated
+      console.log(`⚠️ [SYSTEM-PROMPT] Truncated to 150 bytes: "${systemPrompt}"`)
     }
 
-    const systemPrompt = getSystemPrompt(detectedLanguage)
+    console.log(
+      `📝 [SYSTEM-PROMPT] Using from DB (${Buffer.byteLength(systemPrompt, "utf8")} bytes): "${systemPrompt}"`,
+    )
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -845,6 +843,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let processingRequestId = 0
     let callLogger = null // Call logger instance
     let callDirection = "inbound" // Default to inbound
+    let agentConfig = null // Store agent configuration
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -974,7 +973,7 @@ const setupUnifiedVoiceServer = (wss) => {
           return processingRequestId !== currentRequestId
         }
 
-        // Step 4: Process with OpenAI streaming
+        // Step 4: Process with OpenAI streaming (pass agentConfig)
         const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
@@ -1006,6 +1005,7 @@ const setupUnifiedVoiceServer = (wss) => {
           },
           checkInterruption,
           callLogger, // Pass call logger to OpenAI processing
+          agentConfig, // Pass agent config for system prompt
         )
 
         console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`)
@@ -1103,7 +1103,6 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
 
             // Find appropriate agent based on call direction
-            let agentConfig = null
             try {
               agentConfig = await findAgentForCall({
                 accountSid,
@@ -1233,6 +1232,7 @@ const setupUnifiedVoiceServer = (wss) => {
       processingRequestId = 0
       callLogger = null
       callDirection = "inbound"
+      agentConfig = null
     })
 
     ws.on("error", (error) => {
