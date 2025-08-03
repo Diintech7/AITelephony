@@ -712,7 +712,7 @@ const findAgentForCall = async (callData) => {
 }
 
 // Main WebSocket server setup with enhanced call logging and outbound support
-const setupEnhancedVoiceServer = (wss) => {
+const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 [ENHANCED] Voice Server started with AI-powered call logging and disconnection handling")
 
   wss.on("connection", (ws, req) => {
@@ -1166,4 +1166,4 @@ const setupEnhancedVoiceServer = (wss) => {
   })
 }
 
-module.exports = { setupEnhancedVoiceServer }
+module.exports = { setupUnifiedVoiceServer }
