@@ -683,7 +683,7 @@ class OptimizedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(10 * BYTES_PER_MS)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
 
     console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes to StreamSid: ${this.streamSid}`)
 
