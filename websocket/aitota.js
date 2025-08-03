@@ -29,14 +29,14 @@ const createTimer = (label) => {
   }
 }
 
-// Enhanced language mappings with Marathi support
+// Enhanced language mappings with comprehensive language support
 const LANGUAGE_MAPPING = {
   hi: "hi-IN",
   en: "en-IN",
   bn: "bn-IN",
   te: "te-IN",
   ta: "ta-IN",
-  mr: "mr-IN", // Marathi added
+  mr: "mr-IN",
   gu: "gu-IN",
   kn: "kn-IN",
   ml: "ml-IN",
@@ -46,17 +46,48 @@ const LANGUAGE_MAPPING = {
   ur: "ur-IN",
 }
 
+// Deepgram language mapping for multi-language support
+const DEEPGRAM_LANGUAGE_MAPPING = {
+  hi: "hi",
+  en: "en-IN",
+  bn: "bn",
+  te: "te",
+  ta: "ta",
+  mr: "mr",
+  gu: "gu",
+  kn: "kn",
+  ml: "ml",
+  pa: "pa",
+  or: "or",
+  as: "as",
+  ur: "ur",
+  // Add more languages as needed
+  "zh": "zh-CN",
+  "ja": "ja",
+  "ko": "ko",
+  "fr": "fr",
+  "de": "de",
+  "es": "es",
+  "it": "it",
+  "pt": "pt",
+  "ru": "ru",
+  "ar": "ar",
+}
+
 const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang
   return LANGUAGE_MAPPING[lang] || "hi-IN"
 }
 
-const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
-  if (lang === "hi") return "hi"
-  if (lang === "en") return "en-IN"
-  if (lang === "mr") return "mr" // Marathi support for Deepgram
-  return lang
+// Updated function to get Deepgram language - now supports all languages
+const getDeepgramLanguage = (detectedLang, supportAllLanguages = true) => {
+  if (supportAllLanguages) {
+    // Use multi-language model that can detect and transcribe multiple languages
+    return "multi" // Deepgram's multi-language model
+  }
+  
+  const lang = detectedLang?.toLowerCase()
+  return DEEPGRAM_LANGUAGE_MAPPING[lang] || "en-IN"
 }
 
 // Valid Sarvam voice options
@@ -109,7 +140,7 @@ const decodeExtraData = (extraBase64) => {
   }
 }
 
-// Enhanced language detection with Marathi support
+// Enhanced language detection with comprehensive language support
 const detectLanguageWithOpenAI = async (text) => {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -123,17 +154,22 @@ const detectLanguageWithOpenAI = async (text) => {
         messages: [
           {
             role: "system",
-            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code (hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur). 
+            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code from the following supported languages:
+            
+            Indian Languages: hi (Hindi), en (English), bn (Bengali), te (Telugu), ta (Tamil), mr (Marathi), gu (Gujarati), kn (Kannada), ml (Malayalam), pa (Punjabi), or (Odia), as (Assamese), ur (Urdu)
+            
+            International Languages: zh (Chinese), ja (Japanese), ko (Korean), fr (French), de (German), es (Spanish), it (Italian), pt (Portuguese), ru (Russian), ar (Arabic)
 
-Examples:
-- "Hello, how are you?" → en
-- "नमस्ते, आप कैसे हैं?" → hi
-- "আপনি কেমন আছেন?" → bn
-- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
-- "तुम्ही कसे आहात?" → mr
-- "તમે કેમ છો?" → gu
+            Examples:
+            - "Hello, how are you?" → en
+            - "नमस्ते, आप कैसे हैं?" → hi
+            - "আপনি কেমন আছেন?" → bn
+            - "தமிழ் நன்றாக பேசுகிறீர்களா?" → ta
+            - "तुम्ही कसे आहात?" → mr
+            - "你好吗?" → zh
+            - "Comment allez-vous?" → fr
 
-Return only the language code, nothing else.`,
+            Return only the language code, nothing else.`,
           },
           {
             role: "user",
@@ -152,8 +188,8 @@ Return only the language code, nothing else.`,
     const data = await response.json()
     const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
 
-    // Validate detected language
-    const validLanguages = Object.keys(LANGUAGE_MAPPING)
+    // Validate detected language against all supported languages
+    const validLanguages = [...Object.keys(LANGUAGE_MAPPING), ...Object.keys(DEEPGRAM_LANGUAGE_MAPPING)]
     if (validLanguages.includes(detectedLang)) {
       console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`)
       return detectedLang
@@ -275,7 +311,7 @@ class CallLogger {
   }
 }
 
-// Optimized OpenAI streaming with phrase-based chunking and language detection
+// Updated OpenAI streaming with database system prompt
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -284,30 +320,36 @@ const processWithOpenAIStreaming = async (
   onComplete,
   onInterrupt,
   callLogger,
+  agentConfig, // Add agent config parameter
 ) => {
   const timer = createTimer("OPENAI_STREAMING")
 
   try {
-    // Enhanced system prompt with Marathi support
-    const getSystemPrompt = (lang) => {
-      const prompts = {
+    // Use system prompt from database (agentConfig.systemPrompt)
+    let systemPrompt = agentConfig?.systemPrompt
+
+    // Fallback to default prompts if no system prompt in database
+    if (!systemPrompt) {
+      console.log(`⚠️ [SYSTEM-PROMPT] No system prompt found in DB, using fallback for language: ${detectedLanguage}`)
+      
+      const defaultPrompts = {
         hi: "आप एआई तोता हैं, एक विनम्र और भावनात्मक रूप से बुद्धिमान AI ग्राहक सेवा कार्यकारी। आप हिंदी में धाराप्रवाह बोलते हैं। प्राकृतिक, बातचीत की भाषा का प्रयोग करें जो गर्मजोशी और सहानुभूति से भरी हो। जवाब छोटे रखें—केवल 1-2 लाइन। ग्राहकों को सुना, समर्थित और मूल्यवान महसूस कराना आपका लक्ष्य है।",
 
         en: "You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. Your goal is to make customers feel heard, supported, and valued.",
 
         bn: "আপনি আইতোতা, একজন ভদ্র এবং আবেগপ্রবণভাবে বুদ্ধিমান AI গ্রাহক সেবা কর্মকর্তা। আপনি বাংলায় সাবলীলভাবে কথা বলেন। উষ্ণতা এবং সহানুভূতি সহ প্রাকৃতিক, কথোপকথনমূলক ভাষা ব্যবহার করুন।",
 
-        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
+        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద্వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
 
-        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரళமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
+        ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
 
         mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
       }
 
-      return prompts[lang] || prompts.en
+      systemPrompt = defaultPrompts[detectedLanguage] || defaultPrompts.en
+    } else {
+      console.log(`✅ [SYSTEM-PROMPT] Using system prompt from database for agent: ${agentConfig.agentName}`)
     }
-
-    const systemPrompt = getSystemPrompt(detectedLanguage)
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -823,7 +865,7 @@ const findAgentForCall = async (callData) => {
 
 // Main WebSocket server setup with enhanced call logging and outbound support
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with inbound/outbound support, call logging and Marathi support")
+  console.log("🚀 [ENHANCED] Voice Server started with multi-language Deepgram, DB system prompts, and comprehensive language support")
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection")
@@ -845,27 +887,43 @@ const setupUnifiedVoiceServer = (wss) => {
     let processingRequestId = 0
     let callLogger = null // Call logger instance
     let callDirection = "inbound" // Default to inbound
+    let agentConfig = null // Store agent configuration
 
     // Deepgram WebSocket connection
     let deepgramWs = null
     let deepgramReady = false
     let deepgramAudioQueue = []
 
-    // Optimized Deepgram connection
-    const connectToDeepgram = async () => {
+    // Updated Deepgram connection with multi-language support
+    const connectToDeepgram = async (supportAllLanguages = true) => {
       try {
-        console.log("🔌 [DEEPGRAM] Connecting...")
-        const deepgramLanguage = getDeepgramLanguage(currentLanguage)
-
+        console.log("🔌 [DEEPGRAM] Connecting with multi-language support...")
+        
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
         deepgramUrl.searchParams.append("sample_rate", "8000")
         deepgramUrl.searchParams.append("channels", "1")
         deepgramUrl.searchParams.append("encoding", "linear16")
         deepgramUrl.searchParams.append("model", "nova-2")
-        deepgramUrl.searchParams.append("language", deepgramLanguage)
+        
+        // Configure language support
+        if (supportAllLanguages) {
+          // Use multi-language detection - Deepgram will auto-detect languages
+          deepgramUrl.searchParams.append("detect_language", "true")
+          deepgramUrl.searchParams.append("language", "multi") // Multi-language model
+          console.log("🌍 [DEEPGRAM] Configured for multi-language auto-detection")
+        } else {
+          // Use specific language if provided
+          const deepgramLanguage = getDeepgramLanguage(currentLanguage, false)
+          deepgramUrl.searchParams.append("language", deepgramLanguage)
+          console.log(`🌍 [DEEPGRAM] Configured for specific language: ${deepgramLanguage}`)
+        }
+        
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
         deepgramUrl.searchParams.append("endpointing", "300")
+        deepgramUrl.searchParams.append("punctuate", "true")
+        deepgramUrl.searchParams.append("profanity_filter", "false")
+        deepgramUrl.searchParams.append("redact", "false")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -873,7 +931,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         deepgramWs.onopen = () => {
           deepgramReady = true
-          console.log("✅ [DEEPGRAM] Connected")
+          console.log("✅ [DEEPGRAM] Connected with multi-language support")
 
           deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
           deepgramAudioQueue = []
@@ -898,13 +956,21 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Handle Deepgram responses with call logging
+    // Enhanced Deepgram response handler with language detection
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
+        const confidence = data.channel?.alternatives?.[0]?.confidence
+        
+        // Extract detected language from Deepgram response if available
+        const detectedLanguage = data.channel?.detected_language || 
+                                data.channel?.alternatives?.[0]?.language ||
+                                currentLanguage
 
         if (transcript?.trim()) {
+          console.log(`🎤 [DEEPGRAM] Transcript: "${transcript}" (confidence: ${confidence}, language: ${detectedLanguage})`)
+          
           // Interrupt current TTS if new speech detected
           if (optimizedTTS && (isProcessing || optimizedTTS.isProcessing)) {
             console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`)
@@ -916,32 +982,36 @@ const setupUnifiedVoiceServer = (wss) => {
           if (is_final) {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
+            // Use OpenAI for more accurate language detection on final transcript
+            const finalDetectedLang = await detectLanguageWithOpenAI(transcript.trim())
+            
             // Log the final transcript to call logger
             if (callLogger && transcript.trim()) {
-              const detectedLang = await detectLanguageWithOpenAI(transcript.trim())
-              callLogger.logUserTranscript(transcript.trim(), detectedLang)
+              callLogger.logUserTranscript(transcript.trim(), finalDetectedLang)
             }
 
-            await processUserUtterance(userUtteranceBuffer)
+            await processUserUtterance(userUtteranceBuffer, finalDetectedLang)
             userUtteranceBuffer = ""
           }
         }
       } else if (data.type === "UtteranceEnd") {
         if (userUtteranceBuffer.trim()) {
+          // Use OpenAI for final language detection
+          const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim())
+          
           // Log the utterance end transcript
           if (callLogger && userUtteranceBuffer.trim()) {
-            const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim())
             callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
           }
 
-          await processUserUtterance(userUtteranceBuffer)
+          await processUserUtterance(userUtteranceBuffer, detectedLang)
           userUtteranceBuffer = ""
         }
       }
     }
 
-    // Enhanced utterance processing with call logging
-    const processUserUtterance = async (text) => {
+    // Enhanced utterance processing with database system prompt
+    const processUserUtterance = async (text, detectedLanguage = null) => {
       if (!text.trim() || text === lastProcessedText) return
 
       // Interrupt any ongoing processing
@@ -957,28 +1027,28 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`)
 
-        // Step 1: Detect language using OpenAI
-        const detectedLanguage = await detectLanguageWithOpenAI(text)
+        // Step 1: Use detected language or detect with OpenAI as fallback
+        const finalDetectedLanguage = detectedLanguage || await detectLanguageWithOpenAI(text)
 
         // Step 2: Update current language and initialize TTS processor
-        if (detectedLanguage !== currentLanguage) {
-          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage}`)
-          currentLanguage = detectedLanguage
+        if (finalDetectedLanguage !== currentLanguage) {
+          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${finalDetectedLanguage}`)
+          currentLanguage = finalDetectedLanguage
         }
 
         // Create new TTS processor with detected language
-        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+        optimizedTTS = new OptimizedSarvamTTSProcessor(finalDetectedLanguage, ws, streamSid, callLogger)
 
         // Step 3: Check for interruption function
         const checkInterruption = () => {
           return processingRequestId !== currentRequestId
         }
 
-        // Step 4: Process with OpenAI streaming
+        // Step 4: Process with OpenAI streaming (now with agent config)
         const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
-          detectedLanguage,
+          finalDetectedLanguage,
           (phrase, lang) => {
             // Handle phrase chunks - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
@@ -1005,7 +1075,8 @@ const setupUnifiedVoiceServer = (wss) => {
             }
           },
           checkInterruption,
-          callLogger, // Pass call logger to OpenAI processing
+          callLogger,
+          agentConfig // Pass agent configuration for system prompt
         )
 
         console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`)
@@ -1018,7 +1089,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // WebSocket message handling with enhanced inbound/outbound support
+    // WebSocket message handling with enhanced multi-language support
     ws.on("message", async (message) => {
       try {
         const messageStr = message.toString()
@@ -1103,7 +1174,6 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
 
             // Find appropriate agent based on call direction
-            let agentConfig = null
             try {
               agentConfig = await findAgentForCall({
                 accountSid,
@@ -1121,6 +1191,10 @@ const setupUnifiedVoiceServer = (wss) => {
                 ws.close()
                 return
               }
+
+              console.log(`✅ [AGENT-CONFIG] Loaded agent: ${agentConfig.agentName}`)
+              console.log(`📋 [SYSTEM-PROMPT] ${agentConfig.systemPrompt ? 'Using custom system prompt from DB' : 'No custom system prompt, will use default'}`)
+              
             } catch (err) {
               console.error(`❌ [AGENT-LOOKUP] ${err.message}`)
               ws.send(
@@ -1142,7 +1216,8 @@ const setupUnifiedVoiceServer = (wss) => {
               `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, direction: ${callDirection}`,
             )
 
-            await connectToDeepgram()
+            // Connect to Deepgram with multi-language support
+            await connectToDeepgram(true) // Enable multi-language support
 
             // Use agent's firstMessage for greeting and log it
             const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
@@ -1233,6 +1308,7 @@ const setupUnifiedVoiceServer = (wss) => {
       processingRequestId = 0
       callLogger = null
       callDirection = "inbound"
+      agentConfig = null
     })
 
     ws.on("error", (error) => {
