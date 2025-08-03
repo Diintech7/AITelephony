@@ -3,7 +3,7 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
-const { detectLeadStatusFromTranscript } = require("./scripts/lead-status-detector")
+const { detectLeadStatusFromTranscript } = require("../scripts/lead-status-detector")
 
 // Enhanced CallLogger class with automatic lead status detection
 class EnhancedCallLogger {
