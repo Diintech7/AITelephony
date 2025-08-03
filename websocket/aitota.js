@@ -3,7 +3,6 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
-const { EnhancedCallLogger, enhancedWebSocketCloseHandler } = require("./enhanced-websocket-handler")
 
 // Load API keys from environment variables
 const API_KEYS = {
@@ -826,7 +825,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 [CONNECTION] New enhanced WebSocket connection")
-    
 
     // Parse URL parameters for call direction detection
     const url = new URL(req.url, `http://${req.headers.host}`)
@@ -846,7 +844,6 @@ const setupUnifiedVoiceServer = (wss) => {
     let callLogger = null // Call logger instance
     let callDirection = "inbound" // Default to inbound
     let agentConfig = null // Store agent configuration
-    let mobile = null
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -1138,8 +1135,6 @@ const setupUnifiedVoiceServer = (wss) => {
             ws.sessionAgentConfig = agentConfig
             currentLanguage = agentConfig.language || "hi"
 
-            mobile = data.start?.mobile
-
             // Initialize call logger with direction
             callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
             console.log(
@@ -1196,7 +1191,6 @@ const setupUnifiedVoiceServer = (wss) => {
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close()
             }
-            await enhancedWebSocketCloseHandler(ws, callLogger, callDirection)
             break
 
           default:
@@ -1209,7 +1203,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
     // Enhanced connection cleanup with call logging
     ws.on("close", async () => {
-      await enhancedWebSocketCloseHandler(ws, callLogger, callDirection)
       console.log(`🔗 [ENHANCED] Connection closed - Direction: ${callDirection}`)
 
       // Save call log before cleanup if not already saved
@@ -1242,12 +1235,8 @@ const setupUnifiedVoiceServer = (wss) => {
       agentConfig = null
     })
 
-    ws.on("error", async(error) => {
-      
+    ws.on("error", (error) => {
       console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`)
-      if (callLogger) {
-        await enhancedWebSocketCloseHandler(ws, callLogger, callDirection)
-      }
     })
   })
 }
