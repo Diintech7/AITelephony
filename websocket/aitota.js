@@ -1,103 +1,72 @@
-const WebSocket = require("ws")
-require("dotenv").config()
-const mongoose = require("mongoose")
-const Agent = require("../models/Agent")
-const CallLog = require("../models/CallLog")
+const WebSocket = require("ws");
+require("dotenv").config();
+const mongoose = require('mongoose');
+const Agent = require('../models/Agent');
+const CallLog = require('../models/CallLog');
 
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
   sarvam: process.env.SARVAM_API_KEY,
   openai: process.env.OPENAI_API_KEY,
-}
+};
 
 // Validate API keys
 if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
-  console.error("❌ Missing required API keys in environment variables")
-  process.exit(1)
+  console.error("❌ Missing required API keys in environment variables");
+  process.exit(1);
 }
 
-const fetch = globalThis.fetch || require("node-fetch")
+const fetch = globalThis.fetch || require("node-fetch");
 
 // Performance timing helper
 const createTimer = (label) => {
-  const start = Date.now()
+  const start = Date.now();
   return {
     start,
     end: () => Date.now() - start,
     checkpoint: (checkpointName) => Date.now() - start,
-  }
-}
+  };
+};
 
-// Enhanced language mappings with comprehensive language support
+// Enhanced language mappings with Marathi support
 const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
-  en: "en-IN",
-  bn: "bn-IN",
-  te: "te-IN",
+  hi: "hi-IN", 
+  en: "en-IN", 
+  bn: "bn-IN", 
+  te: "te-IN", 
   ta: "ta-IN",
-  mr: "mr-IN",
-  gu: "gu-IN",
-  kn: "kn-IN",
-  ml: "ml-IN",
+  mr: "mr-IN", // Marathi added
+  gu: "gu-IN", 
+  kn: "kn-IN", 
+  ml: "ml-IN", 
   pa: "pa-IN",
-  or: "or-IN",
-  as: "as-IN",
+  or: "or-IN", 
+  as: "as-IN", 
   ur: "ur-IN",
-}
-
-// Deepgram language mapping for multi-language support
-const DEEPGRAM_LANGUAGE_MAPPING = {
-  hi: "hi",
-  en: "en-IN",
-  bn: "bn",
-  te: "te",
-  ta: "ta",
-  mr: "mr",
-  gu: "gu",
-  kn: "kn",
-  ml: "ml",
-  pa: "pa",
-  or: "or",
-  as: "as",
-  ur: "ur",
-  // Add more languages as needed
-  "zh": "zh-CN",
-  "ja": "ja",
-  "ko": "ko",
-  "fr": "fr",
-  "de": "de",
-  "es": "es",
-  "it": "it",
-  "pt": "pt",
-  "ru": "ru",
-  "ar": "ar",
-}
+};
 
 const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
-  return LANGUAGE_MAPPING[lang] || "hi-IN"
-}
+  const lang = detectedLang?.toLowerCase() || defaultLang;
+  return LANGUAGE_MAPPING[lang] || "hi-IN";
+};
 
-// Updated function to get Deepgram language - now supports all languages
-const getDeepgramLanguage = (detectedLang, supportAllLanguages = true) => {
-  if (supportAllLanguages) {
-    // Use multi-language model that can detect and transcribe multiple languages
-    return "multi" // Deepgram's multi-language model
-  }
-  
-  const lang = detectedLang?.toLowerCase()
-  return DEEPGRAM_LANGUAGE_MAPPING[lang] || "en-IN"
-}
+const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang;
+  if (lang === "hi") return "hi";
+  if (lang === "en") return "en-IN";
+  if (lang === "mr") return "mr"; // Marathi support for Deepgram
+  return lang;
+};
 
 // Valid Sarvam voice options
-const VALID_SARVAM_VOICES = ["meera", "pavithra", "arvind", "amol", "maya"]
+const VALID_SARVAM_VOICES = ["meera", "pavithra", "arvind", "amol", "maya"];
 
 const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
-    return voiceSelection
+    return voiceSelection;
   }
-
+  
   const voiceMapping = {
     "male-professional": "arvind",
     "female-professional": "pavithra",
@@ -105,42 +74,12 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
     "female-friendly": "maya",
     neutral: "pavithra",
     default: "pavithra",
-  }
+  };
+  
+  return voiceMapping[voiceSelection] || "pavithra";
+};
 
-  return voiceMapping[voiceSelection] || "pavithra"
-}
-
-// Utility function to decode base64 extra data
-const decodeExtraData = (extraBase64) => {
-  try {
-    if (!extraBase64) return null
-
-    // Decode base64
-    const decodedString = Buffer.from(extraBase64, "base64").toString("utf-8")
-    console.log(`🔍 [DECODE] Raw decoded string: ${decodedString}`)
-
-    // Fix common JSON formatting issues
-    const fixedString = decodedString
-      .replace(/="([^"]*?)"/g, ':"$1"') // Replace = with : in key-value pairs
-      .replace(/=([^",}\s]+)/g, ':"$1"') // Handle unquoted values after =
-      .replace(/,\s*}/g, "}") // Remove trailing commas
-      .replace(/,\s*]/g, "]") // Remove trailing commas in arrays
-
-    console.log(`🔧 [DECODE] Fixed JSON string: ${fixedString}`)
-
-    // Parse JSON
-    const parsedData = JSON.parse(fixedString)
-    console.log(`✅ [DECODE] Parsed extra data:`, parsedData)
-
-    return parsedData
-  } catch (error) {
-    console.error(`❌ [DECODE] Failed to decode extra data: ${error.message}`)
-    console.error(`❌ [DECODE] Original string: ${extraBase64}`)
-    return null
-  }
-}
-
-// Enhanced language detection with comprehensive language support
+// Enhanced language detection with Marathi support
 const detectLanguageWithOpenAI = async (text) => {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -154,115 +93,107 @@ const detectLanguageWithOpenAI = async (text) => {
         messages: [
           {
             role: "system",
-            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code from the following supported languages:
-            
-            Indian Languages: hi (Hindi), en (English), bn (Bengali), te (Telugu), ta (Tamil), mr (Marathi), gu (Gujarati), kn (Kannada), ml (Malayalam), pa (Punjabi), or (Odia), as (Assamese), ur (Urdu)
-            
-            International Languages: zh (Chinese), ja (Japanese), ko (Korean), fr (French), de (German), es (Spanish), it (Italian), pt (Portuguese), ru (Russian), ar (Arabic)
+            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code (hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur). 
 
-            Examples:
-            - "Hello, how are you?" → en
-            - "नमस्ते, आप कैसे हैं?" → hi
-            - "আপনি কেমন আছেন?" → bn
-            - "தமிழ் நன்றாக பேசுகிறீர்களா?" → ta
-            - "तुम्ही कसे आहात?" → mr
-            - "你好吗?" → zh
-            - "Comment allez-vous?" → fr
+Examples:
+- "Hello, how are you?" → en
+- "नमस्ते, आप कैसे हैं?" → hi
+- "আপনি কেমন আছেন?" → bn
+- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
+- "तुम्ही कसे आहात?" → mr
+- "તમે કેમ છો?" → gu
 
-            Return only the language code, nothing else.`,
+Return only the language code, nothing else.`
           },
           {
             role: "user",
-            content: text,
-          },
+            content: text
+          }
         ],
         max_tokens: 10,
         temperature: 0.1,
       }),
-    })
+    });
 
     if (!response.ok) {
-      throw new Error(`Language detection failed: ${response.status}`)
+      throw new Error(`Language detection failed: ${response.status}`);
     }
 
-    const data = await response.json()
-    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
-
-    // Validate detected language against all supported languages
-    const validLanguages = [...Object.keys(LANGUAGE_MAPPING), ...Object.keys(DEEPGRAM_LANGUAGE_MAPPING)]
+    const data = await response.json();
+    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase();
+    
+    // Validate detected language
+    const validLanguages = Object.keys(LANGUAGE_MAPPING);
     if (validLanguages.includes(detectedLang)) {
-      console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`)
-      return detectedLang
+      console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`);
+      return detectedLang;
     }
-
-    console.log(`⚠️ [LANG-DETECT] Invalid language "${detectedLang}", defaulting to "hi"`)
-    return "hi" // Default fallback
+    
+    console.log(`⚠️ [LANG-DETECT] Invalid language "${detectedLang}", defaulting to "hi"`);
+    return "hi"; // Default fallback
+    
   } catch (error) {
-    console.error(`❌ [LANG-DETECT] Error: ${error.message}`)
-    return "hi" // Default fallback
+    console.error(`❌ [LANG-DETECT] Error: ${error.message}`);
+    return "hi"; // Default fallback
   }
-}
+};
 
 // Call logging utility class
 class CallLogger {
-  constructor(clientId, mobile = null, callDirection = "inbound") {
-    this.clientId = clientId
-    this.mobile = mobile
-    this.callDirection = callDirection
-    this.callStartTime = new Date()
-    this.transcripts = []
-    this.responses = []
-    this.totalDuration = 0
+  constructor(clientId, mobile = null) {
+    this.clientId = clientId;
+    this.mobile = mobile;
+    this.callStartTime = new Date();
+    this.transcripts = [];
+    this.responses = [];
+    this.totalDuration = 0;
   }
 
   // Log user transcript from Deepgram
   logUserTranscript(transcript, language, timestamp = new Date()) {
     const entry = {
-      type: "user",
+      type: 'user',
       text: transcript,
       language: language,
       timestamp: timestamp,
-      source: "deepgram",
-    }
-
-    this.transcripts.push(entry)
-    console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`)
+      source: 'deepgram'
+    };
+    
+    this.transcripts.push(entry);
+    console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`);
   }
 
   // Log AI response from Sarvam
   logAIResponse(response, language, timestamp = new Date()) {
     const entry = {
-      type: "ai",
+      type: 'ai',
       text: response,
       language: language,
       timestamp: timestamp,
-      source: "sarvam",
-    }
-
-    this.responses.push(entry)
-    console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`)
+      source: 'sarvam'
+    };
+    
+    this.responses.push(entry);
+    console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`);
   }
 
   // Generate full transcript combining user and AI messages
   generateFullTranscript() {
-    const allEntries = [...this.transcripts, ...this.responses].sort(
-      (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
-    )
-
-    return allEntries
-      .map((entry) => {
-        const speaker = entry.type === "user" ? "User" : "AI"
-        const time = entry.timestamp.toISOString()
-        return `[${time}] ${speaker} (${entry.language}): ${entry.text}`
-      })
-      .join("\n")
+    const allEntries = [...this.transcripts, ...this.responses]
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    return allEntries.map(entry => {
+      const speaker = entry.type === 'user' ? 'User' : 'AI';
+      const time = entry.timestamp.toISOString();
+      return `[${time}] ${speaker} (${entry.language}): ${entry.text}`;
+    }).join('\n');
   }
 
   // Save call log to database
-  async saveToDatabase(leadStatus = "medium") {
+  async saveToDatabase(leadStatus = 'medium') {
     try {
-      const callEndTime = new Date()
-      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000) // Duration in seconds
+      const callEndTime = new Date();
+      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000); // Duration in seconds
 
       const callLogData = {
         clientId: this.clientId,
@@ -275,26 +206,21 @@ class CallLogger {
         metadata: {
           userTranscriptCount: this.transcripts.length,
           aiResponseCount: this.responses.length,
-          languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
-          callEndTime: callEndTime,
-          callDirection: this.callDirection,
-        },
-      }
+          languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
+          callEndTime: callEndTime
+        }
+      };
 
-      const callLog = new CallLog(callLogData)
-      const savedLog = await callLog.save()
-
-      console.log(
-        `💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s, Direction: ${this.callDirection}`,
-      )
-      console.log(
-        `📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`,
-      )
-
-      return savedLog
+      const callLog = new CallLog(callLogData);
+      const savedLog = await callLog.save();
+      
+      console.log(`💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s`);
+      console.log(`📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`);
+      
+      return savedLog;
     } catch (error) {
-      console.error(`❌ [CALL-LOG] Database save error: ${error.message}`)
-      throw error
+      console.error(`❌ [CALL-LOG] Database save error: ${error.message}`);
+      throw error;
     }
   }
 
@@ -304,58 +230,43 @@ class CallLogger {
       duration: this.totalDuration,
       userMessages: this.transcripts.length,
       aiResponses: this.responses.length,
-      languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
-      startTime: this.callStartTime,
-      callDirection: this.callDirection,
-    }
+      languages: [...new Set([...this.transcripts, ...this.responses].map(entry => entry.language))],
+      startTime: this.callStartTime
+    };
   }
 }
 
-// Updated OpenAI streaming with database system prompt
-const processWithOpenAIStreaming = async (
-  userMessage,
-  conversationHistory,
-  detectedLanguage,
-  onPhrase,
-  onComplete,
-  onInterrupt,
-  callLogger,
-  agentConfig, // Add agent config parameter
-) => {
-  const timer = createTimer("OPENAI_STREAMING")
-
+// Optimized OpenAI streaming with phrase-based chunking and language detection
+const processWithOpenAIStreaming = async (userMessage, conversationHistory, detectedLanguage, onPhrase, onComplete, onInterrupt, callLogger) => {
+  const timer = createTimer("OPENAI_STREAMING");
+  
   try {
-    // Use system prompt from database (agentConfig.systemPrompt)
-    let systemPrompt = agentConfig?.systemPrompt
-
-    // Fallback to default prompts if no system prompt in database
-    if (!systemPrompt) {
-      console.log(`⚠️ [SYSTEM-PROMPT] No system prompt found in DB, using fallback for language: ${detectedLanguage}`)
-      
-      const defaultPrompts = {
+    // Enhanced system prompt with Marathi support
+    const getSystemPrompt = (lang) => {
+      const prompts = {
         hi: "आप एआई तोता हैं, एक विनम्र और भावनात्मक रूप से बुद्धिमान AI ग्राहक सेवा कार्यकारी। आप हिंदी में धाराप्रवाह बोलते हैं। प्राकृतिक, बातचीत की भाषा का प्रयोग करें जो गर्मजोशी और सहानुभूति से भरी हो। जवाब छोटे रखें—केवल 1-2 लाइन। ग्राहकों को सुना, समर्थित और मूल्यवान महसूस कराना आपका लक्ष्य है।",
-
+        
         en: "You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. Your goal is to make customers feel heard, supported, and valued.",
-
+        
         bn: "আপনি আইতোতা, একজন ভদ্র এবং আবেগপ্রবণভাবে বুদ্ধিমান AI গ্রাহক সেবা কর্মকর্তা। আপনি বাংলায় সাবলীলভাবে কথা বলেন। উষ্ণতা এবং সহানুভূতি সহ প্রাকৃতিক, কথোপকথনমূলক ভাষা ব্যবহার করুন।",
-
-        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద্వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
-
+        
+        te: "మీరు ఐతోతా, మర్యాదపూర్వక, భావోద్వేగంతో తెలివైన AI కస్టమర్ కేర్ ఎగ్జిక్యూటివ్. మీరు తెలుగులో సరళంగా మాట్లాడుతారు। వెచ్చదనం మరియు సానుభూతితో సహజమైన, సంభాషణా భాషను ఉపయోగించండి।",
+        
         ta: "நீங்கள் ஐதோதா, ஒரு கண்ணியமான, உணர்வுபூர்வமாக புத்திசாலித்தனமான AI வாடிக்கையாளர் சேவை நிர்வாகி. நீங்கள் தமிழில் சரளமாக பேசுகிறீர்கள். அன்பு மற்றும் அனுதாபத்துடன் இயற்கையான, உரையாடல் மொழியைப் பயன்படுத்துங்கள்।",
+        
+        mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।"
+      };
+      
+      return prompts[lang] || prompts.en;
+    };
 
-        mr: "तुम्ही एआयतोता आहात, एक नम्र आणि भावनिकदृष्ट्या बुद्धिमान AI ग्राहक सेवा कार्यकारी. तुम्ही मराठीत अस्खलितपणे बोलता. उबदारपणा आणि सहानुभूतीसह नैसर्गिक, संभाषणात्मक भाषा वापरा. उत्तरे लहान ठेवा—फक्त 1-2 ओळी. ग्राहकांना ऐकले, समर्थित आणि मूल्यवान वाटण्याचे तुमचे ध्येय आहे।",
-      }
-
-      systemPrompt = defaultPrompts[detectedLanguage] || defaultPrompts.en
-    } else {
-      console.log(`✅ [SYSTEM-PROMPT] Using system prompt from database for agent: ${agentConfig.agentName}`)
-    }
+    const systemPrompt = getSystemPrompt(detectedLanguage);
 
     const messages = [
       { role: "system", content: systemPrompt },
       ...conversationHistory.slice(-6),
-      { role: "user", content: userMessage },
-    ]
+      { role: "user", content: userMessage }
+    ];
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -370,76 +281,76 @@ const processWithOpenAIStreaming = async (
         temperature: 0.3,
         stream: true,
       }),
-    })
+    });
 
     if (!response.ok) {
-      console.error(`❌ [OPENAI] Error: ${response.status}`)
-      return null
+      console.error(`❌ [OPENAI] Error: ${response.status}`);
+      return null;
     }
 
-    let fullResponse = ""
-    let phraseBuffer = ""
-    let isFirstPhrase = true
-    let isInterrupted = false
+    let fullResponse = "";
+    let phraseBuffer = "";
+    let isFirstPhrase = true;
+    let isInterrupted = false;
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
 
     // Check for interruption periodically
     const checkInterruption = () => {
-      return onInterrupt && onInterrupt()
-    }
+      return onInterrupt && onInterrupt();
+    };
 
     while (true) {
       // Check for interruption
       if (checkInterruption()) {
-        isInterrupted = true
-        console.log(`⚠️ [OPENAI] Stream interrupted by new user input`)
-        reader.cancel()
-        break
+        isInterrupted = true;
+        console.log(`⚠️ [OPENAI] Stream interrupted by new user input`);
+        reader.cancel();
+        break;
       }
 
-      const { done, value } = await reader.read()
-      if (done) break
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      const chunk = decoder.decode(value, { stream: true })
-      const lines = chunk.split("\n").filter((line) => line.trim())
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n').filter(line => line.trim());
 
       for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6)
-
-          if (data === "[DONE]") {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          
+          if (data === '[DONE]') {
             if (phraseBuffer.trim() && !isInterrupted) {
-              onPhrase(phraseBuffer.trim(), detectedLanguage)
-              fullResponse += phraseBuffer
+              onPhrase(phraseBuffer.trim(), detectedLanguage);
+              fullResponse += phraseBuffer;
             }
-            break
+            break;
           }
 
           try {
-            const parsed = JSON.parse(data)
-            const content = parsed.choices?.[0]?.delta?.content
-
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content;
+            
             if (content) {
-              phraseBuffer += content
-
+              phraseBuffer += content;
+              
               // Check for interruption before sending phrase
               if (checkInterruption()) {
-                isInterrupted = true
-                break
+                isInterrupted = true;
+                break;
               }
-
+              
               if (shouldSendPhrase(phraseBuffer)) {
-                const phrase = phraseBuffer.trim()
+                const phrase = phraseBuffer.trim();
                 if (phrase.length > 0 && !isInterrupted) {
                   if (isFirstPhrase) {
-                    console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint("first_phrase")}ms)`)
-                    isFirstPhrase = false
+                    console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint('first_phrase')}ms)`);
+                    isFirstPhrase = false;
                   }
-                  onPhrase(phrase, detectedLanguage)
-                  fullResponse += phrase
-                  phraseBuffer = ""
+                  onPhrase(phrase, detectedLanguage);
+                  fullResponse += phrase;
+                  phraseBuffer = "";
                 }
               }
             }
@@ -448,221 +359,222 @@ const processWithOpenAIStreaming = async (
           }
         }
       }
-
-      if (isInterrupted) break
+      
+      if (isInterrupted) break;
     }
 
     if (!isInterrupted) {
-      console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`)
-
+      console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`);
+      
       // Log AI response to call logger
       if (callLogger && fullResponse.trim()) {
-        callLogger.logAIResponse(fullResponse.trim(), detectedLanguage)
+        callLogger.logAIResponse(fullResponse.trim(), detectedLanguage);
       }
-
-      onComplete(fullResponse)
+      
+      onComplete(fullResponse);
     } else {
-      console.log(`🤖 [OPENAI] Interrupted after ${timer.end()}ms`)
+      console.log(`🤖 [OPENAI] Interrupted after ${timer.end()}ms`);
     }
+    
+    return isInterrupted ? null : fullResponse;
 
-    return isInterrupted ? null : fullResponse
   } catch (error) {
-    console.error(`❌ [OPENAI] Error: ${error.message}`)
-    return null
+    console.error(`❌ [OPENAI] Error: ${error.message}`);
+    return null;
   }
-}
+};
 
 // Smart phrase detection for better chunking
 const shouldSendPhrase = (buffer) => {
-  const trimmed = buffer.trim()
-
+  const trimmed = buffer.trim();
+  
   // Complete sentences
-  if (/[.!?।॥।]$/.test(trimmed)) return true
-
+  if (/[.!?।॥।]$/.test(trimmed)) return true;
+  
   // Meaningful phrases with natural breaks
-  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true
-
+  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true;
+  
   // Longer phrases (prevent too much buffering)
-  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true
-
-  return false
-}
+  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true;
+  
+  return false;
+};
 
 // Enhanced TTS processor with call logging
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
-    this.language = language
-    this.ws = ws
-    this.streamSid = streamSid
-    this.callLogger = callLogger
-    this.queue = []
-    this.isProcessing = false
-    this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
-
+    this.language = language;
+    this.ws = ws;
+    this.streamSid = streamSid;
+    this.callLogger = callLogger;
+    this.queue = [];
+    this.isProcessing = false;
+    this.sarvamLanguage = getSarvamLanguage(language);
+    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra");
+    
     // Interruption handling
-    this.isInterrupted = false
-    this.currentAudioStreaming = null
-
+    this.isInterrupted = false;
+    this.currentAudioStreaming = null;
+    
     // Sentence-based processing settings
-    this.sentenceBuffer = ""
-    this.processingTimeout = 100
-    this.sentenceTimer = null
-
+    this.sentenceBuffer = "";
+    this.processingTimeout = 100;
+    this.sentenceTimer = null;
+    
     // Audio streaming stats
-    this.totalChunks = 0
-    this.totalAudioBytes = 0
+    this.totalChunks = 0;
+    this.totalAudioBytes = 0;
   }
 
   // Method to interrupt current processing
   interrupt() {
-    console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`)
-    this.isInterrupted = true
-
+    console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`);
+    this.isInterrupted = true;
+    
     // Clear queue and buffer
-    this.queue = []
-    this.sentenceBuffer = ""
-
+    this.queue = [];
+    this.sentenceBuffer = "";
+    
     // Clear any pending timeout
     if (this.sentenceTimer) {
-      clearTimeout(this.sentenceTimer)
-      this.sentenceTimer = null
+      clearTimeout(this.sentenceTimer);
+      this.sentenceTimer = null;
     }
-
+    
     // Stop current audio streaming if active
     if (this.currentAudioStreaming) {
-      this.currentAudioStreaming.interrupt = true
+      this.currentAudioStreaming.interrupt = true;
     }
-
-    console.log(`🛑 [SARVAM-TTS] Processing interrupted and cleaned up`)
+    
+    console.log(`🛑 [SARVAM-TTS] Processing interrupted and cleaned up`);
   }
 
   // Reset for new processing
   reset(newLanguage) {
-    this.interrupt()
-
+    this.interrupt();
+    
     // Update language settings
     if (newLanguage) {
-      this.language = newLanguage
-      this.sarvamLanguage = getSarvamLanguage(newLanguage)
-      console.log(`🔄 [SARVAM-TTS] Language updated to: ${this.sarvamLanguage}`)
+      this.language = newLanguage;
+      this.sarvamLanguage = getSarvamLanguage(newLanguage);
+      console.log(`🔄 [SARVAM-TTS] Language updated to: ${this.sarvamLanguage}`);
     }
-
+    
     // Reset state
-    this.isInterrupted = false
-    this.isProcessing = false
-    this.totalChunks = 0
-    this.totalAudioBytes = 0
+    this.isInterrupted = false;
+    this.isProcessing = false;
+    this.totalChunks = 0;
+    this.totalAudioBytes = 0;
   }
 
   addPhrase(phrase, detectedLanguage) {
-    if (!phrase.trim() || this.isInterrupted) return
-
+    if (!phrase.trim() || this.isInterrupted) return;
+    
     // Update language if different from current
     if (detectedLanguage && detectedLanguage !== this.language) {
-      console.log(`🔄 [SARVAM-TTS] Language change detected: ${this.language} → ${detectedLanguage}`)
-      this.language = detectedLanguage
-      this.sarvamLanguage = getSarvamLanguage(detectedLanguage)
+      console.log(`🔄 [SARVAM-TTS] Language change detected: ${this.language} → ${detectedLanguage}`);
+      this.language = detectedLanguage;
+      this.sarvamLanguage = getSarvamLanguage(detectedLanguage);
     }
-
-    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim()
-
+    
+    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
+    
     if (this.hasCompleteSentence(this.sentenceBuffer)) {
-      this.processCompleteSentences()
+      this.processCompleteSentences();
     } else {
-      this.scheduleProcessing()
+      this.scheduleProcessing();
     }
   }
 
   hasCompleteSentence(text) {
-    return /[.!?।॥।]/.test(text)
+    return /[.!?।॥।]/.test(text);
   }
 
   extractCompleteSentences(text) {
-    const sentences = text.split(/([.!?।॥।])/).filter((s) => s.trim())
-
-    let completeSentences = ""
-    let remainingText = ""
-
+    const sentences = text.split(/([.!?।॥।])/).filter(s => s.trim());
+    
+    let completeSentences = "";
+    let remainingText = "";
+    
     for (let i = 0; i < sentences.length; i += 2) {
-      const sentence = sentences[i]
-      const punctuation = sentences[i + 1]
-
+      const sentence = sentences[i];
+      const punctuation = sentences[i + 1];
+      
       if (punctuation) {
-        completeSentences += sentence + punctuation + " "
+        completeSentences += sentence + punctuation + " ";
       } else {
-        remainingText = sentence
+        remainingText = sentence;
       }
     }
-
+    
     return {
       complete: completeSentences.trim(),
-      remaining: remainingText.trim(),
-    }
+      remaining: remainingText.trim()
+    };
   }
 
   processCompleteSentences() {
-    if (this.isInterrupted) return
-
+    if (this.isInterrupted) return;
+    
     if (this.sentenceTimer) {
-      clearTimeout(this.sentenceTimer)
-      this.sentenceTimer = null
+      clearTimeout(this.sentenceTimer);
+      this.sentenceTimer = null;
     }
 
-    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer)
-
+    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
+    
     if (complete && !this.isInterrupted) {
-      this.queue.push(complete)
-      this.sentenceBuffer = remaining
-      this.processQueue()
+      this.queue.push(complete);
+      this.sentenceBuffer = remaining;
+      this.processQueue();
     }
   }
 
   scheduleProcessing() {
-    if (this.isInterrupted) return
-
-    if (this.sentenceTimer) clearTimeout(this.sentenceTimer)
-
+    if (this.isInterrupted) return;
+    
+    if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
+    
     this.sentenceTimer = setTimeout(() => {
       if (this.sentenceBuffer.trim() && !this.isInterrupted) {
-        this.queue.push(this.sentenceBuffer.trim())
-        this.sentenceBuffer = ""
-        this.processQueue()
+        this.queue.push(this.sentenceBuffer.trim());
+        this.sentenceBuffer = "";
+        this.processQueue();
       }
-    }, this.processingTimeout)
+    }, this.processingTimeout);
   }
 
   async processQueue() {
-    if (this.isProcessing || this.queue.length === 0 || this.isInterrupted) return
+    if (this.isProcessing || this.queue.length === 0 || this.isInterrupted) return;
 
-    this.isProcessing = true
-    const textToProcess = this.queue.shift()
+    this.isProcessing = true;
+    const textToProcess = this.queue.shift();
 
     try {
       if (!this.isInterrupted) {
-        await this.synthesizeAndStream(textToProcess)
+        await this.synthesizeAndStream(textToProcess);
       }
     } catch (error) {
       if (!this.isInterrupted) {
-        console.error(`❌ [SARVAM-TTS] Error: ${error.message}`)
+        console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
       }
     } finally {
-      this.isProcessing = false
-
+      this.isProcessing = false;
+      
       // Process next item in queue if not interrupted
       if (this.queue.length > 0 && !this.isInterrupted) {
-        setTimeout(() => this.processQueue(), 10)
+        setTimeout(() => this.processQueue(), 10);
       }
     }
   }
 
   async synthesizeAndStream(text) {
-    if (this.isInterrupted) return
-
-    const timer = createTimer("SARVAM_TTS_SENTENCE")
-
+    if (this.isInterrupted) return;
+    
+    const timer = createTimer("SARVAM_TTS_SENTENCE");
+    
     try {
-      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`)
+      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -681,640 +593,458 @@ class OptimizedSarvamTTSProcessor {
           enable_preprocessing: false,
           model: "bulbul:v1",
         }),
-      })
+      });
 
       if (!response.ok || this.isInterrupted) {
-        if (this.isInterrupted) return
-        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`)
+        if (this.isInterrupted) return;
+        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
       }
 
-      const responseData = await response.json()
-      const audioBase64 = responseData.audios?.[0]
-
+      const responseData = await response.json();
+      const audioBase64 = responseData.audios?.[0];
+      
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
-          throw new Error("No audio data received from Sarvam API")
+          throw new Error("No audio data received from Sarvam API");
         }
-        return
+        return;
       }
 
-      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`)
-
+      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
+      
       // Stream audio if not interrupted
       if (!this.isInterrupted) {
-        await this.streamAudioOptimizedForSIP(audioBase64)
-
-        const audioBuffer = Buffer.from(audioBase64, "base64")
-        this.totalAudioBytes += audioBuffer.length
-        this.totalChunks++
+        await this.streamAudioOptimizedForSIP(audioBase64);
+        
+        const audioBuffer = Buffer.from(audioBase64, "base64");
+        this.totalAudioBytes += audioBuffer.length;
+        this.totalChunks++;
       }
+      
     } catch (error) {
       if (!this.isInterrupted) {
-        console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`)
-        throw error
+        console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
+        throw error;
       }
     }
   }
 
   async streamAudioOptimizedForSIP(audioBase64) {
-    if (this.isInterrupted) return
-
-    const audioBuffer = Buffer.from(audioBase64, "base64")
-    const streamingSession = { interrupt: false }
-    this.currentAudioStreaming = streamingSession
-
+    if (this.isInterrupted) return;
+    
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const streamingSession = { interrupt: false };
+    this.currentAudioStreaming = streamingSession;
+    
     // SIP audio specifications
-    const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
-
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes to StreamSid: ${this.streamSid}`)
-
-    let position = 0
-    let chunkIndex = 0
-    let successfulChunks = 0
-
+    const SAMPLE_RATE = 8000;
+    const BYTES_PER_SAMPLE = 2;
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS);
+    
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
+    
+    let position = 0;
+    let chunkIndex = 0;
+    
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = audioBuffer.length - position
-      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-      const chunk = audioBuffer.slice(position, position + chunkSize)
-
+      const remaining = audioBuffer.length - position;
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining);
+      const chunk = audioBuffer.slice(position, position + chunkSize);
+      
+      console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes`);
+      
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
         media: {
-          payload: chunk.toString("base64"),
-        },
-      }
+          payload: chunk.toString("base64")
+        }
+      };
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-        try {
-          this.ws.send(JSON.stringify(mediaMessage))
-          successfulChunks++
-          console.log(
-            `📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}/${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)}: ${chunk.length} bytes sent`,
-          )
-        } catch (error) {
-          console.error(`❌ [SARVAM-SIP] Failed to send chunk ${chunkIndex + 1}: ${error.message}`)
-          break
-        }
-      } else {
-        console.error(
-          `❌ [SARVAM-SIP] WebSocket not ready: readyState=${this.ws.readyState}, interrupted=${this.isInterrupted}`,
-        )
-        break
+        this.ws.send(JSON.stringify(mediaMessage));
       }
-
+      
       // Delay between chunks
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        const delayMs = Math.max(chunkDurationMs - 2, 10);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
-
-      position += chunkSize
-      chunkIndex++
+      
+      position += chunkSize;
+      chunkIndex++;
     }
-
+    
     if (this.isInterrupted || streamingSession.interrupt) {
-      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`)
+      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`);
     } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${successfulChunks}/${chunkIndex} chunks successfully`)
+      console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
     }
-
-    this.currentAudioStreaming = null
+    
+    this.currentAudioStreaming = null;
   }
 
   complete() {
-    if (this.isInterrupted) return
-
+    if (this.isInterrupted) return;
+    
     if (this.sentenceBuffer.trim()) {
-      this.queue.push(this.sentenceBuffer.trim())
-      this.sentenceBuffer = ""
+      this.queue.push(this.sentenceBuffer.trim());
+      this.sentenceBuffer = "";
     }
-
+    
     if (this.queue.length > 0) {
-      this.processQueue()
+      this.processQueue();
     }
-
-    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`)
+    
+    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
   }
 
   getStats() {
     return {
       totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
-      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
-    }
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
+    };
   }
 }
 
-// Enhanced agent lookup function for both inbound and outbound calls
-const findAgentForCall = async (callData) => {
-  try {
-    const { accountSid, callDirection, extraData } = callData
-
-    console.log(`🔍 [AGENT-LOOKUP] Direction: ${callDirection}, AccountSid: ${accountSid}`)
-    console.log(`🔍 [AGENT-LOOKUP] ExtraData:`, extraData)
-
-    let agent = null
-
-    if (callDirection === "inbound") {
-      // Inbound call: Use accountSid to find agent
-      if (!accountSid) {
-        throw new Error("Missing accountSid for inbound call")
-      }
-
-      agent = await Agent.findOne({ accountSid }).lean()
-      if (!agent) {
-        throw new Error(`No agent found for accountSid: ${accountSid}`)
-      }
-
-      console.log(`✅ [AGENT-LOOKUP] Inbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
-    } else if (callDirection === "outbound") {
-      // Outbound call: Use CallVaId from extraData to match callerId
-      if (!extraData) {
-        throw new Error("Missing extraData for outbound call")
-      }
-
-      if (!extraData.CallVaId) {
-        console.error(`❌ [AGENT-LOOKUP] ExtraData structure:`, JSON.stringify(extraData, null, 2))
-        throw new Error("Missing CallVaId in extraData for outbound call")
-      }
-
-      const callVaId = extraData.CallVaId
-      console.log(`🔍 [AGENT-LOOKUP] Looking for agent with callerId: ${callVaId}`)
-
-      agent = await Agent.findOne({ callerId: callVaId }).lean()
-      if (!agent) {
-        throw new Error(`No agent found for callerId: ${callVaId}`)
-      }
-
-      console.log(`✅ [AGENT-LOOKUP] Outbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
-    } else {
-      throw new Error(`Unknown call direction: ${callDirection}`)
-    }
-
-    return agent
-  } catch (error) {
-    console.error(`❌ [AGENT-LOOKUP] Error: ${error.message}`)
-    throw error
-  }
-}
-
-// Main WebSocket server setup with enhanced call logging and outbound support
+// Main WebSocket server setup with enhanced call logging
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with multi-language Deepgram, DB system prompts, and comprehensive language support")
+  console.log("🚀 [ENHANCED] Voice Server started with call logging and Marathi support");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New enhanced WebSocket connection")
-
-    // Parse URL parameters for call direction detection
-    const url = new URL(req.url, `http://${req.headers.host}`)
-    const urlParams = Object.fromEntries(url.searchParams.entries())
-
-    console.log(`🔍 [URL-PARAMS] Received parameters:`, urlParams)
+    console.log("🔗 [CONNECTION] New enhanced WebSocket connection");
 
     // Session state
-    let streamSid = null
-    let conversationHistory = []
-    let isProcessing = false
-    let userUtteranceBuffer = ""
-    let lastProcessedText = ""
-    let optimizedTTS = null
-    let currentLanguage = undefined
-    let processingRequestId = 0
-    let callLogger = null // Call logger instance
-    let callDirection = "inbound" // Default to inbound
-    let agentConfig = null // Store agent configuration
+    let streamSid = null;
+    let conversationHistory = [];
+    let isProcessing = false;
+    let userUtteranceBuffer = "";
+    let lastProcessedText = "";
+    let optimizedTTS = null;
+    let currentLanguage = undefined;
+    let processingRequestId = 0;
+    let callLogger = null; // Call logger instance
 
     // Deepgram WebSocket connection
-    let deepgramWs = null
-    let deepgramReady = false
-    let deepgramAudioQueue = []
+    let deepgramWs = null;
+    let deepgramReady = false;
+    let deepgramAudioQueue = [];
 
-    // Updated Deepgram connection with multi-language support
-    const connectToDeepgram = async (supportAllLanguages = true) => {
+    // Optimized Deepgram connection
+    const connectToDeepgram = async () => {
       try {
-        console.log("🔌 [DEEPGRAM] Connecting with multi-language support...")
+        console.log("🔌 [DEEPGRAM] Connecting...");
+        const deepgramLanguage = getDeepgramLanguage(currentLanguage);
         
-        const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-        deepgramUrl.searchParams.append("sample_rate", "8000")
-        deepgramUrl.searchParams.append("channels", "1")
-        deepgramUrl.searchParams.append("encoding", "linear16")
-        deepgramUrl.searchParams.append("model", "nova-2")
-        
-        // Configure language support
-        if (supportAllLanguages) {
-          // Use multi-language detection - Deepgram will auto-detect languages
-          deepgramUrl.searchParams.append("detect_language", "true")
-          deepgramUrl.searchParams.append("language", "multi") // Multi-language model
-          console.log("🌍 [DEEPGRAM] Configured for multi-language auto-detection")
-        } else {
-          // Use specific language if provided
-          const deepgramLanguage = getDeepgramLanguage(currentLanguage, false)
-          deepgramUrl.searchParams.append("language", deepgramLanguage)
-          console.log(`🌍 [DEEPGRAM] Configured for specific language: ${deepgramLanguage}`)
-        }
-        
-        deepgramUrl.searchParams.append("interim_results", "true")
-        deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "300")
-        deepgramUrl.searchParams.append("punctuate", "true")
-        deepgramUrl.searchParams.append("profanity_filter", "false")
-        deepgramUrl.searchParams.append("redact", "false")
+        const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen");
+        deepgramUrl.searchParams.append("sample_rate", "8000");
+        deepgramUrl.searchParams.append("channels", "1");
+        deepgramUrl.searchParams.append("encoding", "linear16");
+        deepgramUrl.searchParams.append("model", "nova-2");
+        deepgramUrl.searchParams.append("language", deepgramLanguage);
+        deepgramUrl.searchParams.append("interim_results", "true");
+        deepgramUrl.searchParams.append("smart_format", "true");
+        deepgramUrl.searchParams.append("endpointing", "300");
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
-        })
+        });
 
         deepgramWs.onopen = () => {
-          deepgramReady = true
-          console.log("✅ [DEEPGRAM] Connected with multi-language support")
-
-          deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
-          deepgramAudioQueue = []
-        }
+          deepgramReady = true;
+          console.log("✅ [DEEPGRAM] Connected");
+          
+          deepgramAudioQueue.forEach(buffer => deepgramWs.send(buffer));
+          deepgramAudioQueue = [];
+        };
 
         deepgramWs.onmessage = async (event) => {
-          const data = JSON.parse(event.data)
-          await handleDeepgramResponse(data)
-        }
+          const data = JSON.parse(event.data);
+          await handleDeepgramResponse(data);
+        };
 
         deepgramWs.onerror = (error) => {
-          console.error("❌ [DEEPGRAM] Error:", error)
-          deepgramReady = false
-        }
+          console.error("❌ [DEEPGRAM] Error:", error);
+          deepgramReady = false;
+        };
 
         deepgramWs.onclose = () => {
-          console.log("🔌 [DEEPGRAM] Connection closed")
-          deepgramReady = false
-        }
-      } catch (error) {
-        console.error("❌ [DEEPGRAM] Setup error:", error.message)
-      }
-    }
+          console.log("🔌 [DEEPGRAM] Connection closed");
+          deepgramReady = false;
+        };
 
-    // Enhanced Deepgram response handler with language detection
+      } catch (error) {
+        console.error("❌ [DEEPGRAM] Setup error:", error.message);
+      }
+    };
+
+    // Handle Deepgram responses with call logging
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
-        const transcript = data.channel?.alternatives?.[0]?.transcript
-        const is_final = data.is_final
-        const confidence = data.channel?.alternatives?.[0]?.confidence
+        const transcript = data.channel?.alternatives?.[0]?.transcript;
+        const is_final = data.is_final;
         
-        // Extract detected language from Deepgram response if available
-        const detectedLanguage = data.channel?.detected_language || 
-                                data.channel?.alternatives?.[0]?.language ||
-                                currentLanguage
-
         if (transcript?.trim()) {
-          console.log(`🎤 [DEEPGRAM] Transcript: "${transcript}" (confidence: ${confidence}, language: ${detectedLanguage})`)
-          
           // Interrupt current TTS if new speech detected
           if (optimizedTTS && (isProcessing || optimizedTTS.isProcessing)) {
-            console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`)
-            optimizedTTS.interrupt()
-            isProcessing = false
-            processingRequestId++ // Invalidate current processing
+            console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`);
+            optimizedTTS.interrupt();
+            isProcessing = false;
+            processingRequestId++; // Invalidate current processing
           }
-
+          
           if (is_final) {
-            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
-
-            // Use OpenAI for more accurate language detection on final transcript
-            const finalDetectedLang = await detectLanguageWithOpenAI(transcript.trim())
+            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
             
             // Log the final transcript to call logger
             if (callLogger && transcript.trim()) {
-              callLogger.logUserTranscript(transcript.trim(), finalDetectedLang)
+              const detectedLang = await detectLanguageWithOpenAI(transcript.trim());
+              callLogger.logUserTranscript(transcript.trim(), detectedLang);
             }
-
-            await processUserUtterance(userUtteranceBuffer, finalDetectedLang)
-            userUtteranceBuffer = ""
+            
+            await processUserUtterance(userUtteranceBuffer);
+            userUtteranceBuffer = "";
           }
         }
       } else if (data.type === "UtteranceEnd") {
         if (userUtteranceBuffer.trim()) {
-          // Use OpenAI for final language detection
-          const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim())
-          
           // Log the utterance end transcript
           if (callLogger && userUtteranceBuffer.trim()) {
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
+            const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim());
+            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang);
           }
-
-          await processUserUtterance(userUtteranceBuffer, detectedLang)
-          userUtteranceBuffer = ""
+          
+          await processUserUtterance(userUtteranceBuffer);
+          userUtteranceBuffer = "";
         }
       }
-    }
+    };
 
-    // Enhanced utterance processing with database system prompt
-    const processUserUtterance = async (text, detectedLanguage = null) => {
-      if (!text.trim() || text === lastProcessedText) return
+    // Enhanced utterance processing with call logging
+    const processUserUtterance = async (text) => {
+      if (!text.trim() || text === lastProcessedText) return;
 
       // Interrupt any ongoing processing
       if (optimizedTTS) {
-        optimizedTTS.interrupt()
+        optimizedTTS.interrupt();
       }
-
-      isProcessing = true
-      lastProcessedText = text
-      const currentRequestId = ++processingRequestId
-      const timer = createTimer("UTTERANCE_PROCESSING")
+      
+      isProcessing = true;
+      lastProcessedText = text;
+      const currentRequestId = ++processingRequestId;
+      const timer = createTimer("UTTERANCE_PROCESSING");
 
       try {
-        console.log(`🎤 [USER] Processing: "${text}"`)
+        console.log(`🎤 [USER] Processing: "${text}"`);
 
-        // Step 1: Use detected language or detect with OpenAI as fallback
-        const finalDetectedLanguage = detectedLanguage || await detectLanguageWithOpenAI(text)
-
+        // Step 1: Detect language using OpenAI
+        const detectedLanguage = await detectLanguageWithOpenAI(text);
+        
         // Step 2: Update current language and initialize TTS processor
-        if (finalDetectedLanguage !== currentLanguage) {
-          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${finalDetectedLanguage}`)
-          currentLanguage = finalDetectedLanguage
+        if (detectedLanguage !== currentLanguage) {
+          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage}`);
+          currentLanguage = detectedLanguage;
         }
 
         // Create new TTS processor with detected language
-        optimizedTTS = new OptimizedSarvamTTSProcessor(finalDetectedLanguage, ws, streamSid, callLogger)
+        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger);
 
         // Step 3: Check for interruption function
         const checkInterruption = () => {
-          return processingRequestId !== currentRequestId
-        }
+          return processingRequestId !== currentRequestId;
+        };
 
-        // Step 4: Process with OpenAI streaming (now with agent config)
+        // Step 4: Process with OpenAI streaming
         const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
-          finalDetectedLanguage,
+          detectedLanguage,
           (phrase, lang) => {
             // Handle phrase chunks - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`📤 [PHRASE] "${phrase}" (${lang})`)
-              optimizedTTS.addPhrase(phrase, lang)
+              console.log(`📤 [PHRASE] "${phrase}" (${lang})`);
+              optimizedTTS.addPhrase(phrase, lang);
             }
           },
           (fullResponse) => {
             // Handle completion - only if not interrupted
             if (processingRequestId === currentRequestId && !checkInterruption()) {
-              console.log(`✅ [COMPLETE] "${fullResponse}"`)
-              optimizedTTS.complete()
-
-              const stats = optimizedTTS.getStats()
-              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`)
-
+              console.log(`✅ [COMPLETE] "${fullResponse}"`);
+              optimizedTTS.complete();
+              
+              const stats = optimizedTTS.getStats();
+              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
+              
               // Update conversation history
-              conversationHistory.push({ role: "user", content: text }, { role: "assistant", content: fullResponse })
+              conversationHistory.push(
+                { role: "user", content: text },
+                { role: "assistant", content: fullResponse }
+              );
 
               // Keep last 10 messages for context
               if (conversationHistory.length > 10) {
-                conversationHistory = conversationHistory.slice(-10)
+                conversationHistory = conversationHistory.slice(-10);
               }
             }
           },
           checkInterruption,
-          callLogger,
-          agentConfig // Pass agent configuration for system prompt
-        )
+          callLogger // Pass call logger to OpenAI processing
+        );
 
-        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`)
+        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`);
+
       } catch (error) {
-        console.error(`❌ [PROCESSING] Error: ${error.message}`)
+        console.error(`❌ [PROCESSING] Error: ${error.message}`);
       } finally {
         if (processingRequestId === currentRequestId) {
-          isProcessing = false
+          isProcessing = false;
         }
       }
-    }
+    };
 
-    // WebSocket message handling with enhanced multi-language support
+    // WebSocket message handling with call logging
     ws.on("message", async (message) => {
       try {
-        const messageStr = message.toString()
-
-        // Skip non-JSON messages (like "EOS" or other control messages)
-        if (messageStr === "EOS" || messageStr === "BOS" || !messageStr.startsWith("{")) {
-          console.log(`📝 [WEBSOCKET] Skipping non-JSON message: ${messageStr}`)
-          return
-        }
-
-        const data = JSON.parse(messageStr)
+        const data = JSON.parse(message.toString());
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`)
-            break
+            console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`);
+            break;
 
           case "start": {
-            streamSid = data.streamSid || data.start?.streamSid
-            const accountSid = data.start?.accountSid
+            streamSid = data.streamSid || data.start?.streamSid;
+            const accountSid = data.start?.accountSid;
+            const mobile = data.start?.from || null; // Extract mobile number from call data
+            
+            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, AccountSid: ${accountSid}, Mobile: ${mobile}`);
 
-            // Extract mobile number from different possible fields
-            let mobile = null
-            if (data.start?.from) {
-              mobile = data.start.from
-            } else if (urlParams.caller_id) {
-              mobile = urlParams.caller_id
-            } else if (data.start?.extraData?.CallCli) {
-              mobile = data.start.extraData.CallCli
-            }
-
-            // Extract DID/To number
-            let to = null
-            if (data.start?.to) {
-              to = data.start.to
-            } else if (urlParams.did) {
-              to = urlParams.did
-            } else if (data.start?.extraData?.DID) {
-              to = data.start.extraData.DID
-            }
-
-            console.log(`📞 [CALL-INFO] Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
-
-            // Determine call direction and decode extra data if present
-            let extraData = null
-
-            // Try to get extra data from multiple sources
-            if (data.start?.extraData) {
-              extraData = decodeExtraData(data.start.extraData)
-            } else if (urlParams.extra) {
-              // Decode extra data from URL parameters
-              extraData = decodeExtraData(urlParams.extra)
-              console.log(`🔍 [EXTRA-DATA] Decoded from URL params:`, extraData)
-            }
-
-            // Update mobile number from decoded extra data if available
-            if (extraData?.CallCli && !mobile) {
-              mobile = extraData.CallCli
-              console.log(`📱 [MOBILE-UPDATE] Updated mobile from extraData: ${mobile}`)
-            }
-
-            // Determine call direction based on multiple indicators
-            if (extraData && extraData.CallDirection === "OutDial") {
-              callDirection = "outbound"
-              console.log(
-                `📞 [OUTBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, CallVaId: ${extraData.CallVaId}`,
-              )
-            } else if (urlParams.direction === "OutDial") {
-              callDirection = "outbound"
-              console.log(`📞 [OUTBOUND] Call detected via URL param - Mobile: ${mobile}, DID: ${to}`)
-
-              // For outbound calls detected via URL param, ensure we have extraData
-              if (!extraData && urlParams.extra) {
-                extraData = decodeExtraData(urlParams.extra)
-                console.log(`🔍 [EXTRA-DATA] Decoded for outbound call:`, extraData)
+            // Fetch agent config from DB using accountSid (MANDATORY)
+            let agentConfig = null;
+            if (accountSid) {
+              try {
+                agentConfig = await Agent.findOne({ accountSid }).lean();
+                if (!agentConfig) {
+                  ws.send(JSON.stringify({ event: 'error', message: `No agent found for accountSid: ${accountSid}` }));
+                  ws.close();
+                  return;
+                }
+                
+              } catch (err) {
+                ws.send(JSON.stringify({ event: 'error', message: `DB error for accountSid: ${accountSid}` }));
+                ws.close();
+                return;
               }
             } else {
-              callDirection = "inbound"
-              console.log(`📞 [INBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
+              ws.send(JSON.stringify({ event: 'error', message: 'Missing accountSid in start event' }));
+              ws.close();
+              return;
             }
+            
+            ws.sessionAgentConfig = agentConfig;
+            currentLanguage = agentConfig.language || 'hi';
 
-            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
+            // Initialize call logger
+            callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile);
+            console.log(`📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}`);
 
-            // Find appropriate agent based on call direction
-            try {
-              agentConfig = await findAgentForCall({
-                accountSid,
-                callDirection,
-                extraData,
-              })
-
-              if (!agentConfig) {
-                ws.send(
-                  JSON.stringify({
-                    event: "error",
-                    message: `No agent found for ${callDirection} call`,
-                  }),
-                )
-                ws.close()
-                return
-              }
-
-              console.log(`✅ [AGENT-CONFIG] Loaded agent: ${agentConfig.agentName}`)
-              console.log(`📋 [SYSTEM-PROMPT] ${agentConfig.systemPrompt ? 'Using custom system prompt from DB' : 'No custom system prompt, will use default'}`)
-              
-            } catch (err) {
-              console.error(`❌ [AGENT-LOOKUP] ${err.message}`)
-              ws.send(
-                JSON.stringify({
-                  event: "error",
-                  message: err.message,
-                }),
-              )
-              ws.close()
-              return
-            }
-
-            ws.sessionAgentConfig = agentConfig
-            currentLanguage = agentConfig.language || "hi"
-
-            // Initialize call logger with direction
-            callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
-            console.log(
-              `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, direction: ${callDirection}`,
-            )
-
-            // Connect to Deepgram with multi-language support
-            await connectToDeepgram(true) // Enable multi-language support
-
+            await connectToDeepgram();
+            
             // Use agent's firstMessage for greeting and log it
-            const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
-            console.log(`👋 [GREETING] ${greeting}`)
-
+            const greeting = agentConfig.firstMessage || "Hello! How can I help you today?";
+            console.log(`👋 [GREETING] ${greeting}`);
+            
             // Log the initial greeting
             if (callLogger) {
-              callLogger.logAIResponse(greeting, currentLanguage)
+              callLogger.logAIResponse(greeting, currentLanguage);
             }
-
-            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-            await tts.synthesizeAndStream(greeting)
-            break
+            
+            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger);
+            await tts.synthesizeAndStream(greeting);
+            break;
           }
 
           case "media":
             if (data.media?.payload) {
-              const audioBuffer = Buffer.from(data.media.payload, "base64")
-
+              const audioBuffer = Buffer.from(data.media.payload, "base64");
+              
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
-                deepgramWs.send(audioBuffer)
+                deepgramWs.send(audioBuffer);
               } else {
-                deepgramAudioQueue.push(audioBuffer)
+                deepgramAudioQueue.push(audioBuffer);
               }
             }
-            break
+            break;
 
           case "stop":
-            console.log(`📞 [ENHANCED] Stream stopped - Direction: ${callDirection}`)
-
+            console.log(`📞 [ENHANCED] Stream stopped`);
+            
             // Save call log to database before closing
             if (callLogger) {
               try {
-                const savedLog = await callLogger.saveToDatabase("medium") // Default lead status
-                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
-
+                const savedLog = await callLogger.saveToDatabase('medium'); // Default lead status
+                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}`);
+                
                 // Print call statistics
-                const stats = callLogger.getStats()
-                console.log(
-                  `📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(", ")}, Direction: ${stats.callDirection}`,
-                )
+                const stats = callLogger.getStats();
+                console.log(`📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(', ')}`);
               } catch (error) {
-                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`)
+                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`);
               }
             }
-
+            
             if (deepgramWs?.readyState === WebSocket.OPEN) {
-              deepgramWs.close()
+              deepgramWs.close();
             }
-            break
+            break;
 
           default:
-            console.log(`❓ [ENHANCED] Unknown event: ${data.event}`)
+            console.log(`❓ [ENHANCED] Unknown event: ${data.event}`);
         }
       } catch (error) {
-        console.error(`❌ [ENHANCED] Message error: ${error.message}`)
+        console.error(`❌ [ENHANCED] Message error: ${error.message}`);
       }
-    })
+    });
 
     // Enhanced connection cleanup with call logging
     ws.on("close", async () => {
-      console.log(`🔗 [ENHANCED] Connection closed - Direction: ${callDirection}`)
-
+      console.log("🔗 [ENHANCED] Connection closed");
+      
       // Save call log before cleanup if not already saved
       if (callLogger) {
         try {
-          const savedLog = await callLogger.saveToDatabase("not_connected") // Status for unexpected disconnection
-          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
+          const savedLog = await callLogger.saveToDatabase('not_connected'); // Status for unexpected disconnection
+          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}`);
         } catch (error) {
-          console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`)
+          console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`);
         }
       }
-
+      
       if (deepgramWs?.readyState === WebSocket.OPEN) {
-        deepgramWs.close()
+        deepgramWs.close();
       }
 
       // Reset state
-      streamSid = null
-      conversationHistory = []
-      isProcessing = false
-      userUtteranceBuffer = ""
-      lastProcessedText = ""
-      deepgramReady = false
-      deepgramAudioQueue = []
-      optimizedTTS = null
-      currentLanguage = undefined
-      processingRequestId = 0
-      callLogger = null
-      callDirection = "inbound"
-      agentConfig = null
-    })
+      streamSid = null;
+      conversationHistory = [];
+      isProcessing = false;
+      userUtteranceBuffer = "";
+      lastProcessedText = "";
+      deepgramReady = false;
+      deepgramAudioQueue = [];
+      optimizedTTS = null;
+      currentLanguage = undefined;
+      processingRequestId = 0;
+      callLogger = null;
+    });
 
     ws.on("error", (error) => {
-      console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`)
-    })
-  })
-}
+      console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`);
+    });
+  });
+};
 
-module.exports = { setupUnifiedVoiceServer }
+module.exports = { setupUnifiedVoiceServer };
