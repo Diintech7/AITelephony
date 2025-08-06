@@ -7,15 +7,11 @@ const CallLog = require("../models/CallLog")
 // Import franc with fallback for different versions
 let franc;
 try {
-  // Try named import first (newer versions)
   franc = require("franc").franc;
   if (!franc) {
-    // Try default import (older versions)
     franc = require("franc");
   }
 } catch (error) {
-  console.error("❌ [FRANC-IMPORT] Failed to import franc:", error.message);
-  // Provide a fallback function
   franc = () => 'und';
 }
 
@@ -51,7 +47,7 @@ const LANGUAGE_MAPPING = {
   bn: "bn-IN",
   te: "te-IN",
   ta: "ta-IN",
-  mr: "mr-IN", // Marathi added
+  mr: "mr-IN",
   gu: "gu-IN",
   kn: "kn-IN",
   ml: "ml-IN",
@@ -63,30 +59,29 @@ const LANGUAGE_MAPPING = {
 
 // Enhanced Franc language code mapping to our supported languages
 const FRANC_TO_SUPPORTED = {
-  'hin': 'hi',    // Hindi
-  'eng': 'en',    // English
-  'ben': 'bn',    // Bengali
-  'tel': 'te',    // Telugu
-  'tam': 'ta',    // Tamil
-  'mar': 'mr',    // Marathi
-  'guj': 'gu',    // Gujarati
-  'kan': 'kn',    // Kannada
-  'mal': 'ml',    // Malayalam
-  'pan': 'pa',    // Punjabi
-  'ori': 'or',    // Odia
-  'asm': 'as',    // Assamese
-  'urd': 'ur',    // Urdu
-  // Additional mappings for franc edge cases
-  'src': 'en',    // This is what franc returns for some English text - FIXED!
-  'und': 'en',    // Undetermined - default to English instead of Hindi for better UX
-  'lat': 'en',    // Latin script often detected as English-like
-  'sco': 'en',    // Scots - treat as English
-  'fra': 'en',    // Sometimes French is detected for English names/phrases
-  'deu': 'en',    // German - fallback to English for international words
-  'nld': 'en',    // Dutch - fallback to English
-  'spa': 'en',    // Spanish - fallback to English
-  'ita': 'en',    // Italian - fallback to English
-  'por': 'en',    // Portuguese - fallback to English
+  'hin': 'hi',
+  'eng': 'en',
+  'ben': 'bn',
+  'tel': 'te',
+  'tam': 'ta',
+  'mar': 'mr',
+  'guj': 'gu',
+  'kan': 'kn',
+  'mal': 'ml',
+  'pan': 'pa',
+  'ori': 'or',
+  'asm': 'as',
+  'urd': 'ur',
+  'src': 'en',
+  'und': 'en',
+  'lat': 'en',
+  'sco': 'en',
+  'fra': 'en',
+  'deu': 'en',
+  'nld': 'en',
+  'spa': 'en',
+  'ita': 'en',
+  'por': 'en',
 }
 
 const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
@@ -98,7 +93,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang
   if (lang === "hi") return "hi"
   if (lang === "en") return "en-IN"
-  if (lang === "mr") return "mr" // Marathi support for Deepgram
+  if (lang === "mr") return "mr"
   return lang
 }
 
@@ -127,80 +122,51 @@ const decodeExtraData = (extraBase64) => {
   try {
     if (!extraBase64) return null
 
-    // Decode base64
     const decodedString = Buffer.from(extraBase64, "base64").toString("utf-8")
-    console.log(`🔍 [DECODE] Raw decoded string: ${decodedString}`)
-
-    // Fix common JSON formatting issues
     const fixedString = decodedString
-      .replace(/="([^"]*?)"/g, ':"$1"') // Replace = with : in key-value pairs
-      .replace(/=([^",}\s]+)/g, ':"$1"') // Handle unquoted values after =
-      .replace(/,\s*}/g, "}") // Remove trailing commas
-      .replace(/,\s*]/g, "]") // Remove trailing commas in arrays
+      .replace(/="([^"]*?)"/g, ':"$1"')
+      .replace(/=([^",}\s]+)/g, ':"$1"')
+      .replace(/,\s*}/g, "}")
+      .replace(/,\s*]/g, "]")
 
-    console.log(`🔧 [DECODE] Fixed JSON string: ${fixedString}`)
-
-    // Parse JSON
     const parsedData = JSON.parse(fixedString)
-    console.log(`✅ [DECODE] Parsed extra data:`, parsedData)
-
     return parsedData
   } catch (error) {
-    console.error(`❌ [DECODE] Failed to decode extra data: ${error.message}`)
-    console.error(`❌ [DECODE] Original string: ${extraBase64}`)
     return null
   }
 }
 
 // Enhanced language detection with better fallback logic
 const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
-  const timer = createTimer("FRANC_DETECTION")
-  
   try {
-    // Clean the text for better detection
     const cleanText = text.trim()
     
-    // For very short text, use smarter heuristics
     if (cleanText.length < 10) {
-      console.log(`⚠️ [FRANC] Text too short (${cleanText.length} chars), using smart fallback`)
-      
-      // Check for obvious English patterns
       const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
-      const hindiPatterns = /[\u0900-\u097F]/  // Devanagari script
+      const hindiPatterns = /[\u0900-\u097F]/
       const englishWords = /^[a-zA-Z\s\?\!\.\,\'\"]+$/
       
       if (hindiPatterns.test(cleanText)) {
-        console.log(`✅ [FRANC] Script-based detection: Hindi`)
         return "hi"
       } else if (englishPatterns.test(cleanText) || englishWords.test(cleanText)) {
-        console.log(`✅ [FRANC] Pattern-based detection: English`)
         return "en"
       } else {
         return fallbackLanguage
       }
     }
 
-    // Check if franc is properly imported
     if (typeof franc !== 'function') {
-      console.error(`❌ [FRANC] Module not properly loaded, using fallback: ${fallbackLanguage}`)
       return fallbackLanguage
     }
 
-    // Use franc to detect language (returns ISO 639-3 codes)
     const detected = franc(cleanText)
-    console.log(`🔍 [FRANC] Raw detection: "${detected}" from text: "${cleanText.substring(0, 50)}..."`)
 
-    // Handle 'und' (undetermined) case
     if (detected === 'und' || !detected) {
-      console.log(`⚠️ [FRANC] Language undetermined, using smart fallback`)
-      
-      // Try pattern-based detection for common cases
-      const hindiPatterns = /[\u0900-\u097F]/  // Devanagari script
+      const hindiPatterns = /[\u0900-\u097F]/
       if (hindiPatterns.test(cleanText)) {
         return "hi"
       }
       
-      // Default to English for Latin script
       const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
       if (latinScript.test(cleanText)) {
         return "en"
@@ -209,22 +175,16 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
       return fallbackLanguage
     }
 
-    // Map franc code to our supported language
     const mappedLang = FRANC_TO_SUPPORTED[detected]
     
     if (mappedLang) {
-      console.log(`✅ [FRANC] Detected: "${mappedLang}" (${detected}) in ${timer.end()}ms`)
       return mappedLang
     } else {
-      console.log(`⚠️ [FRANC] Unsupported language "${detected}", using pattern-based fallback`)
-      
-      // Pattern-based fallback for unsupported franc results
-      const hindiPatterns = /[\u0900-\u097F]/  // Devanagari script
+      const hindiPatterns = /[\u0900-\u097F]/
       if (hindiPatterns.test(cleanText)) {
         return "hi"
       }
       
-      // Check for other Indian language scripts
       const tamilScript = /[\u0B80-\u0BFF]/
       const teluguScript = /[\u0C00-\u0C7F]/
       const kannadaScript = /[\u0C80-\u0CFF]/
@@ -239,7 +199,6 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
       if (gujaratiScript.test(cleanText)) return "gu"
       if (bengaliScript.test(cleanText)) return "bn"
       
-      // For other unsupported languages, default to English if Latin script
       const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
       if (latinScript.test(cleanText)) {
         return "en"
@@ -249,13 +208,13 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
     }
     
   } catch (error) {
-    console.error(`❌ [FRANC] Error: ${error.message}, using fallback: ${fallbackLanguage}`)
     return fallbackLanguage
   }
 }
 
-// Fallback to OpenAI for uncertain cases (optional, for improved accuracy)
+// Fallback to OpenAI for uncertain cases
 const detectLanguageWithOpenAI = async (text) => {
+  const timer = createTimer("LLM_LANGUAGE_DETECTION")
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -298,48 +257,39 @@ Return only the language code, nothing else.`,
     const data = await response.json()
     const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
 
-    // Validate detected language
     const validLanguages = Object.keys(LANGUAGE_MAPPING)
     if (validLanguages.includes(detectedLang)) {
-      console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`)
+      console.log(`🕒 [LLM-LANG-DETECT] ${timer.end()}ms - Detected: ${detectedLang}`)
       return detectedLang
     }
 
-    console.log(`⚠️ [LANG-DETECT] Invalid language "${detectedLang}", defaulting to "en"`)
-    return "en" // Default fallback changed to English
+    return "en"
   } catch (error) {
-    console.error(`❌ [LANG-DETECT] Error: ${error.message}`)
-    return "en" // Default fallback changed to English
+    console.log(`❌ [LLM-LANG-DETECT] ${timer.end()}ms - Error: ${error.message}`)
+    return "en"
   }
 }
 
-// Enhanced hybrid language detection: Franc first, OpenAI fallback for uncertain cases
+// Enhanced hybrid language detection
 const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
-  // Always try franc first (fast)
   const francResult = detectLanguageWithFranc(text)
   
-  // For short English-like text that franc struggles with, be more confident
   if (text.trim().length < 20) {
     const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
     const hindiPatterns = /[\u0900-\u097F]/
     
     if (hindiPatterns.test(text)) {
-      console.log(`🎯 [HYBRID] Script-based detection: Hindi`)
       return "hi"
     } else if (englishPatterns.test(text)) {
-      console.log(`🎯 [HYBRID] Pattern-based detection: English`)
       return "en"
     }
   }
   
-  // If franc gave us a confident result, use it
   if (francResult === 'hi' || francResult === 'en') {
     return francResult
   }
   
-  // For uncertain cases, optionally use OpenAI for better accuracy
   if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
-    console.log(`🔄 [HYBRID] Franc uncertain (${francResult}), trying OpenAI fallback...`)
     return await detectLanguageWithOpenAI(text)
   }
   
@@ -358,7 +308,6 @@ class CallLogger {
     this.totalDuration = 0
   }
 
-  // Log user transcript from Deepgram
   logUserTranscript(transcript, language, timestamp = new Date()) {
     const entry = {
       type: "user",
@@ -369,10 +318,8 @@ class CallLogger {
     }
 
     this.transcripts.push(entry)
-    console.log(`📝 [CALL-LOG] User: "${transcript}" (${language})`)
   }
 
-  // Log AI response from Sarvam
   logAIResponse(response, language, timestamp = new Date()) {
     const entry = {
       type: "ai",
@@ -383,10 +330,8 @@ class CallLogger {
     }
 
     this.responses.push(entry)
-    console.log(`🤖 [CALL-LOG] AI: "${response}" (${language})`)
   }
 
-  // Generate full transcript combining user and AI messages
   generateFullTranscript() {
     const allEntries = [...this.transcripts, ...this.responses].sort(
       (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
@@ -401,11 +346,11 @@ class CallLogger {
       .join("\n")
   }
 
-  // Save call log to database
   async saveToDatabase(leadStatus = "medium") {
+    const timer = createTimer("MONGODB_SAVE")
     try {
       const callEndTime = new Date()
-      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000) // Duration in seconds
+      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000)
 
       const callLogData = {
         clientId: this.clientId,
@@ -414,7 +359,6 @@ class CallLogger {
         transcript: this.generateFullTranscript(),
         duration: this.totalDuration,
         leadStatus: leadStatus,
-        // Additional metadata
         metadata: {
           userTranscriptCount: this.transcripts.length,
           aiResponseCount: this.responses.length,
@@ -427,21 +371,14 @@ class CallLogger {
       const callLog = new CallLog(callLogData)
       const savedLog = await callLog.save()
 
-      console.log(
-        `💾 [CALL-LOG] Saved to DB - ID: ${savedLog._id}, Duration: ${this.totalDuration}s, Direction: ${this.callDirection}`,
-      )
-      console.log(
-        `📊 [CALL-LOG] Stats - User messages: ${this.transcripts.length}, AI responses: ${this.responses.length}`,
-      )
-
+      console.log(`🕒 [MONGODB-SAVE] ${timer.end()}ms - CallLog saved: ${savedLog._id}`)
       return savedLog
     } catch (error) {
-      console.error(`❌ [CALL-LOG] Database save error: ${error.message}`)
+      console.log(`❌ [MONGODB-SAVE] ${timer.end()}ms - Error: ${error.message}`)
       throw error
     }
   }
 
-  // Get call statistics
   getStats() {
     return {
       duration: this.totalDuration,
@@ -454,7 +391,7 @@ class CallLogger {
   }
 }
 
-// Simplified OpenAI processing - returns complete response immediately
+// Simplified OpenAI processing
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
@@ -462,26 +399,18 @@ const processWithOpenAI = async (
   callLogger,
   agentConfig,
 ) => {
-  const timer = createTimer("OPENAI_PROCESSING")
+  const timer = createTimer("LLM_PROCESSING")
 
   try {
-    // Use system prompt from database (limited to 150 bytes)
     let systemPrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
 
-    // Truncate system prompt to 150 bytes if it exceeds the limit
     if (Buffer.byteLength(systemPrompt, "utf8") > 150) {
-      // Truncate to 150 bytes while preserving UTF-8 encoding
       let truncated = systemPrompt
       while (Buffer.byteLength(truncated, "utf8") > 150) {
         truncated = truncated.slice(0, -1)
       }
       systemPrompt = truncated
-      console.log(`⚠️ [SYSTEM-PROMPT] Truncated to 150 bytes: "${systemPrompt}"`)
     }
-
-    console.log(
-      `📝 [SYSTEM-PROMPT] Using from DB (${Buffer.byteLength(systemPrompt, "utf8")} bytes): "${systemPrompt}"`,
-    )
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -504,28 +433,27 @@ const processWithOpenAI = async (
     })
 
     if (!response.ok) {
-      console.error(`❌ [OPENAI] Error: ${response.status}`)
+      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
       return null
     }
 
     const data = await response.json()
     const fullResponse = data.choices[0]?.message?.content?.trim()
 
-    console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`)
+    console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
 
-    // Log AI response to call logger
     if (callLogger && fullResponse) {
       callLogger.logAIResponse(fullResponse, detectedLanguage)
     }
 
     return fullResponse
   } catch (error) {
-    console.error(`❌ [OPENAI] Error: ${error.message}`)
+    console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
     return null
   }
 }
 
-// Simplified TTS processor without phrase chunking
+// Simplified TTS processor
 class SimplifiedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
@@ -534,40 +462,24 @@ class SimplifiedSarvamTTSProcessor {
     this.callLogger = callLogger
     this.sarvamLanguage = getSarvamLanguage(language)
     this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
-
-    // Interruption handling
     this.isInterrupted = false
     this.currentAudioStreaming = null
-
-    // Audio streaming stats
     this.totalAudioBytes = 0
   }
 
-  // Method to interrupt current processing
   interrupt() {
-    console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`)
     this.isInterrupted = true
-
-    // Stop current audio streaming if active
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true
     }
-
-    console.log(`🛑 [SARVAM-TTS] Processing interrupted and cleaned up`)
   }
 
-  // Reset for new processing
   reset(newLanguage) {
     this.interrupt()
-
-    // Update language settings
     if (newLanguage) {
       this.language = newLanguage
       this.sarvamLanguage = getSarvamLanguage(newLanguage)
-      console.log(`🔄 [SARVAM-TTS] Language updated to: ${this.sarvamLanguage}`)
     }
-
-    // Reset state
     this.isInterrupted = false
     this.totalAudioBytes = 0
   }
@@ -575,11 +487,9 @@ class SimplifiedSarvamTTSProcessor {
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
 
-    const timer = createTimer("SARVAM_TTS")
+    const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      console.log(`🎵 [SARVAM-TTS] Synthesizing complete text: "${text}" (${this.sarvamLanguage})`)
-
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -600,8 +510,11 @@ class SimplifiedSarvamTTSProcessor {
       })
 
       if (!response.ok || this.isInterrupted) {
-        if (this.isInterrupted) return
-        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`)
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+          throw new Error(`Sarvam API error: ${response.status}`)
+        }
+        return
       }
 
       const responseData = await response.json()
@@ -609,23 +522,22 @@ class SimplifiedSarvamTTSProcessor {
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
           throw new Error("No audio data received from Sarvam API")
         }
         return
       }
 
-      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`)
+      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
-      // Stream audio if not interrupted
       if (!this.isInterrupted) {
         await this.streamAudioOptimizedForSIP(audioBase64)
-
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
       }
     } catch (error) {
       if (!this.isInterrupted) {
-        console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`)
+        console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
         throw error
       }
     }
@@ -638,13 +550,10 @@ class SimplifiedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    // SIP audio specifications
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
-
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes to StreamSid: ${this.streamSid}`)
 
     let position = 0
     let chunkIndex = 0
@@ -667,21 +576,13 @@ class SimplifiedSarvamTTSProcessor {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
-          console.log(
-            `📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}/${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)}: ${chunk.length} bytes sent`,
-          )
         } catch (error) {
-          console.error(`❌ [SARVAM-SIP] Failed to send chunk ${chunkIndex + 1}: ${error.message}`)
           break
         }
       } else {
-        console.error(
-          `❌ [SARVAM-SIP] WebSocket not ready: readyState=${this.ws.readyState}, interrupted=${this.isInterrupted}`,
-        )
         break
       }
 
-      // Delay between chunks
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
         const delayMs = Math.max(chunkDurationMs - 2, 10)
@@ -690,12 +591,6 @@ class SimplifiedSarvamTTSProcessor {
 
       position += chunkSize
       chunkIndex++
-    }
-
-    if (this.isInterrupted || streamingSession.interrupt) {
-      console.log(`🛑 [SARVAM-SIP] Audio streaming interrupted at chunk ${chunkIndex}`)
-    } else {
-      console.log(`✅ [SARVAM-SIP] Completed streaming ${successfulChunks}/${chunkIndex} chunks successfully`)
     }
 
     this.currentAudioStreaming = null
@@ -708,18 +603,15 @@ class SimplifiedSarvamTTSProcessor {
   }
 }
 
-// Enhanced agent lookup function for both inbound and outbound calls
+// Enhanced agent lookup function
 const findAgentForCall = async (callData) => {
+  const timer = createTimer("MONGODB_AGENT_LOOKUP")
   try {
     const { accountSid, callDirection, extraData } = callData
-
-    console.log(`🔍 [AGENT-LOOKUP] Direction: ${callDirection}, AccountSid: ${accountSid}`)
-    console.log(`🔍 [AGENT-LOOKUP] ExtraData:`, extraData)
 
     let agent = null
 
     if (callDirection === "inbound") {
-      // Inbound call: Use accountSid to find agent
       if (!accountSid) {
         throw new Error("Missing accountSid for inbound call")
       }
@@ -728,51 +620,37 @@ const findAgentForCall = async (callData) => {
       if (!agent) {
         throw new Error(`No agent found for accountSid: ${accountSid}`)
       }
-
-      console.log(`✅ [AGENT-LOOKUP] Inbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
     } else if (callDirection === "outbound") {
-      // Outbound call: Use CallVaId from extraData to match callerId
       if (!extraData) {
         throw new Error("Missing extraData for outbound call")
       }
 
       if (!extraData.CallVaId) {
-        console.error(`❌ [AGENT-LOOKUP] ExtraData structure:`, JSON.stringify(extraData, null, 2))
         throw new Error("Missing CallVaId in extraData for outbound call")
       }
 
       const callVaId = extraData.CallVaId
-      console.log(`🔍 [AGENT-LOOKUP] Looking for agent with callerId: ${callVaId}`)
-
       agent = await Agent.findOne({ callerId: callVaId }).lean()
       if (!agent) {
         throw new Error(`No agent found for callerId: ${callVaId}`)
       }
-
-      console.log(`✅ [AGENT-LOOKUP] Outbound agent found: ${agent.agentName} (Client: ${agent.clientId})`)
     } else {
       throw new Error(`Unknown call direction: ${callDirection}`)
     }
 
+    console.log(`🕒 [MONGODB-AGENT-LOOKUP] ${timer.end()}ms - Agent found: ${agent.agentName}`)
     return agent
   } catch (error) {
-    console.error(`❌ [AGENT-LOOKUP] Error: ${error.message}`)
+    console.log(`❌ [MONGODB-AGENT-LOOKUP] ${timer.end()}ms - Error: ${error.message}`)
     throw error
   }
 }
 
-// Main WebSocket server setup with enhanced language detection
+// Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ENHANCED] Voice Server started with improved Franc language detection")
-
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New enhanced WebSocket connection")
-
-    // Parse URL parameters for call direction detection
     const url = new URL(req.url, `http://${req.headers.host}`)
     const urlParams = Object.fromEntries(url.searchParams.entries())
-
-    console.log(`🔍 [URL-PARAMS] Received parameters:`, urlParams)
 
     // Session state
     let streamSid = null
@@ -791,11 +669,10 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramWs = null
     let deepgramReady = false
     let deepgramAudioQueue = []
+    let sttTimer = null
 
-    // Optimized Deepgram connection with enhanced language support
     const connectToDeepgram = async () => {
       try {
-        console.log("🔌 [DEEPGRAM] Connecting...")
         const deepgramLanguage = getDeepgramLanguage(currentLanguage)
 
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
@@ -814,8 +691,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
         deepgramWs.onopen = () => {
           deepgramReady = true
-          console.log("✅ [DEEPGRAM] Connected")
-
           deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
           deepgramAudioQueue = []
         }
@@ -826,38 +701,39 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         deepgramWs.onerror = (error) => {
-          console.error("❌ [DEEPGRAM] Error:", error)
           deepgramReady = false
         }
 
         deepgramWs.onclose = () => {
-          console.log("🔌 [DEEPGRAM] Connection closed")
           deepgramReady = false
         }
       } catch (error) {
-        console.error("❌ [DEEPGRAM] Setup error:", error.message)
+        // Silent error handling
       }
     }
 
-    // Enhanced Deepgram response handling with improved language detection
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
+        if (!sttTimer) {
+          sttTimer = createTimer("STT_TRANSCRIPTION")
+        }
+
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          // Interrupt current processing if new speech detected
           if (currentTTS && isProcessing) {
-            console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`)
             currentTTS.interrupt()
             isProcessing = false
-            processingRequestId++ // Invalidate current processing
+            processingRequestId++
           }
 
           if (is_final) {
+            console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+            sttTimer = null
+
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
-            // Log the final transcript to call logger with enhanced language detection
             if (callLogger && transcript.trim()) {
               const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
               callLogger.logUserTranscript(transcript.trim(), detectedLang)
@@ -868,8 +744,12 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         }
       } else if (data.type === "UtteranceEnd") {
+        if (sttTimer) {
+          console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${userUtteranceBuffer.trim()}"`)
+          sttTimer = null
+        }
+
         if (userUtteranceBuffer.trim()) {
-          // Log the utterance end transcript with enhanced language detection
           if (callLogger && userUtteranceBuffer.trim()) {
             const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
             callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
@@ -881,11 +761,9 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced utterance processing with improved Franc detection
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
-      // Interrupt any ongoing processing
       if (currentTTS) {
         currentTTS.interrupt()
       }
@@ -893,21 +771,14 @@ const setupUnifiedVoiceServer = (wss) => {
       isProcessing = true
       lastProcessedText = text
       const currentRequestId = ++processingRequestId
-      const timer = createTimer("UTTERANCE_PROCESSING")
 
       try {
-        console.log(`🎤 [USER] Processing: "${text}"`)
-
-        // Step 1: Enhanced language detection using improved Franc
         const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
 
-        // Step 2: Update current language if changed
         if (detectedLanguage !== currentLanguage) {
-          console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage}`)
           currentLanguage = detectedLanguage
         }
 
-        // Step 3: Get complete response from OpenAI
         const response = await processWithOpenAI(
           text,
           conversationHistory,
@@ -916,32 +787,21 @@ const setupUnifiedVoiceServer = (wss) => {
           agentConfig,
         )
 
-        // Step 4: Check if still the current request (not interrupted)
         if (processingRequestId === currentRequestId && response) {
-          console.log(`🤖 [RESPONSE] "${response}"`)
-
-          // Step 5: Create TTS processor and synthesize complete response
           currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
           await currentTTS.synthesizeAndStream(response)
 
-          // Step 6: Update conversation history
           conversationHistory.push(
             { role: "user", content: text },
             { role: "assistant", content: response }
           )
 
-          // Keep last 10 messages for context
           if (conversationHistory.length > 10) {
             conversationHistory = conversationHistory.slice(-10)
           }
-
-          const stats = currentTTS.getStats()
-          console.log(`📊 [TTS-STATS] ${stats.totalAudioBytes} bytes processed`)
         }
-
-        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`)
       } catch (error) {
-        console.error(`❌ [PROCESSING] Error: ${error.message}`)
+        // Silent error handling
       } finally {
         if (processingRequestId === currentRequestId) {
           isProcessing = false
@@ -949,14 +809,11 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced WebSocket message handling
     ws.on("message", async (message) => {
       try {
         const messageStr = message.toString()
 
-        // Skip non-JSON messages
         if (messageStr === "EOS" || messageStr === "BOS" || !messageStr.startsWith("{")) {
-          console.log(`📝 [WEBSOCKET] Skipping non-JSON message: ${messageStr}`)
           return
         }
 
@@ -964,14 +821,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`)
             break
 
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
 
-            // Extract mobile number from different possible fields
             let mobile = null
             if (data.start?.from) {
               mobile = data.start.from
@@ -981,7 +836,6 @@ const setupUnifiedVoiceServer = (wss) => {
               mobile = data.start.extraData.CallCli
             }
 
-            // Extract DID/To number
             let to = null
             if (data.start?.to) {
               to = data.start.to
@@ -991,49 +845,29 @@ const setupUnifiedVoiceServer = (wss) => {
               to = data.start.extraData.DID
             }
 
-            console.log(`📞 [CALL-INFO] Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
-
-            // Determine call direction and decode extra data if present
             let extraData = null
 
-            // Try to get extra data from multiple sources
             if (data.start?.extraData) {
               extraData = decodeExtraData(data.start.extraData)
             } else if (urlParams.extra) {
-              // Decode extra data from URL parameters
               extraData = decodeExtraData(urlParams.extra)
-              console.log(`🔍 [EXTRA-DATA] Decoded from URL params:`, extraData)
             }
 
-            // Update mobile number from decoded extra data if available
             if (extraData?.CallCli && !mobile) {
               mobile = extraData.CallCli
-              console.log(`📱 [MOBILE-UPDATE] Updated mobile from extraData: ${mobile}`)
             }
 
-            // Determine call direction based on multiple indicators
             if (extraData && extraData.CallDirection === "OutDial") {
               callDirection = "outbound"
-              console.log(
-                `📞 [OUTBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, CallVaId: ${extraData.CallVaId}`,
-              )
             } else if (urlParams.direction === "OutDial") {
               callDirection = "outbound"
-              console.log(`📞 [OUTBOUND] Call detected via URL param - Mobile: ${mobile}, DID: ${to}`)
-
-              // For outbound calls detected via URL param, ensure we have extraData
               if (!extraData && urlParams.extra) {
                 extraData = decodeExtraData(urlParams.extra)
-                console.log(`🔍 [EXTRA-DATA] Decoded for outbound call:`, extraData)
               }
             } else {
               callDirection = "inbound"
-              console.log(`📞 [INBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
             }
 
-            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
-
-            // Find appropriate agent based on call direction
             try {
               agentConfig = await findAgentForCall({
                 accountSid,
@@ -1052,7 +886,6 @@ const setupUnifiedVoiceServer = (wss) => {
                 return
               }
             } catch (err) {
-              console.error(`❌ [AGENT-LOOKUP] ${err.message}`)
               ws.send(
                 JSON.stringify({
                   event: "error",
@@ -1064,22 +897,14 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             ws.sessionAgentConfig = agentConfig
-            // Set default language to English if not specified, instead of Hindi
             currentLanguage = agentConfig.language || "en"
 
-            // Initialize call logger with direction
             callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
-            console.log(
-              `📝 [CALL-LOG] Initialized for client: ${agentConfig.clientId}, mobile: ${mobile}, direction: ${callDirection}`,
-            )
 
             await connectToDeepgram()
 
-            // Use agent's firstMessage for greeting and log it
             const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
-            console.log(`👋 [GREETING] ${greeting}`)
 
-            // Log the initial greeting
             if (callLogger) {
               callLogger.logAIResponse(greeting, currentLanguage)
             }
@@ -1102,21 +927,11 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           case "stop":
-            console.log(`📞 [ENHANCED] Stream stopped - Direction: ${callDirection}`)
-
-            // Save call log to database before closing
             if (callLogger) {
               try {
-                const savedLog = await callLogger.saveToDatabase("medium") // Default lead status
-                console.log(`💾 [CALL-LOG] Final save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
-
-                // Print call statistics
-                const stats = callLogger.getStats()
-                console.log(
-                  `📊 [CALL-STATS] Duration: ${stats.duration}s, User: ${stats.userMessages}, AI: ${stats.aiResponses}, Languages: ${stats.languages.join(", ")}, Direction: ${stats.callDirection}`,
-                )
+                const savedLog = await callLogger.saveToDatabase("medium")
               } catch (error) {
-                console.error(`❌ [CALL-LOG] Failed to save final log: ${error.message}`)
+                // Silent error handling
               }
             }
 
@@ -1126,24 +941,19 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           default:
-            console.log(`❓ [ENHANCED] Unknown event: ${data.event}`)
+            break
         }
       } catch (error) {
-        console.error(`❌ [ENHANCED] Message error: ${error.message}`)
+        // Silent error handling
       }
     })
 
-    // Enhanced connection cleanup
     ws.on("close", async () => {
-      console.log(`🔗 [ENHANCED] Connection closed - Direction: ${callDirection}`)
-
-      // Save call log before cleanup if not already saved
       if (callLogger) {
         try {
-          const savedLog = await callLogger.saveToDatabase("not_connected") // Status for unexpected disconnection
-          console.log(`💾 [CALL-LOG] Emergency save completed - ID: ${savedLog._id}, Direction: ${callDirection}`)
+          const savedLog = await callLogger.saveToDatabase("not_connected")
         } catch (error) {
-          console.error(`❌ [CALL-LOG] Emergency save failed: ${error.message}`)
+          // Silent error handling
         }
       }
 
@@ -1165,10 +975,11 @@ const setupUnifiedVoiceServer = (wss) => {
       callLogger = null
       callDirection = "inbound"
       agentConfig = null
+      sttTimer = null
     })
 
     ws.on("error", (error) => {
-      console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`)
+      // Silent error handling
     })
   })
 }
