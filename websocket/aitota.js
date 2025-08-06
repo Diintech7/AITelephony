@@ -3,7 +3,21 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
-const franc = require("franc") // Add franc for fast language detection
+
+// Import franc with fallback for different versions
+let franc;
+try {
+  // Try named import first (newer versions)
+  franc = require("franc").franc;
+  if (!franc) {
+    // Try default import (older versions)
+    franc = require("franc");
+  }
+} catch (error) {
+  console.error("❌ [FRANC-IMPORT] Failed to import franc:", error.message);
+  // Provide a fallback function
+  franc = () => 'und';
+}
 
 // Load API keys from environment variables
 const API_KEYS = {
@@ -141,12 +155,18 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "hi") => {
       return fallbackLanguage
     }
 
+    // Check if franc is properly imported
+    if (typeof franc !== 'function') {
+      console.error(`❌ [FRANC] Module not properly loaded, using fallback: ${fallbackLanguage}`)
+      return fallbackLanguage
+    }
+
     // Use franc to detect language (returns ISO 639-3 codes)
     const detected = franc(cleanText)
     console.log(`🔍 [FRANC] Raw detection: "${detected}" from text: "${cleanText.substring(0, 50)}..."`)
 
     // Handle 'und' (undetermined) case
-    if (detected === 'und') {
+    if (detected === 'und' || !detected) {
       console.log(`⚠️ [FRANC] Language undetermined, using fallback: ${fallbackLanguage}`)
       return fallbackLanguage
     }
