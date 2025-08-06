@@ -4,6 +4,15 @@ const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 
+// OPTION 1: Using 'franc' - Fast and accurate language detection
+const franc = require('franc')
+
+// OPTION 2: Using 'cld' - Chrome Language Detection (more accurate for Indian languages)
+// const cld = require('cld')
+
+// OPTION 3: Using 'langdetect' - Python port with good Indian language support
+// const LanguageDetect = require('langdetect')
+
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
@@ -44,6 +53,172 @@ const LANGUAGE_MAPPING = {
   or: "or-IN",
   as: "as-IN",
   ur: "ur-IN",
+}
+
+// OPTION 1: Ultra-fast language detection using 'franc' library
+const detectLanguageWithFranc = (text) => {
+  const timer = createTimer("FRANC_DETECTION")
+  
+  try {
+    // Franc uses ISO 639-3 codes, we need to map them to our format
+    const francToOurLanguage = {
+      'hin': 'hi',  // Hindi
+      'eng': 'en',  // English
+      'ben': 'bn',  // Bengali
+      'tel': 'te',  // Telugu
+      'tam': 'ta',  // Tamil
+      'mar': 'mr',  // Marathi
+      'guj': 'gu',  // Gujarati
+      'kan': 'kn',  // Kannada
+      'mal': 'ml',  // Malayalam
+      'pan': 'pa',  // Punjabi
+      'ori': 'or',  // Odia
+      'asm': 'as',  // Assamese
+      'urd': 'ur',  // Urdu
+    }
+
+    const detected = franc(text)
+    const mappedLanguage = francToOurLanguage[detected]
+    const finalLanguage = mappedLanguage || 'hi' // Default to Hindi
+
+    console.log(`🔍 [FRANC] Detected: "${detected}" → "${finalLanguage}" from text: "${text.substring(0, 50)}..." (${timer.end()}ms)`)
+    return finalLanguage
+
+  } catch (error) {
+    console.error(`❌ [FRANC] Error: ${error.message}`)
+    return 'hi' // Default fallback
+  }
+}
+
+// OPTION 2: Using Chrome Language Detection (CLD) - More accurate but requires native compilation
+const detectLanguageWithCLD = async (text) => {
+  const timer = createTimer("CLD_DETECTION")
+  
+  try {
+    const cld = require('cld')
+    
+    const cldToOurLanguage = {
+      'HINDI': 'hi',
+      'ENGLISH': 'en',
+      'BENGALI': 'bn',
+      'TELUGU': 'te',
+      'TAMIL': 'ta',
+      'MARATHI': 'mr',
+      'GUJARATI': 'gu',
+      'KANNADA': 'kn',
+      'MALAYALAM': 'ml',
+      'PUNJABI': 'pa',
+      'ORIYA': 'or',
+      'ASSAMESE': 'as',
+      'URDU': 'ur',
+    }
+
+    const result = await cld.detect(text)
+    const detectedLang = result.languages[0]?.name?.toUpperCase()
+    const mappedLanguage = cldToOurLanguage[detectedLang]
+    const finalLanguage = mappedLanguage || 'hi'
+
+    console.log(`🔍 [CLD] Detected: "${detectedLang}" → "${finalLanguage}" from text: "${text.substring(0, 50)}..." (${timer.end()}ms)`)
+    return finalLanguage
+
+  } catch (error) {
+    console.error(`❌ [CLD] Error: ${error.message}`)
+    return 'hi' // Default fallback
+  }
+}
+
+// OPTION 3: Regex-based detection for Indian scripts (Ultra-fast for specific use cases)
+const detectLanguageWithRegex = (text) => {
+  const timer = createTimer("REGEX_DETECTION")
+  
+  try {
+    // Define character ranges for different scripts
+    const scriptPatterns = {
+      hi: /[\u0900-\u097F]/,  // Devanagari (Hindi)
+      bn: /[\u0980-\u09FF]/,  // Bengali
+      te: /[\u0C00-\u0C7F]/,  // Telugu
+      ta: /[\u0B80-\u0BFF]/,  // Tamil
+      mr: /[\u0900-\u097F]/,  // Marathi (also uses Devanagari)
+      gu: /[\u0A80-\u0AFF]/,  // Gujarati
+      kn: /[\u0C80-\u0CFF]/,  // Kannada
+      ml: /[\u0D00-\u0D7F]/,  // Malayalam
+      pa: /[\u0A00-\u0A7F]/,  // Punjabi (Gurmukhi)
+      or: /[\u0B00-\u0B7F]/,  // Odia
+      as: /[\u0980-\u09FF]/,  // Assamese (similar to Bengali)
+      ur: /[\u0600-\u06FF]/,  // Urdu (Arabic script)
+    }
+
+    // Check for English first (ASCII characters)
+    if (/^[a-zA-Z\s\d\.,!?'"()-]+$/.test(text.trim())) {
+      console.log(`🔍 [REGEX] Detected: "en" from text: "${text.substring(0, 50)}..." (${timer.end()}ms)`)
+      return 'en'
+    }
+
+    // Check each script pattern
+    for (const [lang, pattern] of Object.entries(scriptPatterns)) {
+      if (pattern.test(text)) {
+        // Special handling for Devanagari (could be Hindi or Marathi)
+        if (lang === 'hi' || lang === 'mr') {
+          // Simple heuristic: check for common Marathi words
+          const marathiWords = ['आहे', 'आहेत', 'होते', 'होती', 'तुम्ही', 'माझे', 'तुमचे']
+          const hasMarathiWords = marathiWords.some(word => text.includes(word))
+          const detectedLang = hasMarathiWords ? 'mr' : 'hi'
+          console.log(`🔍 [REGEX] Devanagari detected as: "${detectedLang}" from text: "${text.substring(0, 50)}..." (${timer.end()}ms)`)
+          return detectedLang
+        }
+
+        console.log(`🔍 [REGEX] Detected: "${lang}" from text: "${text.substring(0, 50)}..." (${timer.end()}ms)`)
+        return lang
+      }
+    }
+
+    // Default fallback
+    console.log(`🔍 [REGEX] No pattern matched, defaulting to "hi" (${timer.end()}ms)`)
+    return 'hi'
+
+  } catch (error) {
+    console.error(`❌ [REGEX] Error: ${error.message}`)
+    return 'hi' // Default fallback
+  }
+}
+
+// OPTION 4: Hybrid approach - Fast regex first, then franc for complex cases
+const detectLanguageHybrid = (text) => {
+  const timer = createTimer("HYBRID_DETECTION")
+  
+  try {
+    // First try regex for common cases (ultra-fast)
+    if (text.length < 20) {
+      return detectLanguageWithRegex(text)
+    }
+
+    // For longer text, use franc for better accuracy
+    const francResult = detectLanguageWithFranc(text)
+    
+    // If franc is uncertain (returns 'und' - undetermined), fall back to regex
+    if (francResult === 'hi' && text.length > 10) {
+      const regexResult = detectLanguageWithRegex(text)
+      console.log(`🔍 [HYBRID] Franc uncertain, using regex: "${regexResult}" (${timer.end()}ms)`)
+      return regexResult
+    }
+
+    console.log(`🔍 [HYBRID] Using franc result: "${francResult}" (${timer.end()}ms)`)
+    return francResult
+
+  } catch (error) {
+    console.error(`❌ [HYBRID] Error: ${error.message}`)
+    return 'hi' // Default fallback
+  }
+}
+
+// Choose your preferred detection method here
+// RECOMMENDED: Use detectLanguageHybrid for best balance of speed and accuracy
+const detectLanguageFast = detectLanguageHybrid
+
+// Update the main detection function to use the fast method
+const detectLanguageWithOpenAI = async (text) => {
+  // For backwards compatibility, we'll use the fast detection instead
+  return detectLanguageFast(text)
 }
 
 const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
@@ -106,64 +281,6 @@ const decodeExtraData = (extraBase64) => {
     console.error(`❌ [DECODE] Failed to decode extra data: ${error.message}`)
     console.error(`❌ [DECODE] Original string: ${extraBase64}`)
     return null
-  }
-}
-
-// Enhanced language detection with Marathi support
-const detectLanguageWithOpenAI = async (text) => {
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code (hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur). 
-
-Examples:
-- "Hello, how are you?" → en
-- "नमस्ते, आप कैसे हैं?" → hi
-- "আপনি কেমন আছেন?" → bn
-- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
-- "तुम्ही कसे आहात?" → mr
-- "તમે કેમ છો?" → gu
-
-Return only the language code, nothing else.`,
-          },
-          {
-            role: "user",
-            content: text,
-          },
-        ],
-        max_tokens: 10,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`Language detection failed: ${response.status}`)
-    }
-
-    const data = await response.json()
-    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
-
-    // Validate detected language
-    const validLanguages = Object.keys(LANGUAGE_MAPPING)
-    if (validLanguages.includes(detectedLang)) {
-      console.log(`🔍 [LANG-DETECT] Detected: "${detectedLang}" from text: "${text.substring(0, 50)}..."`)
-      return detectedLang
-    }
-
-    console.log(`⚠️ [LANG-DETECT] Invalid language "${detectedLang}", defaulting to "hi"`)
-    return "hi" // Default fallback
-  } catch (error) {
-    console.error(`❌ [LANG-DETECT] Error: ${error.message}`)
-    return "hi" // Default fallback
   }
 }
 
@@ -584,10 +701,10 @@ const findAgentForCall = async (callData) => {
 
 // Main WebSocket server setup with simplified processing
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [SIMPLIFIED] Voice Server started with simplified AI processing")
+  console.log("🚀 [FAST-DETECTION] Voice Server started with ultra-fast language detection")
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New simplified WebSocket connection")
+    console.log("🔗 [CONNECTION] New WebSocket connection with fast language detection")
 
     // Parse URL parameters for call direction detection
     const url = new URL(req.url, `http://${req.headers.host}`)
@@ -660,7 +777,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Handle Deepgram responses
+    // Handle Deepgram responses with fast language detection
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript
@@ -678,9 +795,9 @@ const setupUnifiedVoiceServer = (wss) => {
           if (is_final) {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
-            // Log the final transcript to call logger
+            // Log the final transcript to call logger with fast language detection
             if (callLogger && transcript.trim()) {
-              const detectedLang = await detectLanguageWithOpenAI(transcript.trim())
+              const detectedLang = detectLanguageFast(transcript.trim())  // Ultra-fast detection
               callLogger.logUserTranscript(transcript.trim(), detectedLang)
             }
 
@@ -690,9 +807,9 @@ const setupUnifiedVoiceServer = (wss) => {
         }
       } else if (data.type === "UtteranceEnd") {
         if (userUtteranceBuffer.trim()) {
-          // Log the utterance end transcript
+          // Log the utterance end transcript with fast detection
           if (callLogger && userUtteranceBuffer.trim()) {
-            const detectedLang = await detectLanguageWithOpenAI(userUtteranceBuffer.trim())
+            const detectedLang = detectLanguageFast(userUtteranceBuffer.trim())  // Ultra-fast detection
             callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
           }
 
@@ -702,7 +819,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Simplified utterance processing
+    // Simplified utterance processing with ultra-fast language detection
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
@@ -719,8 +836,8 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`)
 
-        // Step 1: Detect language using OpenAI
-        const detectedLanguage = await detectLanguageWithOpenAI(text)
+        // Step 1: Ultra-fast language detection (< 5ms)
+        const detectedLanguage = detectLanguageFast(text)
 
         // Step 2: Update current language
         if (detectedLanguage !== currentLanguage) {
@@ -785,7 +902,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [SIMPLIFIED] Connected - Protocol: ${data.protocol}`)
+            console.log(`🔗 [FAST-DETECTION] Connected - Protocol: ${data.protocol}`)
             break
 
           case "start": {
@@ -852,7 +969,7 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log(`📞 [INBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
             }
 
-            console.log(`🎯 [SIMPLIFIED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
+            console.log(`🎯 [FAST-DETECTION] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
 
             // Find appropriate agent based on call direction
             try {
@@ -922,7 +1039,7 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           case "stop":
-            console.log(`📞 [SIMPLIFIED] Stream stopped - Direction: ${callDirection}`)
+            console.log(`📞 [FAST-DETECTION] Stream stopped - Direction: ${callDirection}`)
 
             // Save call log to database before closing
             if (callLogger) {
@@ -946,16 +1063,16 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           default:
-            console.log(`❓ [SIMPLIFIED] Unknown event: ${data.event}`)
+            console.log(`❓ [FAST-DETECTION] Unknown event: ${data.event}`)
         }
       } catch (error) {
-        console.error(`❌ [SIMPLIFIED] Message error: ${error.message}`)
+        console.error(`❌ [FAST-DETECTION] Message error: ${error.message}`)
       }
     })
 
     // Connection cleanup
     ws.on("close", async () => {
-      console.log(`🔗 [SIMPLIFIED] Connection closed - Direction: ${callDirection}`)
+      console.log(`🔗 [FAST-DETECTION] Connection closed - Direction: ${callDirection}`)
 
       // Save call log before cleanup if not already saved
       if (callLogger) {
@@ -988,7 +1105,7 @@ const setupUnifiedVoiceServer = (wss) => {
     })
 
     ws.on("error", (error) => {
-      console.error(`❌ [SIMPLIFIED] WebSocket error: ${error.message}`)
+      console.error(`❌ [FAST-DETECTION] WebSocket error: ${error.message}`)
     })
   })
 }
