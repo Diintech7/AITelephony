@@ -518,7 +518,7 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("SARVAM_WS_CONNECT");
     try {
       const sarvamUrl = new URL("wss://api.sarvam.ai/text-to-speech/ws");
-      sarvamUrl.searchParams.append("model", "bulbul:v2"); // Using v2 model as per HTML example
+      sarvamUrl.searchParams.append("model", "bulbul:v2"); 
 
       // Corrected: Pass API key as a subprotocol
       this.sarvamWs = new WebSocket(sarvamUrl.toString(), [`api-subscription-key.${API_KEYS.sarvam}`]);
@@ -542,8 +542,8 @@ class SimplifiedSarvamTTSProcessor {
               pace: 1.0,
               loudness: 1.0, 
               enable_preprocessing: false,
-              output_audio_codec: "linear16", // Crucial for SIP/Twilio
-              output_audio_bitrate: "8k", // For 8000 Hz linear16
+              output_audio_codec: "pcm", // Crucial for SIP/Twilio
+              output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
               min_buffer_size: 50, // As per HTML example
               max_chunk_length: 150, // As per HTML example
