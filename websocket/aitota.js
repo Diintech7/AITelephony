@@ -536,9 +536,9 @@ class SimplifiedSarvamTTSProcessor {
           const configMessage = {
             type: "config",
             data: {
-              target_language_code: this.sarvamLanguage,
-              speaker: this.voice,
-              pitch: 0,
+              target_language_code: "hi-IN",
+              speaker: "anushka",
+              pitch: 0.5,
               pace: 1.0,
               loudness: 1.0, 
               enable_preprocessing: false,
