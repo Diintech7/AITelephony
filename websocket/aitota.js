@@ -275,15 +275,18 @@ class CallLogger {
   }
 }
 
-// Simplified OpenAI processing - returns complete response immediately
-const processWithOpenAI = async (
+// Optimized OpenAI streaming with phrase-based chunking and language detection
+const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
   detectedLanguage,
+  onPhrase,
+  onComplete,
+  onInterrupt,
   callLogger,
-  agentConfig,
+  agentConfig, // Add agent config parameter
 ) => {
-  const timer = createTimer("OPENAI_PROCESSING")
+  const timer = createTimer("OPENAI_STREAMING")
 
   try {
     // Use system prompt from database (limited to 150 bytes)
@@ -321,6 +324,7 @@ const processWithOpenAI = async (
         messages,
         max_tokens: 50,
         temperature: 0.3,
+        stream: true,
       }),
     })
 
@@ -329,30 +333,126 @@ const processWithOpenAI = async (
       return null
     }
 
-    const data = await response.json()
-    const fullResponse = data.choices[0]?.message?.content?.trim()
+    let fullResponse = ""
+    let phraseBuffer = ""
+    let isFirstPhrase = true
+    let isInterrupted = false
 
-    console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
 
-    // Log AI response to call logger
-    if (callLogger && fullResponse) {
-      callLogger.logAIResponse(fullResponse, detectedLanguage)
+    // Check for interruption periodically
+    const checkInterruption = () => {
+      return onInterrupt && onInterrupt()
     }
 
-    return fullResponse
+    while (true) {
+      // Check for interruption
+      if (checkInterruption()) {
+        isInterrupted = true
+        console.log(`⚠️ [OPENAI] Stream interrupted by new user input`)
+        reader.cancel()
+        break
+      }
+
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value, { stream: true })
+      const lines = chunk.split("\n").filter((line) => line.trim())
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6)
+
+          if (data === "[DONE]") {
+            if (phraseBuffer.trim() && !isInterrupted) {
+              onPhrase(phraseBuffer.trim(), detectedLanguage)
+              fullResponse += phraseBuffer
+            }
+            break
+          }
+
+          try {
+            const parsed = JSON.parse(data)
+            const content = parsed.choices?.[0]?.delta?.content
+
+            if (content) {
+              phraseBuffer += content
+
+              // Check for interruption before sending phrase
+              if (checkInterruption()) {
+                isInterrupted = true
+                break
+              }
+
+              if (shouldSendPhrase(phraseBuffer)) {
+                const phrase = phraseBuffer.trim()
+                if (phrase.length > 0 && !isInterrupted) {
+                  if (isFirstPhrase) {
+                    console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint("first_phrase")}ms)`)
+                    isFirstPhrase = false
+                  }
+                  onPhrase(phrase, detectedLanguage)
+                  fullResponse += phrase
+                  phraseBuffer = ""
+                }
+              }
+            }
+          } catch (e) {
+            // Skip malformed JSON
+          }
+        }
+      }
+
+      if (isInterrupted) break
+    }
+
+    if (!isInterrupted) {
+      console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`)
+
+      // Log AI response to call logger
+      if (callLogger && fullResponse.trim()) {
+        callLogger.logAIResponse(fullResponse.trim(), detectedLanguage)
+      }
+
+      onComplete(fullResponse)
+    } else {
+      console.log(`🤖 [OPENAI] Interrupted after ${timer.end()}ms`)
+    }
+
+    return isInterrupted ? null : fullResponse
   } catch (error) {
     console.error(`❌ [OPENAI] Error: ${error.message}`)
     return null
   }
 }
 
-// Simplified TTS processor without phrase chunking
-class SimplifiedSarvamTTSProcessor {
+// Smart phrase detection for better chunking
+const shouldSendPhrase = (buffer) => {
+  const trimmed = buffer.trim()
+
+  // Complete sentences
+  if (/[.!?।॥।]$/.test(trimmed)) return true
+
+  // Meaningful phrases with natural breaks
+  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true
+
+  // Longer phrases (prevent too much buffering)
+  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true
+
+  return false
+}
+
+// Enhanced TTS processor with call logging
+class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
+    this.queue = []
+    this.isProcessing = false
     this.sarvamLanguage = getSarvamLanguage(language)
     this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
 
@@ -360,7 +460,13 @@ class SimplifiedSarvamTTSProcessor {
     this.isInterrupted = false
     this.currentAudioStreaming = null
 
+    // Sentence-based processing settings
+    this.sentenceBuffer = ""
+    this.processingTimeout = 100
+    this.sentenceTimer = null
+
     // Audio streaming stats
+    this.totalChunks = 0
     this.totalAudioBytes = 0
   }
 
@@ -368,6 +474,16 @@ class SimplifiedSarvamTTSProcessor {
   interrupt() {
     console.log(`⚠️ [SARVAM-TTS] Interrupting current processing`)
     this.isInterrupted = true
+
+    // Clear queue and buffer
+    this.queue = []
+    this.sentenceBuffer = ""
+
+    // Clear any pending timeout
+    if (this.sentenceTimer) {
+      clearTimeout(this.sentenceTimer)
+      this.sentenceTimer = null
+    }
 
     // Stop current audio streaming if active
     if (this.currentAudioStreaming) {
@@ -390,16 +506,119 @@ class SimplifiedSarvamTTSProcessor {
 
     // Reset state
     this.isInterrupted = false
+    this.isProcessing = false
+    this.totalChunks = 0
     this.totalAudioBytes = 0
+  }
+
+  addPhrase(phrase, detectedLanguage) {
+    if (!phrase.trim() || this.isInterrupted) return
+
+    // Update language if different from current
+    if (detectedLanguage && detectedLanguage !== this.language) {
+      console.log(`🔄 [SARVAM-TTS] Language change detected: ${this.language} → ${detectedLanguage}`)
+      this.language = detectedLanguage
+      this.sarvamLanguage = getSarvamLanguage(detectedLanguage)
+    }
+
+    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim()
+
+    if (this.hasCompleteSentence(this.sentenceBuffer)) {
+      this.processCompleteSentences()
+    } else {
+      this.scheduleProcessing()
+    }
+  }
+
+  hasCompleteSentence(text) {
+    return /[.!?।॥।]/.test(text)
+  }
+
+  extractCompleteSentences(text) {
+    const sentences = text.split(/([.!?।॥।])/).filter((s) => s.trim())
+
+    let completeSentences = ""
+    let remainingText = ""
+
+    for (let i = 0; i < sentences.length; i += 2) {
+      const sentence = sentences[i]
+      const punctuation = sentences[i + 1]
+
+      if (punctuation) {
+        completeSentences += sentence + punctuation + " "
+      } else {
+        remainingText = sentence
+      }
+    }
+
+    return {
+      complete: completeSentences.trim(),
+      remaining: remainingText.trim(),
+    }
+  }
+
+  processCompleteSentences() {
+    if (this.isInterrupted) return
+
+    if (this.sentenceTimer) {
+      clearTimeout(this.sentenceTimer)
+      this.sentenceTimer = null
+    }
+
+    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer)
+
+    if (complete && !this.isInterrupted) {
+      this.queue.push(complete)
+      this.sentenceBuffer = remaining
+      this.processQueue()
+    }
+  }
+
+  scheduleProcessing() {
+    if (this.isInterrupted) return
+
+    if (this.sentenceTimer) clearTimeout(this.sentenceTimer)
+
+    this.sentenceTimer = setTimeout(() => {
+      if (this.sentenceBuffer.trim() && !this.isInterrupted) {
+        this.queue.push(this.sentenceBuffer.trim())
+        this.sentenceBuffer = ""
+        this.processQueue()
+      }
+    }, this.processingTimeout)
+  }
+
+  async processQueue() {
+    if (this.isProcessing || this.queue.length === 0 || this.isInterrupted) return
+
+    this.isProcessing = true
+    const textToProcess = this.queue.shift()
+
+    try {
+      if (!this.isInterrupted) {
+        await this.synthesizeAndStream(textToProcess)
+      }
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.error(`❌ [SARVAM-TTS] Error: ${error.message}`)
+      }
+    } finally {
+      this.isProcessing = false
+
+      // Process next item in queue if not interrupted
+      if (this.queue.length > 0 && !this.isInterrupted) {
+        setTimeout(() => this.processQueue(), 10)
+      }
+    }
   }
 
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
 
-    const timer = createTimer("SARVAM_TTS")
+    const timer = createTimer("SARVAM_TTS_SENTENCE")
 
     try {
-      console.log(`🎵 [SARVAM-TTS] Synthesizing complete text: "${text}" (${this.sarvamLanguage})`)
+      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`)
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -443,6 +662,7 @@ class SimplifiedSarvamTTSProcessor {
 
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
+        this.totalChunks++
       }
     } catch (error) {
       if (!this.isInterrupted) {
@@ -522,9 +742,26 @@ class SimplifiedSarvamTTSProcessor {
     this.currentAudioStreaming = null
   }
 
+  complete() {
+    if (this.isInterrupted) return
+
+    if (this.sentenceBuffer.trim()) {
+      this.queue.push(this.sentenceBuffer.trim())
+      this.sentenceBuffer = ""
+    }
+
+    if (this.queue.length > 0) {
+      this.processQueue()
+    }
+
+    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`)
+  }
+
   getStats() {
     return {
+      totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
     }
   }
 }
@@ -582,12 +819,12 @@ const findAgentForCall = async (callData) => {
   }
 }
 
-// Main WebSocket server setup with simplified processing
+// Main WebSocket server setup with enhanced call logging and outbound support
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [SIMPLIFIED] Voice Server started with simplified AI processing")
+  console.log("🚀 [ENHANCED] Voice Server started with inbound/outbound support, call logging and Marathi support")
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New simplified WebSocket connection")
+    console.log("🔗 [CONNECTION] New enhanced WebSocket connection")
 
     // Parse URL parameters for call direction detection
     const url = new URL(req.url, `http://${req.headers.host}`)
@@ -601,12 +838,12 @@ const setupUnifiedVoiceServer = (wss) => {
     let isProcessing = false
     let userUtteranceBuffer = ""
     let lastProcessedText = ""
-    let currentTTS = null
+    let optimizedTTS = null
     let currentLanguage = undefined
     let processingRequestId = 0
-    let callLogger = null
-    let callDirection = "inbound"
-    let agentConfig = null
+    let callLogger = null // Call logger instance
+    let callDirection = "inbound" // Default to inbound
+    let agentConfig = null // Store agent configuration
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -660,17 +897,17 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Handle Deepgram responses
+    // Handle Deepgram responses with call logging
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          // Interrupt current processing if new speech detected
-          if (currentTTS && isProcessing) {
+          // Interrupt current TTS if new speech detected
+          if (optimizedTTS && (isProcessing || optimizedTTS.isProcessing)) {
             console.log(`🛑 [INTERRUPT] New speech detected, interrupting current response`)
-            currentTTS.interrupt()
+            optimizedTTS.interrupt()
             isProcessing = false
             processingRequestId++ // Invalidate current processing
           }
@@ -702,13 +939,13 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Simplified utterance processing
+    // Enhanced utterance processing with call logging
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
       // Interrupt any ongoing processing
-      if (currentTTS) {
-        currentTTS.interrupt()
+      if (optimizedTTS) {
+        optimizedTTS.interrupt()
       }
 
       isProcessing = true
@@ -722,43 +959,54 @@ const setupUnifiedVoiceServer = (wss) => {
         // Step 1: Detect language using OpenAI
         const detectedLanguage = await detectLanguageWithOpenAI(text)
 
-        // Step 2: Update current language
+        // Step 2: Update current language and initialize TTS processor
         if (detectedLanguage !== currentLanguage) {
           console.log(`🌍 [LANGUAGE] Changed: ${currentLanguage} → ${detectedLanguage}`)
           currentLanguage = detectedLanguage
         }
 
-        // Step 3: Get complete response from OpenAI
-        const response = await processWithOpenAI(
+        // Create new TTS processor with detected language
+        optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+
+        // Step 3: Check for interruption function
+        const checkInterruption = () => {
+          return processingRequestId !== currentRequestId
+        }
+
+        // Step 4: Process with OpenAI streaming (pass agentConfig)
+        const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
           detectedLanguage,
-          callLogger,
-          agentConfig,
+          (phrase, lang) => {
+            // Handle phrase chunks - only if not interrupted
+            if (processingRequestId === currentRequestId && !checkInterruption()) {
+              console.log(`📤 [PHRASE] "${phrase}" (${lang})`)
+              optimizedTTS.addPhrase(phrase, lang)
+            }
+          },
+          (fullResponse) => {
+            // Handle completion - only if not interrupted
+            if (processingRequestId === currentRequestId && !checkInterruption()) {
+              console.log(`✅ [COMPLETE] "${fullResponse}"`)
+              optimizedTTS.complete()
+
+              const stats = optimizedTTS.getStats()
+              console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`)
+
+              // Update conversation history
+              conversationHistory.push({ role: "user", content: text }, { role: "assistant", content: fullResponse })
+
+              // Keep last 10 messages for context
+              if (conversationHistory.length > 10) {
+                conversationHistory = conversationHistory.slice(-10)
+              }
+            }
+          },
+          checkInterruption,
+          callLogger, // Pass call logger to OpenAI processing
+          agentConfig, // Pass agent config for system prompt
         )
-
-        // Step 4: Check if still the current request (not interrupted)
-        if (processingRequestId === currentRequestId && response) {
-          console.log(`🤖 [RESPONSE] "${response}"`)
-
-          // Step 5: Create TTS processor and synthesize complete response
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(response)
-
-          // Step 6: Update conversation history
-          conversationHistory.push(
-            { role: "user", content: text },
-            { role: "assistant", content: response }
-          )
-
-          // Keep last 10 messages for context
-          if (conversationHistory.length > 10) {
-            conversationHistory = conversationHistory.slice(-10)
-          }
-
-          const stats = currentTTS.getStats()
-          console.log(`📊 [TTS-STATS] ${stats.totalAudioBytes} bytes processed`)
-        }
 
         console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`)
       } catch (error) {
@@ -770,12 +1018,12 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // WebSocket message handling
+    // WebSocket message handling with enhanced inbound/outbound support
     ws.on("message", async (message) => {
       try {
         const messageStr = message.toString()
 
-        // Skip non-JSON messages
+        // Skip non-JSON messages (like "EOS" or other control messages)
         if (messageStr === "EOS" || messageStr === "BOS" || !messageStr.startsWith("{")) {
           console.log(`📝 [WEBSOCKET] Skipping non-JSON message: ${messageStr}`)
           return
@@ -785,7 +1033,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [SIMPLIFIED] Connected - Protocol: ${data.protocol}`)
+            console.log(`🔗 [ENHANCED] Connected - Protocol: ${data.protocol}`)
             break
 
           case "start": {
@@ -852,7 +1100,7 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log(`📞 [INBOUND] Call detected - Mobile: ${mobile}, DID: ${to}, AccountSid: ${accountSid}`)
             }
 
-            console.log(`🎯 [SIMPLIFIED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
+            console.log(`🎯 [ENHANCED] Stream started - StreamSid: ${streamSid}, Direction: ${callDirection}`)
 
             // Find appropriate agent based on call direction
             try {
@@ -904,7 +1152,7 @@ const setupUnifiedVoiceServer = (wss) => {
               callLogger.logAIResponse(greeting, currentLanguage)
             }
 
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            const tts = new OptimizedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
             break
           }
@@ -922,7 +1170,7 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           case "stop":
-            console.log(`📞 [SIMPLIFIED] Stream stopped - Direction: ${callDirection}`)
+            console.log(`📞 [ENHANCED] Stream stopped - Direction: ${callDirection}`)
 
             // Save call log to database before closing
             if (callLogger) {
@@ -946,16 +1194,16 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           default:
-            console.log(`❓ [SIMPLIFIED] Unknown event: ${data.event}`)
+            console.log(`❓ [ENHANCED] Unknown event: ${data.event}`)
         }
       } catch (error) {
-        console.error(`❌ [SIMPLIFIED] Message error: ${error.message}`)
+        console.error(`❌ [ENHANCED] Message error: ${error.message}`)
       }
     })
 
-    // Connection cleanup
+    // Enhanced connection cleanup with call logging
     ws.on("close", async () => {
-      console.log(`🔗 [SIMPLIFIED] Connection closed - Direction: ${callDirection}`)
+      console.log(`🔗 [ENHANCED] Connection closed - Direction: ${callDirection}`)
 
       // Save call log before cleanup if not already saved
       if (callLogger) {
@@ -979,7 +1227,7 @@ const setupUnifiedVoiceServer = (wss) => {
       lastProcessedText = ""
       deepgramReady = false
       deepgramAudioQueue = []
-      currentTTS = null
+      optimizedTTS = null
       currentLanguage = undefined
       processingRequestId = 0
       callLogger = null
@@ -988,7 +1236,7 @@ const setupUnifiedVoiceServer = (wss) => {
     })
 
     ws.on("error", (error) => {
-      console.error(`❌ [SIMPLIFIED] WebSocket error: ${error.message}`)
+      console.error(`❌ [ENHANCED] WebSocket error: ${error.message}`)
     })
   })
 }
