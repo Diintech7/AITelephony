@@ -649,16 +649,8 @@ const findAgentForCall = async (callData) => {
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [SIP-CONNECTION] ========== NEW CONNECTION ==========")
-    console.log("🔗 [SIP-CONNECTION] Remote Address:", req.socket.remoteAddress)
-    console.log("🔗 [SIP-CONNECTION] User Agent:", req.headers['user-agent'])
-    console.log("🔗 [SIP-CONNECTION] Request URL:", req.url)
-    
     const url = new URL(req.url, `http://${req.headers.host}`)
     const urlParams = Object.fromEntries(url.searchParams.entries())
-    
-    console.log("🔗 [SIP-CONNECTION] URL Parameters:", JSON.stringify(urlParams, null, 2))
-    console.log("🔗 [SIP-CONNECTION] ======================================")
 
     // Session state
     let streamSid = null
