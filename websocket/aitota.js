@@ -649,8 +649,16 @@ const findAgentForCall = async (callData) => {
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
   wss.on("connection", (ws, req) => {
+    console.log("🔗 [SIP-CONNECTION] ========== NEW CONNECTION ==========")
+    console.log("🔗 [SIP-CONNECTION] Remote Address:", req.socket.remoteAddress)
+    console.log("🔗 [SIP-CONNECTION] User Agent:", req.headers['user-agent'])
+    console.log("🔗 [SIP-CONNECTION] Request URL:", req.url)
+    
     const url = new URL(req.url, `http://${req.headers.host}`)
     const urlParams = Object.fromEntries(url.searchParams.entries())
+    
+    console.log("🔗 [SIP-CONNECTION] URL Parameters:", JSON.stringify(urlParams, null, 2))
+    console.log("🔗 [SIP-CONNECTION] ======================================")
 
     // Session state
     let streamSid = null
@@ -690,7 +698,9 @@ const setupUnifiedVoiceServer = (wss) => {
         })
 
         deepgramWs.onopen = () => {
+          console.log("🎤 [DEEPGRAM] Connection established")
           deepgramReady = true
+          console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
           deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
           deepgramAudioQueue = []
         }
@@ -701,10 +711,12 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         deepgramWs.onerror = (error) => {
+          console.log("❌ [DEEPGRAM] Connection error:", error.message)
           deepgramReady = false
         }
 
         deepgramWs.onclose = () => {
+          console.log("🔌 [DEEPGRAM] Connection closed")
           deepgramReady = false
         }
       } catch (error) {
@@ -764,7 +776,12 @@ const setupUnifiedVoiceServer = (wss) => {
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
+      console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
+      console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
+      console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
+
       if (currentTTS) {
+        console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
         currentTTS.interrupt()
       }
 
@@ -774,11 +791,14 @@ const setupUnifiedVoiceServer = (wss) => {
 
       try {
         const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
+        console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
 
         if (detectedLanguage !== currentLanguage) {
+          console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
           currentLanguage = detectedLanguage
         }
 
+        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
         const response = await processWithOpenAI(
           text,
           conversationHistory,
@@ -788,6 +808,9 @@ const setupUnifiedVoiceServer = (wss) => {
         )
 
         if (processingRequestId === currentRequestId && response) {
+          console.log("🤖 [USER-UTTERANCE] AI Response:", response)
+          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+          
           currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
           await currentTTS.synthesizeAndStream(response)
 
@@ -799,13 +822,18 @@ const setupUnifiedVoiceServer = (wss) => {
           if (conversationHistory.length > 10) {
             conversationHistory = conversationHistory.slice(-10)
           }
+          
+          console.log("✅ [USER-UTTERANCE] Processing completed")
+        } else {
+          console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
         }
       } catch (error) {
-        // Silent error handling
+        console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
       } finally {
         if (processingRequestId === currentRequestId) {
           isProcessing = false
         }
+        console.log("🗣️ [USER-UTTERANCE] ======================================")
       }
     }
 
@@ -821,11 +849,19 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
+            console.log("🔗 [SIP-CONNECTION] WebSocket connected")
             break
 
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
+
+            // Log all incoming SIP data
+            console.log("📞 [SIP-START] ========== CALL START DATA ==========")
+            console.log("📞 [SIP-START] Raw data:", JSON.stringify(data, null, 2))
+            console.log("📞 [SIP-START] URL Parameters:", JSON.stringify(urlParams, null, 2))
+            console.log("📞 [SIP-START] StreamSID:", streamSid)
+            console.log("📞 [SIP-START] AccountSID:", accountSid)
 
             let mobile = null
             if (data.start?.from) {
@@ -868,14 +904,36 @@ const setupUnifiedVoiceServer = (wss) => {
               callDirection = "inbound"
             }
 
+            // Log parsed call information
+            console.log("📞 [SIP-START] ========== PARSED CALL INFO ==========")
+            console.log("📞 [SIP-START] Call Direction:", callDirection)
+            console.log("📞 [SIP-START] From/Mobile:", mobile)
+            console.log("📞 [SIP-START] To/DID:", to)
+            console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
+            console.log("📞 [SIP-START] ======================================")
+
             try {
+              console.log("🔍 [SIP-AGENT-LOOKUP] ========== AGENT LOOKUP ==========")
+              console.log("🔍 [SIP-AGENT-LOOKUP] AccountSID:", accountSid)
+              console.log("🔍 [SIP-AGENT-LOOKUP] Call Direction:", callDirection)
+              console.log("🔍 [SIP-AGENT-LOOKUP] Extra Data:", JSON.stringify(extraData, null, 2))
+              
               agentConfig = await findAgentForCall({
                 accountSid,
                 callDirection,
                 extraData,
               })
 
+              console.log("✅ [SIP-AGENT-LOOKUP] Agent found successfully")
+              console.log("✅ [SIP-AGENT-LOOKUP] Agent Name:", agentConfig.agentName)
+              console.log("✅ [SIP-AGENT-LOOKUP] Client ID:", agentConfig.clientId)
+              console.log("✅ [SIP-AGENT-LOOKUP] Language:", agentConfig.language)
+              console.log("✅ [SIP-AGENT-LOOKUP] Voice Selection:", agentConfig.voiceSelection)
+              console.log("✅ [SIP-AGENT-LOOKUP] First Message:", agentConfig.firstMessage)
+              console.log("✅ [SIP-AGENT-LOOKUP] ======================================")
+
               if (!agentConfig) {
+                console.log("❌ [SIP-AGENT-LOOKUP] No agent found for call")
                 ws.send(
                   JSON.stringify({
                     event: "error",
@@ -886,6 +944,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 return
               }
             } catch (err) {
+              console.log("❌ [SIP-AGENT-LOOKUP] Error finding agent:", err.message)
               ws.send(
                 JSON.stringify({
                   event: "error",
@@ -899,45 +958,83 @@ const setupUnifiedVoiceServer = (wss) => {
             ws.sessionAgentConfig = agentConfig
             currentLanguage = agentConfig.language || "en"
 
+            console.log("🎯 [SIP-CALL-SETUP] ========== CALL SETUP ==========")
+            console.log("🎯 [SIP-CALL-SETUP] Current Language:", currentLanguage)
+            console.log("🎯 [SIP-CALL-SETUP] Mobile Number:", mobile)
+            console.log("🎯 [SIP-CALL-SETUP] Call Direction:", callDirection)
+            console.log("🎯 [SIP-CALL-SETUP] Client ID:", agentConfig.clientId || accountSid)
+
             callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
+
+            console.log("🎯 [SIP-CALL-SETUP] Call Logger initialized")
+            console.log("🎯 [SIP-CALL-SETUP] Connecting to Deepgram...")
 
             await connectToDeepgram()
 
             const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
+            
+            console.log("🎯 [SIP-CALL-SETUP] Greeting Message:", greeting)
+            console.log("🎯 [SIP-CALL-SETUP] ======================================")
 
             if (callLogger) {
               callLogger.logAIResponse(greeting, currentLanguage)
             }
 
+            console.log("🎤 [SIP-TTS] Starting greeting TTS...")
             const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
+            console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
           }
 
           case "media":
             if (data.media?.payload) {
               const audioBuffer = Buffer.from(data.media.payload, "base64")
+              
+              // Log media stats periodically (every 1000 packets to avoid spam)
+              if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
+              ws.mediaPacketCount++
+              
+              if (ws.mediaPacketCount % 1000 === 0) {
+                console.log("🎵 [SIP-MEDIA] Audio packets received:", ws.mediaPacketCount)
+              }
 
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
                 deepgramWs.send(audioBuffer)
               } else {
                 deepgramAudioQueue.push(audioBuffer)
+                if (deepgramAudioQueue.length % 100 === 0) {
+                  console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+                }
               }
             }
             break
 
           case "stop":
+            console.log("🛑 [SIP-STOP] ========== CALL END ==========")
+            console.log("🛑 [SIP-STOP] StreamSID:", streamSid)
+            console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
+            console.log("🛑 [SIP-STOP] Mobile:", mobile)
+            
             if (callLogger) {
+              const stats = callLogger.getStats()
+              console.log("🛑 [SIP-STOP] Call Stats:", JSON.stringify(stats, null, 2))
+              
               try {
+                console.log("💾 [SIP-STOP] Saving call log to database...")
                 const savedLog = await callLogger.saveToDatabase("medium")
+                console.log("✅ [SIP-STOP] Call log saved with ID:", savedLog._id)
               } catch (error) {
-                // Silent error handling
+                console.log("❌ [SIP-STOP] Error saving call log:", error.message)
               }
             }
 
             if (deepgramWs?.readyState === WebSocket.OPEN) {
+              console.log("🛑 [SIP-STOP] Closing Deepgram connection...")
               deepgramWs.close()
             }
+            
+            console.log("🛑 [SIP-STOP] ======================================")
             break
 
           default:
@@ -949,18 +1046,31 @@ const setupUnifiedVoiceServer = (wss) => {
     })
 
     ws.on("close", async () => {
+      console.log("🔌 [SIP-CLOSE] ========== WEBSOCKET CLOSED ==========")
+      console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
+      console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
+      console.log("🔌 [SIP-CLOSE] Mobile:", mobile)
+      
       if (callLogger) {
+        const stats = callLogger.getStats()
+        console.log("🔌 [SIP-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
+        
         try {
+          console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
           const savedLog = await callLogger.saveToDatabase("not_connected")
+          console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
-          // Silent error handling
+          console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
         }
       }
 
       if (deepgramWs?.readyState === WebSocket.OPEN) {
+        console.log("🔌 [SIP-CLOSE] Closing Deepgram connection...")
         deepgramWs.close()
       }
 
+      console.log("🔌 [SIP-CLOSE] Resetting session state...")
+      
       // Reset state
       streamSid = null
       conversationHistory = []
@@ -976,10 +1086,14 @@ const setupUnifiedVoiceServer = (wss) => {
       callDirection = "inbound"
       agentConfig = null
       sttTimer = null
+      
+      console.log("🔌 [SIP-CLOSE] ======================================")
     })
 
     ws.on("error", (error) => {
-      // Silent error handling
+      console.log("❌ [SIP-ERROR] WebSocket error:", error.message)
+      console.log("❌ [SIP-ERROR] StreamSID:", streamSid)
+      console.log("❌ [SIP-ERROR] Call Direction:", callDirection)
     })
   })
 }
