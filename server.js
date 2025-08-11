@@ -44,6 +44,249 @@ app.use(express.urlencoded({ extended: true }));
 // Static files (if you have any frontend files)
 app.use(express.static(path.join(__dirname, "public")));
 
+// Add this route to your server.js file (before the error handling middleware)
+
+// Live logs endpoint
+app.get("/api/logs", async (req, res) => {
+  try {
+    const {
+      clientId,
+      limit = 50,
+      page = 1,
+      leadStatus,
+      isActive,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    // Build query filters
+    const filters = {};
+    
+    if (clientId) {
+      filters.clientId = clientId;
+    }
+    
+    if (leadStatus) {
+      filters.leadStatus = leadStatus;
+    }
+    
+    if (isActive !== undefined) {
+      filters['metadata.isActive'] = isActive === 'true';
+    }
+
+    // Build sort object
+    const sort = {};
+    sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+    // Calculate skip for pagination
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    console.log(`📊 [LOGS-API] Query filters:`, filters);
+    console.log(`📊 [LOGS-API] Sort:`, sort);
+    console.log(`📊 [LOGS-API] Limit: ${limit}, Skip: ${skip}`);
+
+    // Import CallLog model
+    const CallLog = require("./models/CallLog");
+
+    // Execute query with pagination
+    const [logs, totalCount, activeCount] = await Promise.all([
+      CallLog.find(filters)
+        .sort(sort)
+        .limit(parseInt(limit))
+        .skip(skip)
+        .lean()
+        .exec(),
+      
+      CallLog.countDocuments(filters),
+      
+      CallLog.countDocuments({ 
+        ...filters, 
+        'metadata.isActive': true 
+      })
+    ]);
+
+    // Get unique clients for filter options
+    const clientIds = await CallLog.distinct('clientId', {});
+
+    // Response with logs and metadata
+    const response = {
+      logs,
+      pagination: {
+        total: totalCount,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(totalCount / parseInt(limit)),
+      },
+      stats: {
+        total: totalCount,
+        active: activeCount,
+        clients: clientIds.length,
+        timestamp: new Date().toISOString(),
+      },
+      filters: {
+        clientId,
+        leadStatus,
+        isActive,
+        availableClients: clientIds.sort(),
+      }
+    };
+
+    console.log(`📊 [LOGS-API] Returning ${logs.length} logs (${totalCount} total, ${activeCount} active)`);
+
+    res.json(response);
+
+  } catch (error) {
+    console.error("❌ [LOGS-API] Error fetching logs:", error.message);
+    res.status(500).json({
+      error: "Failed to fetch logs",
+      message: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Get specific call log by ID
+app.get("/api/logs/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const CallLog = require("./models/CallLog");
+    const log = await CallLog.findById(id).lean();
+    
+    if (!log) {
+      return res.status(404).json({
+        error: "Call log not found",
+        id: id,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    console.log(`📊 [LOGS-API] Retrieved log: ${id}`);
+    
+    res.json({
+      log,
+      timestamp: new Date().toISOString(),
+    });
+
+  } catch (error) {
+    console.error("❌ [LOGS-API] Error fetching log:", error.message);
+    res.status(500).json({
+      error: "Failed to fetch log",
+      message: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Get live statistics
+app.get("/api/logs/stats", async (req, res) => {
+  try {
+    const CallLog = require("./models/CallLog");
+    
+    const [
+      totalCalls,
+      activeCalls,
+      todaysCalls,
+      statusBreakdown,
+      clientBreakdown
+    ] = await Promise.all([
+      CallLog.countDocuments(),
+      CallLog.countDocuments({ 'metadata.isActive': true }),
+      CallLog.countDocuments({
+        createdAt: {
+          $gte: new Date(new Date().setHours(0, 0, 0, 0))
+        }
+      }),
+      CallLog.aggregate([
+        {
+          $group: {
+            _id: "$leadStatus",
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+      CallLog.aggregate([
+        {
+          $group: {
+            _id: "$clientId",
+            count: { $sum: 1 },
+            activeCalls: {
+              $sum: {
+                $cond: ["$metadata.isActive", 1, 0]
+              }
+            }
+          }
+        },
+        { $sort: { count: -1 } },
+        { $limit: 10 }
+      ])
+    ]);
+
+    const stats = {
+      overview: {
+        total: totalCalls,
+        active: activeCalls,
+        today: todaysCalls,
+        timestamp: new Date().toISOString(),
+      },
+      statusBreakdown: statusBreakdown.reduce((acc, item) => {
+        acc[item._id] = item.count;
+        return acc;
+      }, {}),
+      topClients: clientBreakdown,
+      server: {
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        activeConnections,
+        totalConnections,
+      }
+    };
+
+    console.log(`📊 [LOGS-STATS] Generated stats - Total: ${totalCalls}, Active: ${activeCalls}`);
+    
+    res.json(stats);
+
+  } catch (error) {
+    console.error("❌ [LOGS-STATS] Error generating stats:", error.message);
+    res.status(500).json({
+      error: "Failed to generate statistics",
+      message: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Clean up stale active calls (utility endpoint)
+app.post("/api/logs/cleanup", async (req, res) => {
+  try {
+    const CallLog = require("./models/CallLog");
+    const result = await CallLog.cleanupStaleActiveCalls();
+    
+    console.log(`🧹 [LOGS-CLEANUP] Cleaned up ${result.modifiedCount} stale active calls`);
+    
+    res.json({
+      message: "Cleanup completed",
+      modifiedCount: result.modifiedCount,
+      timestamp: new Date().toISOString(),
+    });
+
+  } catch (error) {
+    console.error("❌ [LOGS-CLEANUP] Error during cleanup:", error.message);
+    res.status(500).json({
+      error: "Failed to cleanup stale calls",
+      message: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+console.log("📊 [SERVER] Live logs API routes registered:");
+console.log("📊 [SERVER] GET /api/logs - Get call logs with filtering");
+console.log("📊 [SERVER] GET /api/logs/:id - Get specific call log");
+console.log("📊 [SERVER] GET /api/logs/stats - Get live statistics");
+console.log("📊 [SERVER] POST /api/logs/cleanup - Cleanup stale active calls");
+
+
 // Health check endpoint
 app.get("/health", async (req, res) => {
   try {
