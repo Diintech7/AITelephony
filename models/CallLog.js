@@ -1,161 +1,131 @@
-const mongoose = require("mongoose")
+const mongoose = require('mongoose');
 
-const agentSchema = new mongoose.Schema({
-  // Client Information
+const CallLogSchema = new mongoose.Schema({
   clientId: { type: String, required: true, index: true },
-
-  // Personal Information
-  agentName: { type: String, required: true },
-  description: { type: String, required: true },
-  category: { type: String },
-  personality: {
-    type: String,
-    enum: ["formal", "informal", "friendly", "flirty", "disciplined"],
-    default: "formal",
-  },
-  language: { type: String, default: "en" },
-
-  // System Information
-  firstMessage: { type: String, required: true },
-  systemPrompt: { type: String, required: true },
-  sttSelection: {
-    type: String,
-    enum: ["deepgram", "whisper", "google", "azure", "aws"],
-    default: "deepgram",
-  },
-  ttsSelection: {
-    type: String,
-    enum: ["sarvam", "elevenlabs", "openai", "google", "azure", "aws"],
-    default: "sarvam",
-  },
-  llmSelection: {
-    type: String,
-    enum: ["openai", "anthropic", "google", "azure"],
-    default: "openai",
-  },
-  voiceSelection: {
-    type: String,
+  campaignId: { type: mongoose.Schema.Types.ObjectId, ref: 'Campaign', index: true },
+  agentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Agent', index: true },
+  mobile: String,
+  time: Date,
+  transcript: { type: String, default: "" }, // Will be updated live
+  audioUrl: String,
+  duration: { type: Number, default: 0 }, // Will be updated live
+  leadStatus: { 
+    type: String, 
     enum: [
-      "default",
-      "male-professional",
-      "female-professional",
-      "male-friendly",
-      "female-friendly",
-      "neutral",
-      "abhilash",
-      "anushka",
-      "meera",
-      "pavithra",
-      "maitreyi",
-      "arvind",
-      "amol",
-      "amartya",
-      "diya",
-      "neel",
-      "misha",
-      "vian",
-      "arjun",
-      "maya",
-      "manisha",
-      "vidya",
-      "arya",
-      "karun",
-      "hitesh",
-    ],
-    default: "default",
+      // Connected - Interested
+      'vvi',                    // very very interested
+      'maybe',                  // maybe
+      'enrolled',               // enrolled
+      
+      // Connected - Not Interested
+      'junk_lead',              // junk lead
+      'not_required',           // not required
+      'enrolled_other',         // enrolled other
+      'decline',                // decline
+      'not_eligible',           // not eligible
+      'wrong_number',           // wrong number
+      
+      // Connected - Followup
+      'hot_followup',           // hot followup
+      'cold_followup',          // cold followup
+      'schedule',               // schedule
+      
+      // Not Connected
+      'not_connected'           // not connected
+    ], 
+    default: 'maybe' 
   },
-  contextMemory: { type: String },
-  brandInfo: { type: String },
+  
+  // Enhanced metadata for live tracking
+  metadata: {
+    userTranscriptCount: { type: Number, default: 0 },
+    aiResponseCount: { type: Number, default: 0 },
+    languages: [{ type: String }],
+    callEndTime: { type: Date },
+    callDirection: { type: String, enum: ['inbound', 'outbound'], default: 'inbound' },
+    isActive: { type: Boolean, default: true }, // Track if call is ongoing
+    lastUpdated: { type: Date, default: Date.now }, // Track last live update
+    
+    // Performance metrics
+    totalUpdates: { type: Number, default: 0 },
+    averageResponseTime: { type: Number },
+    
+    // Technical details
+    sttProvider: { type: String, default: 'deepgram' },
+    ttsProvider: { type: String, default: 'sarvam' },
+    llmProvider: { type: String, default: 'openai' }
+  }
+}, {
+  timestamps: true
+});
 
-  // Multiple starting messages
-  startingMessages: [
-    {
-      text: { type: String, required: true },
-      audioBase64: { type: String },
+// Enhanced indexes for better performance with live updates
+CallLogSchema.index({ clientId: 1, campaignId: 1, agentId: 1, time: -1 });
+CallLogSchema.index({ clientId: 1, leadStatus: 1 });
+CallLogSchema.index({ 'metadata.isActive': 1, 'metadata.lastUpdated': 1 }); // For active call queries
+CallLogSchema.index({ clientId: 1, 'metadata.isActive': 1 }); // For client's active calls
+
+// Pre-save middleware to update metadata
+CallLogSchema.pre('save', function(next) {
+  if (this.metadata) {
+    this.metadata.lastUpdated = new Date();
+    if (this.isModified('transcript')) {
+      this.metadata.totalUpdates = (this.metadata.totalUpdates || 0) + 1;
+    }
+  }
+  next();
+});
+
+// Static method to get active calls for a client
+CallLogSchema.statics.getActiveCalls = function(clientId) {
+  return this.find({ 
+    clientId: clientId, 
+    'metadata.isActive': true 
+  }).sort({ 'metadata.lastUpdated': -1 });
+};
+
+// Static method to cleanup stale active calls (calls marked active but haven't updated in 10 minutes)
+CallLogSchema.statics.cleanupStaleActiveCalls = function() {
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+  return this.updateMany(
+    { 
+      'metadata.isActive': true,
+      'metadata.lastUpdated': { $lt: tenMinutesAgo }
     },
-  ],
-
-  // Telephony
-  accountSid: { type: String },
-  callerId: { type: String, index: true }, // For outbound call matching
-  serviceProvider: {
-    type: String,
-    enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
-  },
-
-  // Audio storage - Store as base64 string instead of Buffer
-  audioFile: { type: String }, // File path (legacy support)
-  audioBytes: {
-    type: String, // Store as base64 string
-    validate: {
-      validator: (v) => !v || typeof v === "string",
-      message: "audioBytes must be a string",
-    },
-  },
-  audioMetadata: {
-    format: { type: String, default: "mp3" },
-    sampleRate: { type: Number, default: 22050 },
-    channels: { type: Number, default: 1 },
-    size: { type: Number },
-    generatedAt: { type: Date },
-    language: { type: String, default: "en" },
-    speaker: { type: String },
-    provider: { type: String, default: "sarvam" },
-  },
-
-  // Timestamps
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-})
-
-// Compound index for client + agent name uniqueness
-agentSchema.index({ clientId: 1, agentName: 1 }, { unique: true })
-
-// Additional index for callerId lookup (outbound calls)
-agentSchema.index({ callerId: 1 })
-
-// Update the updatedAt field before saving
-agentSchema.pre("save", function (next) {
-  this.updatedAt = Date.now()
-
-  // Validate and convert audioBytes if present
-  if (this.audioBytes) {
-    if (typeof this.audioBytes === "string") {
-      // Already a string, ensure metadata is updated
-      if (!this.audioMetadata) {
-        this.audioMetadata = {}
+    { 
+      $set: { 
+        'metadata.isActive': false,
+        leadStatus: 'not_connected'
       }
-      // Calculate actual byte size from base64 string
-      const byteSize = Math.ceil((this.audioBytes.length * 3) / 4)
-      this.audioMetadata.size = byteSize
-      console.log(`[AGENT_MODEL] Audio stored as base64 string: ${this.audioBytes.length} chars (${byteSize} bytes)`)
-    } else {
-      return next(new Error("audioBytes must be a string"))
     }
+  );
+};
+
+// Instance method to add live transcript entry
+CallLogSchema.methods.addLiveTranscriptEntry = function(entry) {
+  const timestamp = entry.timestamp || new Date();
+  const speaker = entry.type === "user" ? "User" : "AI";
+  const transcriptLine = `[${timestamp.toISOString()}] ${speaker} (${entry.language}): ${entry.text}`;
+  
+  if (this.transcript) {
+    this.transcript += '\n' + transcriptLine;
+  } else {
+    this.transcript = transcriptLine;
   }
-
-  next()
-})
-
-// Method to get audio as base64
-agentSchema.methods.getAudioBase64 = function () {
-  if (this.audioBytes && typeof this.audioBytes === "string") {
-    return this.audioBytes
+  
+  // Update metadata
+  if (entry.type === "user") {
+    this.metadata.userTranscriptCount = (this.metadata.userTranscriptCount || 0) + 1;
+  } else {
+    this.metadata.aiResponseCount = (this.metadata.aiResponseCount || 0) + 1;
   }
-  return null
-}
-
-// Method to set audio from base64
-agentSchema.methods.setAudioFromBase64 = function (base64String) {
-  if (base64String && typeof base64String === "string") {
-    this.audioBytes = base64String
-    if (!this.audioMetadata) {
-      this.audioMetadata = {}
-    }
-    // Calculate actual byte size from base64 string
-    const byteSize = Math.ceil((base64String.length * 3) / 4)
-    this.audioMetadata.size = byteSize
+  
+  // Update languages array
+  if (!this.metadata.languages.includes(entry.language)) {
+    this.metadata.languages.push(entry.language);
   }
-}
+  
+  this.metadata.lastUpdated = new Date();
+};
 
-module.exports = mongoose.model("Agent", agentSchema)
+module.exports = mongoose.model('CallLog', CallLogSchema);
