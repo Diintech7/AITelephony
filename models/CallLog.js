@@ -50,6 +50,8 @@ const CallLogSchema = new mongoose.Schema({
       type: Object,
       default: {},
     },
+    // Telephony identifiers
+    callerId: { type: String },
     // Performance metrics
     totalUpdates: { type: Number, default: 0 },
     averageResponseTime: { type: Number },

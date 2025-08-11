@@ -307,6 +307,20 @@ const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
   return francResult
 }
 
+// Allowed lead statuses based on CallLog model
+const ALLOWED_LEAD_STATUSES = new Set([
+  'vvi', 'maybe', 'enrolled',
+  'junk_lead', 'not_required', 'enrolled_other', 'decline', 'not_eligible', 'wrong_number',
+  'hot_followup', 'cold_followup', 'schedule',
+  'not_connected'
+]);
+
+const normalizeLeadStatus = (value, fallback = 'maybe') => {
+  if (!value || typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  return ALLOWED_LEAD_STATUSES.has(normalized) ? normalized : fallback;
+};
+
 // Enhanced Call logging utility class with live transcript saving
 class EnhancedCallLogger {
   constructor(clientId, mobile = null, callDirection = "inbound") {
@@ -324,10 +338,11 @@ class EnhancedCallLogger {
     this.batchSize = 5 // Save every 5 transcript entries
     this.batchTimeout = 3000 // Or save every 3 seconds
     this.customParams = {}
+    this.callerId = null
   }
 
   // Create initial call log entry immediately when call starts
-  async createInitialCallLog(agentId = null) {
+  async createInitialCallLog(agentId = null, leadStatusInput = 'not_connected') {
     const timer = createTimer("INITIAL_CALL_LOG_CREATE")
     try {
       const initialCallLogData = {
@@ -337,7 +352,7 @@ class EnhancedCallLogger {
         time: this.callStartTime,
         transcript: "",
         duration: 0,
-        leadStatus: "not_connected", // Will be updated later
+        leadStatus: normalizeLeadStatus(leadStatusInput, 'not_connected'),
         metadata: {
           userTranscriptCount: 0,
           aiResponseCount: 0,
@@ -349,6 +364,7 @@ class EnhancedCallLogger {
           ttsProvider: 'sarvam',
           llmProvider: 'openai',
           customParams: this.customParams || {},
+          callerId: this.callerId || undefined,
         },
       }
 
@@ -480,7 +496,7 @@ class EnhancedCallLogger {
   }
 
   // Final save with complete call data
-  async saveToDatabase(leadStatus = "medium") {
+  async saveToDatabase(leadStatusInput = 'maybe') {
     const timer = createTimer("FINAL_CALL_LOG_SAVE")
     try {
       const callEndTime = new Date()
@@ -492,6 +508,8 @@ class EnhancedCallLogger {
         // Small delay to ensure batch save completes
         await new Promise(resolve => setTimeout(resolve, 100))
       }
+
+      const leadStatus = normalizeLeadStatus(leadStatusInput, 'maybe')
 
       if (this.isCallLogCreated && this.callLogId) {
         // Update existing call log with final data
@@ -506,6 +524,7 @@ class EnhancedCallLogger {
           'metadata.isActive': false,
           'metadata.lastUpdated': callEndTime,
           'metadata.customParams': this.customParams || {},
+          'metadata.callerId': this.callerId || undefined,
         }
 
         const updatedLog = await CallLog.findByIdAndUpdate(
@@ -533,6 +552,7 @@ class EnhancedCallLogger {
             callDirection: this.callDirection,
             isActive: false,
             customParams: this.customParams || {},
+            callerId: this.callerId || undefined,
           },
         }
 
@@ -1167,10 +1187,11 @@ const setupUnifiedVoiceServer = (wss) => {
               callDirection
             );
             callLogger.customParams = customParams;
+            callLogger.callerId = callerId || undefined;
 
             // Create initial call log entry immediately
             try {
-              await callLogger.createInitialCallLog(agentConfig._id)
+              await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
               console.log("✅ [SIP-CALL-SETUP] Initial call log created successfully")
             } catch (error) {
               console.log("❌ [SIP-CALL-SETUP] Failed to create initial call log:", error.message)
@@ -1233,7 +1254,7 @@ const setupUnifiedVoiceServer = (wss) => {
               
               try {
                 console.log("💾 [SIP-STOP] Saving final call log to database...")
-                const savedLog = await callLogger.saveToDatabase("medium")
+                const savedLog = await callLogger.saveToDatabase("maybe")
                 console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
               } catch (error) {
                 console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
@@ -1269,7 +1290,7 @@ const setupUnifiedVoiceServer = (wss) => {
         
         try {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
-          const savedLog = await callLogger.saveToDatabase("not_connected")
+          const savedLog = await callLogger.saveToDatabase("maybe")
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
