@@ -296,8 +296,8 @@ const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
   return francResult
 }
 
-// Enhanced Call logging utility class with live transcript saving
-class EnhancedCallLogger {
+// Call logging utility class
+class CallLogger {
   constructor(clientId, mobile = null, callDirection = "inbound") {
     this.clientId = clientId
     this.mobile = mobile
@@ -306,53 +306,8 @@ class EnhancedCallLogger {
     this.transcripts = []
     this.responses = []
     this.totalDuration = 0
-    this.callLogId = null
-    this.isCallLogCreated = false
-    this.pendingTranscripts = []
-    this.batchTimer = null
-    this.batchSize = 5 // Save every 5 transcript entries
-    this.batchTimeout = 3000 // Or save every 3 seconds
   }
 
-  // Create initial call log entry immediately when call starts
-  async createInitialCallLog(agentId = null) {
-    const timer = createTimer("INITIAL_CALL_LOG_CREATE")
-    try {
-      const initialCallLogData = {
-        clientId: this.clientId,
-        agentId: agentId,
-        mobile: this.mobile,
-        time: this.callStartTime,
-        transcript: "",
-        duration: 0,
-        leadStatus: "not_connected", // Will be updated later
-        metadata: {
-          userTranscriptCount: 0,
-          aiResponseCount: 0,
-          languages: [],
-          callDirection: this.callDirection,
-          isActive: true,
-          lastUpdated: new Date(),
-          sttProvider: 'deepgram',
-          ttsProvider: 'sarvam',
-          llmProvider: 'openai'
-        },
-      }
-
-      const callLog = new CallLog(initialCallLogData)
-      const savedLog = await callLog.save()
-      this.callLogId = savedLog._id
-      this.isCallLogCreated = true
-
-      console.log(`🕒 [INITIAL-CALL-LOG] ${timer.end()}ms - Created: ${savedLog._id}`)
-      return savedLog
-    } catch (error) {
-      console.log(`❌ [INITIAL-CALL-LOG] ${timer.end()}ms - Error: ${error.message}`)
-      throw error
-    }
-  }
-
-  // Add transcript with batched live saving
   logUserTranscript(transcript, language, timestamp = new Date()) {
     const entry = {
       type: "user",
@@ -363,13 +318,8 @@ class EnhancedCallLogger {
     }
 
     this.transcripts.push(entry)
-    this.pendingTranscripts.push(entry)
-    
-    // Trigger batch save
-    this.scheduleBatchSave()
   }
 
-  // Add AI response with batched live saving
   logAIResponse(response, language, timestamp = new Date()) {
     const entry = {
       type: "ai",
@@ -380,81 +330,11 @@ class EnhancedCallLogger {
     }
 
     this.responses.push(entry)
-    this.pendingTranscripts.push(entry)
-    
-    // Trigger batch save
-    this.scheduleBatchSave()
   }
 
-  // Schedule batched saving to reduce DB calls
-  scheduleBatchSave() {
-    // Clear existing timer
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer)
-    }
-
-    // Save immediately if batch size reached
-    if (this.pendingTranscripts.length >= this.batchSize) {
-      this.savePendingTranscripts()
-      return
-    }
-
-    // Otherwise schedule save after timeout
-    this.batchTimer = setTimeout(() => {
-      this.savePendingTranscripts()
-    }, this.batchTimeout)
-  }
-
-  // Save pending transcripts in background (non-blocking)
-  async savePendingTranscripts() {
-    if (!this.isCallLogCreated || this.pendingTranscripts.length === 0) {
-      return
-    }
-
-    // Create a copy and clear pending immediately to avoid blocking
-    const transcriptsToSave = [...this.pendingTranscripts]
-    this.pendingTranscripts = []
-    
-    // Clear timer
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer)
-      this.batchTimer = null
-    }
-
-    // Save asynchronously without awaiting (fire and forget)
-    setImmediate(async () => {
-      const timer = createTimer("LIVE_TRANSCRIPT_BATCH_SAVE")
-      try {
-        const currentTranscript = this.generateFullTranscript()
-        const currentDuration = Math.round((new Date() - this.callStartTime) / 1000)
-        
-        const updateData = {
-          transcript: currentTranscript,
-          duration: currentDuration,
-          'metadata.userTranscriptCount': this.transcripts.length,
-          'metadata.aiResponseCount': this.responses.length,
-          'metadata.languages': [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
-          'metadata.lastUpdated': new Date()
-        }
-
-        await CallLog.findByIdAndUpdate(this.callLogId, updateData, { 
-          new: false, // Don't return updated doc to save bandwidth
-          runValidators: false // Skip validation for performance
-        })
-
-        console.log(`🕒 [LIVE-TRANSCRIPT-SAVE] ${timer.end()}ms - Saved ${transcriptsToSave.length} entries`)
-      } catch (error) {
-        console.log(`❌ [LIVE-TRANSCRIPT-SAVE] ${timer.end()}ms - Error: ${error.message}`)
-        // On error, add back to pending for retry
-        this.pendingTranscripts.unshift(...transcriptsToSave)
-      }
-    })
-  }
-
-  // Generate full transcript
   generateFullTranscript() {
     const allEntries = [...this.transcripts, ...this.responses].sort(
-      (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+      (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
     )
 
     return allEntries
@@ -466,77 +346,36 @@ class EnhancedCallLogger {
       .join("\n")
   }
 
-  // Final save with complete call data
   async saveToDatabase(leadStatus = "medium") {
-    const timer = createTimer("FINAL_CALL_LOG_SAVE")
+    const timer = createTimer("MONGODB_SAVE")
     try {
       const callEndTime = new Date()
       this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000)
 
-      // Save any remaining pending transcripts first
-      if (this.pendingTranscripts.length > 0) {
-        await this.savePendingTranscripts()
-        // Small delay to ensure batch save completes
-        await new Promise(resolve => setTimeout(resolve, 100))
+      const callLogData = {
+        clientId: this.clientId,
+        mobile: this.mobile,
+        time: this.callStartTime,
+        transcript: this.generateFullTranscript(),
+        duration: this.totalDuration,
+        leadStatus: leadStatus,
+        metadata: {
+          userTranscriptCount: this.transcripts.length,
+          aiResponseCount: this.responses.length,
+          languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
+          callEndTime: callEndTime,
+          callDirection: this.callDirection,
+        },
       }
 
-      if (this.isCallLogCreated && this.callLogId) {
-        // Update existing call log with final data
-        const finalUpdateData = {
-          transcript: this.generateFullTranscript(),
-          duration: this.totalDuration,
-          leadStatus: leadStatus,
-          'metadata.userTranscriptCount': this.transcripts.length,
-          'metadata.aiResponseCount': this.responses.length,
-          'metadata.languages': [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
-          'metadata.callEndTime': callEndTime,
-          'metadata.isActive': false,
-          'metadata.lastUpdated': callEndTime
-        }
+      const callLog = new CallLog(callLogData)
+      const savedLog = await callLog.save()
 
-        const updatedLog = await CallLog.findByIdAndUpdate(
-          this.callLogId, 
-          finalUpdateData, 
-          { new: true }
-        )
-
-        console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Updated: ${updatedLog._id}`)
-        return updatedLog
-      } else {
-        // Fallback: create new call log if initial creation failed
-        const callLogData = {
-          clientId: this.clientId,
-          mobile: this.mobile,
-          time: this.callStartTime,
-          transcript: this.generateFullTranscript(),
-          duration: this.totalDuration,
-          leadStatus: leadStatus,
-          metadata: {
-            userTranscriptCount: this.transcripts.length,
-            aiResponseCount: this.responses.length,
-            languages: [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
-            callEndTime: callEndTime,
-            callDirection: this.callDirection,
-            isActive: false
-          },
-        }
-
-        const callLog = new CallLog(callLogData)
-        const savedLog = await callLog.save()
-        console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Created: ${savedLog._id}`)
-        return savedLog
-      }
+      console.log(`🕒 [MONGODB-SAVE] ${timer.end()}ms - CallLog saved: ${savedLog._id}`)
+      return savedLog
     } catch (error) {
-      console.log(`❌ [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Error: ${error.message}`)
+      console.log(`❌ [MONGODB-SAVE] ${timer.end()}ms - Error: ${error.message}`)
       throw error
-    }
-  }
-
-  // Cleanup method
-  cleanup() {
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer)
-      this.batchTimer = null
     }
   }
 
@@ -545,11 +384,9 @@ class EnhancedCallLogger {
       duration: this.totalDuration,
       userMessages: this.transcripts.length,
       aiResponses: this.responses.length,
-      languages: [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
+      languages: [...new Set([...this.transcripts, ...this.responses].map((entry) => entry.language))],
       startTime: this.callStartTime,
       callDirection: this.callDirection,
-      callLogId: this.callLogId,
-      pendingTranscripts: this.pendingTranscripts.length
     }
   }
 }
@@ -809,7 +646,7 @@ const findAgentForCall = async (callData) => {
   }
 }
 
-// Main WebSocket server setup with enhanced live transcript functionality
+// Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
   wss.on("connection", (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`)
@@ -1119,21 +956,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🎯 [SIP-CALL-SETUP] Call Direction:", callDirection)
             console.log("🎯 [SIP-CALL-SETUP] Client ID:", agentConfig.clientId || accountSid)
 
-            // Create enhanced call logger with live transcript capability
-            callLogger = new EnhancedCallLogger(
-              agentConfig.clientId || accountSid, 
-              mobile, 
-              callDirection
-            )
-
-            // Create initial call log entry immediately
-            try {
-              await callLogger.createInitialCallLog(agentConfig._id)
-              console.log("✅ [SIP-CALL-SETUP] Initial call log created successfully")
-            } catch (error) {
-              console.log("❌ [SIP-CALL-SETUP] Failed to create initial call log:", error.message)
-              // Continue anyway - fallback will create log at end
-            }
+            callLogger = new CallLogger(agentConfig.clientId || accountSid, mobile, callDirection)
 
             console.log("🎯 [SIP-CALL-SETUP] Call Logger initialized")
             console.log("🎯 [SIP-CALL-SETUP] Connecting to Deepgram...")
@@ -1190,13 +1013,11 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("🛑 [SIP-STOP] Call Stats:", JSON.stringify(stats, null, 2))
               
               try {
-                console.log("💾 [SIP-STOP] Saving final call log to database...")
+                console.log("💾 [SIP-STOP] Saving call log to database...")
                 const savedLog = await callLogger.saveToDatabase("medium")
-                console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
+                console.log("✅ [SIP-STOP] Call log saved with ID:", savedLog._id)
               } catch (error) {
-                console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
-              } finally {
-                callLogger.cleanup()
+                console.log("❌ [SIP-STOP] Error saving call log:", error.message)
               }
             }
 
@@ -1220,6 +1041,7 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🔌 [SIP-CLOSE] ========== WEBSOCKET CLOSED ==========")
       console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
       console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
+      console.log("🔌 [SIP-CLOSE] Mobile:", mobile)
       
       if (callLogger) {
         const stats = callLogger.getStats()
@@ -1231,8 +1053,6 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
-        } finally {
-          callLogger.cleanup()
         }
       }
 
