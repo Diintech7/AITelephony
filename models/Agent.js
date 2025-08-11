@@ -4,6 +4,9 @@ const agentSchema = new mongoose.Schema({
   // Client Information
   clientId: { type: String, required: true, index: true },
 
+  // Active Status
+  isActive: { type: Boolean, default: true, index: true },
+
   // Personal Information
   agentName: { type: String, required: true },
   description: { type: String, required: true },
@@ -111,8 +114,11 @@ const agentSchema = new mongoose.Schema({
 // Compound index for client + agent name uniqueness
 agentSchema.index({ clientId: 1, agentName: 1 }, { unique: true })
 
-// Additional index for callerId lookup (outbound calls)
-agentSchema.index({ callerId: 1 })
+// Additional index for callerId lookup (outbound calls) with isActive filter
+agentSchema.index({ callerId: 1, isActive: 1 })
+
+// Additional index for accountSid lookup with isActive filter
+agentSchema.index({ accountSid: 1, isActive: 1 })
 
 // Update the updatedAt field before saving
 agentSchema.pre("save", function (next) {

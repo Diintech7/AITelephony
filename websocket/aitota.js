@@ -781,7 +781,7 @@ class SimplifiedSarvamTTSProcessor {
   }
 }
 
-// Enhanced agent lookup function
+// Enhanced agent lookup function with isActive check
 const findAgentForCall = async (callData) => {
   const timer = createTimer("MONGODB_AGENT_LOOKUP")
   try {
@@ -794,9 +794,14 @@ const findAgentForCall = async (callData) => {
         throw new Error("Missing accountSid for inbound call")
       }
 
-      agent = await Agent.findOne({ accountSid }).lean()
+      // Only find active agents for inbound calls
+      agent = await Agent.findOne({ 
+        accountSid, 
+        isActive: true 
+      }).lean()
+      
       if (!agent) {
-        throw new Error(`No agent found for accountSid: ${accountSid}`)
+        throw new Error(`No active agent found for accountSid: ${accountSid}`)
       }
     } else if (callDirection === "outbound") {
       if (!extraData) {
@@ -808,15 +813,22 @@ const findAgentForCall = async (callData) => {
       }
 
       const callVaId = extraData.CallVaId
-      agent = await Agent.findOne({ callerId: callVaId }).lean()
+      
+      // Only find active agents for outbound calls
+      agent = await Agent.findOne({ 
+        callerId: callVaId, 
+        isActive: true 
+      }).lean()
+      
       if (!agent) {
-        throw new Error(`No agent found for callerId: ${callVaId}`)
+        throw new Error(`No active agent found for callerId: ${callVaId}`)
       }
     } else {
       throw new Error(`Unknown call direction: ${callDirection}`)
     }
 
-    console.log(`🕒 [MONGODB-AGENT-LOOKUP] ${timer.end()}ms - Agent found: ${agent.agentName}`)
+    console.log(`🕒 [MONGODB-AGENT-LOOKUP] ${timer.end()}ms - Active agent found: ${agent.agentName}`)
+    console.log(`✅ [MONGODB-AGENT-LOOKUP] Agent Status: Active (${agent.isActive})`)
     return agent
   } catch (error) {
     console.log(`❌ [MONGODB-AGENT-LOOKUP] ${timer.end()}ms - Error: ${error.message}`)
