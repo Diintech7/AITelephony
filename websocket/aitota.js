@@ -136,6 +136,17 @@ const decodeExtraData = (extraBase64) => {
   }
 }
 
+// Utility function to decode czdata (base64 JSON)
+const decodeCzdata = (czdataBase64) => {
+  try {
+    if (!czdataBase64) return null;
+    const decoded = Buffer.from(czdataBase64, "base64").toString("utf-8");
+    return JSON.parse(decoded);
+  } catch (e) {
+    return null;
+  }
+};
+
 // Enhanced language detection with better fallback logic
 const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
   try {
@@ -312,6 +323,7 @@ class EnhancedCallLogger {
     this.batchTimer = null
     this.batchSize = 5 // Save every 5 transcript entries
     this.batchTimeout = 3000 // Or save every 3 seconds
+    this.customParams = {}
   }
 
   // Create initial call log entry immediately when call starts
@@ -335,7 +347,8 @@ class EnhancedCallLogger {
           lastUpdated: new Date(),
           sttProvider: 'deepgram',
           ttsProvider: 'sarvam',
-          llmProvider: 'openai'
+          llmProvider: 'openai',
+          customParams: this.customParams || {},
         },
       }
 
@@ -491,7 +504,8 @@ class EnhancedCallLogger {
           'metadata.languages': [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
           'metadata.callEndTime': callEndTime,
           'metadata.isActive': false,
-          'metadata.lastUpdated': callEndTime
+          'metadata.lastUpdated': callEndTime,
+          'metadata.customParams': this.customParams || {},
         }
 
         const updatedLog = await CallLog.findByIdAndUpdate(
@@ -517,7 +531,8 @@ class EnhancedCallLogger {
             languages: [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
             callEndTime: callEndTime,
             callDirection: this.callDirection,
-            isActive: false
+            isActive: false,
+            customParams: this.customParams || {},
           },
         }
 
@@ -1018,13 +1033,24 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("📞 [SIP-START] StreamSID:", streamSid)
             console.log("📞 [SIP-START] AccountSID:", accountSid)
 
-            let mobile = null
+            let mobile = null;
+            let callerId = null;
+            let customParams = {};
+            let czdataDecoded = null;
+            if (urlParams.czdata) {
+              czdataDecoded = decodeCzdata(urlParams.czdata);
+              if (czdataDecoded) {
+                customParams = czdataDecoded;
+                console.log("[SIP-START] Decoded czdata customParams:", customParams);
+              }
+            }
+
             if (data.start?.from) {
-              mobile = data.start.from
+              mobile = data.start.from;
             } else if (urlParams.caller_id) {
-              mobile = urlParams.caller_id
+              mobile = urlParams.caller_id;
             } else if (data.start?.extraData?.CallCli) {
-              mobile = data.start.extraData.CallCli
+              mobile = data.start.extraData.CallCli;
             }
 
             let to = null
@@ -1036,27 +1062,30 @@ const setupUnifiedVoiceServer = (wss) => {
               to = data.start.extraData.DID
             }
 
-            let extraData = null
+            let extraData = null;
 
             if (data.start?.extraData) {
-              extraData = decodeExtraData(data.start.extraData)
+              extraData = decodeExtraData(data.start.extraData);
             } else if (urlParams.extra) {
-              extraData = decodeExtraData(urlParams.extra)
+              extraData = decodeExtraData(urlParams.extra);
             }
 
-            if (extraData?.CallCli && !mobile) {
-              mobile = extraData.CallCli
+            if (extraData?.CallCli) {
+              mobile = extraData.CallCli;
+            }
+            if (extraData?.CallVaId) {
+              callerId = extraData.CallVaId;
             }
 
             if (extraData && extraData.CallDirection === "OutDial") {
-              callDirection = "outbound"
+              callDirection = "outbound";
             } else if (urlParams.direction === "OutDial") {
-              callDirection = "outbound"
+              callDirection = "outbound";
               if (!extraData && urlParams.extra) {
-                extraData = decodeExtraData(urlParams.extra)
+                extraData = decodeExtraData(urlParams.extra);
               }
             } else {
-              callDirection = "inbound"
+              callDirection = "inbound";
             }
 
             // Log parsed call information
@@ -1121,10 +1150,11 @@ const setupUnifiedVoiceServer = (wss) => {
 
             // Create enhanced call logger with live transcript capability
             callLogger = new EnhancedCallLogger(
-              agentConfig.clientId || accountSid, 
-              mobile, 
+              agentConfig.clientId || accountSid,
+              mobile,
               callDirection
-            )
+            );
+            callLogger.customParams = customParams;
 
             // Create initial call log entry immediately
             try {

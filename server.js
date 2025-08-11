@@ -80,11 +80,6 @@ app.get("/api/logs", async (req, res) => {
 
     // Calculate skip for pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    console.log(`📊 [LOGS-API] Query filters:`, filters);
-    console.log(`📊 [LOGS-API] Sort:`, sort);
-    console.log(`📊 [LOGS-API] Limit: ${limit}, Skip: ${skip}`);
-
     // Import CallLog model
     const CallLog = require("./models/CallLog");
 
@@ -131,7 +126,6 @@ app.get("/api/logs", async (req, res) => {
       }
     };
 
-    console.log(`📊 [LOGS-API] Returning ${logs.length} logs (${totalCount} total, ${activeCount} active)`);
 
     res.json(response);
 
@@ -161,7 +155,6 @@ app.get("/api/logs/:id", async (req, res) => {
       });
     }
 
-    console.log(`📊 [LOGS-API] Retrieved log: ${id}`);
     
     res.json({
       log,
@@ -242,7 +235,6 @@ app.get("/api/logs/stats", async (req, res) => {
       }
     };
 
-    console.log(`📊 [LOGS-STATS] Generated stats - Total: ${totalCalls}, Active: ${activeCalls}`);
     
     res.json(stats);
 
@@ -262,7 +254,6 @@ app.post("/api/logs/cleanup", async (req, res) => {
     const CallLog = require("./models/CallLog");
     const result = await CallLog.cleanupStaleActiveCalls();
     
-    console.log(`🧹 [LOGS-CLEANUP] Cleaned up ${result.modifiedCount} stale active calls`);
     
     res.json({
       message: "Cleanup completed",

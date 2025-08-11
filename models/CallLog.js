@@ -45,11 +45,14 @@ const CallLogSchema = new mongoose.Schema({
     callDirection: { type: String, enum: ['inbound', 'outbound'], default: 'inbound' },
     isActive: { type: Boolean, default: true }, // Track if call is ongoing
     lastUpdated: { type: Date, default: Date.now }, // Track last live update
-    
+    // Custom params from czdata
+    customParams: {
+      type: Object,
+      default: {},
+    },
     // Performance metrics
     totalUpdates: { type: Number, default: 0 },
     averageResponseTime: { type: Number },
-    
     // Technical details
     sttProvider: { type: String, default: 'deepgram' },
     ttsProvider: { type: String, default: 'sarvam' },
