@@ -1113,7 +1113,7 @@ const setupUnifiedVoiceServer = (wss) => {
                   czdataDecoded.customerName ||
                   czdataDecoded.CustomerName ||
                   czdataDecoded.candidate_name ||
-                  czdataDecoded.candidateName ||
+                  czdataDecoded.contactName ||
                   null
                 );
                 console.log("[SIP-START] Decoded czdata customParams:", customParams);
