@@ -596,6 +596,7 @@ const processWithOpenAI = async (
   detectedLanguage,
   callLogger,
   agentConfig,
+  userName = null,
 ) => {
   const timer = createTimer("LLM_PROCESSING")
 
@@ -610,8 +611,13 @@ const processWithOpenAI = async (
       systemPrompt = truncated
     }
 
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
+      : null
+
     const messages = [
       { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
       ...conversationHistory.slice(-6),
       { role: "user", content: userMessage },
     ]
@@ -874,6 +880,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let callLogger = null
     let callDirection = "inbound"
     let agentConfig = null
+    let userName = null
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -1073,7 +1080,22 @@ const setupUnifiedVoiceServer = (wss) => {
               czdataDecoded = decodeCzdata(urlParams.czdata);
               if (czdataDecoded) {
                 customParams = czdataDecoded;
+                userName = (
+                  czdataDecoded.name ||
+                  czdataDecoded.Name ||
+                  czdataDecoded.full_name ||
+                  czdataDecoded.fullName ||
+                  czdataDecoded.customer_name ||
+                  czdataDecoded.customerName ||
+                  czdataDecoded.CustomerName ||
+                  czdataDecoded.candidate_name ||
+                  czdataDecoded.candidateName ||
+                  null
+                );
                 console.log("[SIP-START] Decoded czdata customParams:", customParams);
+                if (userName) {
+                  console.log("[SIP-START] User Name (czdata):", userName);
+                }
               }
             }
 
@@ -1107,6 +1129,28 @@ const setupUnifiedVoiceServer = (wss) => {
             }
             if (extraData?.CallVaId) {
               callerId = extraData.CallVaId;
+            }
+            if (!userName && extraData) {
+              userName = (
+                extraData.name ||
+                extraData.Name ||
+                extraData.full_name ||
+                extraData.fullName ||
+                extraData.customer_name ||
+                extraData.customerName ||
+                extraData.CustomerName ||
+                extraData.candidate_name ||
+                extraData.candidateName ||
+                null
+              );
+              if (userName) {
+                console.log("[SIP-START] User Name (extraData):", userName);
+              }
+            }
+
+            if (!userName && urlParams.name) {
+              userName = urlParams.name;
+              console.log("[SIP-START] User Name (url param):", userName);
             }
 
             if (extraData && extraData.CallDirection === "OutDial") {
@@ -1203,8 +1247,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
             await connectToDeepgram()
 
-            const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
-            
+            let greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
+            if (userName && userName.trim()) {
+              const base = agentConfig.firstMessage || "How can I help you today?"
+              greeting = `Hello ${userName.trim()}! ${base}`
+            }
+
             console.log("🎯 [SIP-CALL-SETUP] Greeting Message:", greeting)
             console.log("🎯 [SIP-CALL-SETUP] ======================================")
 
