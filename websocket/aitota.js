@@ -98,11 +98,32 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
 }
 
 // Valid Sarvam voice options
-const VALID_SARVAM_VOICES = ["meera", "pavithra", "arvind", "amol", "maya"]
+const VALID_SARVAM_VOICES = new Set([
+  "abhilash",
+  "anushka",
+  "meera",
+  "pavithra",
+  "maitreyi",
+  "arvind",
+  "amol",
+  "amartya",
+  "diya",
+  "neel",
+  "misha",
+  "vian",
+  "arjun",
+  "maya",
+  "manisha",
+  "vidya",
+  "arya",
+  "karun",
+  "hitesh",
+])
 
 const getValidSarvamVoice = (voiceSelection = "pavithra") => {
-  if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
-    return voiceSelection
+  const normalized = (voiceSelection || "").toString().trim().toLowerCase()
+  if (VALID_SARVAM_VOICES.has(normalized)) {
+    return normalized
   }
 
   const voiceMapping = {
@@ -112,9 +133,11 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
     "female-friendly": "maya",
     neutral: "pavithra",
     default: "pavithra",
+    male: "arvind",
+    female: "pavithra",
   }
 
-  return voiceMapping[voiceSelection] || "pavithra"
+  return voiceMapping[normalized] || "pavithra"
 }
 
 // Utility function to decode base64 extra data
