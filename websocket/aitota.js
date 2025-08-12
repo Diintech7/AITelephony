@@ -40,6 +40,28 @@ const createTimer = (label) => {
   }
 }
 
+// Local logging helper for Sarvam point-to-point flow (logs remain in this file)
+const sarvamLog = (level, message, meta = {}) => {
+  try {
+    const base = {
+      ts: new Date().toISOString(),
+      scope: "SARVAM",
+      level,
+      message,
+    }
+    const safeMeta = {}
+    for (const [key, value] of Object.entries(meta || {})) {
+      const lower = String(key).toLowerCase()
+      if (lower.includes("apikey") || lower.includes("token") || lower.includes("secret")) continue
+      safeMeta[key] = value
+    }
+    console.log(JSON.stringify({ ...base, ...safeMeta }))
+  } catch (e) {
+    // Fallback to simple log
+    console.log(`[SARVAM][${level}] ${message}`)
+  }
+}
+
 // Enhanced language mappings with Marathi support
 const LANGUAGE_MAPPING = {
   hi: "hi-IN",
@@ -470,6 +492,12 @@ class SimplifiedSarvamTTSProcessor {
     this.isStreamingToSIP = false // Flag to prevent multiple streaming loops
     this.totalAudioBytes = 0
     this.currentSarvamRequestId = 0 // To manage multiple TTS requests and interruptions
+
+    // Internal streaming stats
+    this._sarvamAudioChunks = 0
+    this._lastAudioLogTs = 0
+    this._sentBytes = 0
+    this._lastThroughputLogTs = 0
   }
 
   interrupt() {
@@ -481,6 +509,11 @@ class SimplifiedSarvamTTSProcessor {
     this.audioQueue = [] // Clear any pending audio
     this.isStreamingToSIP = false
     console.log("TTS interrupted and Sarvam WS closed.")
+    sarvamLog("interrupt", "TTS interrupted and Sarvam WS closed", {
+      streamSid: this.streamSid,
+      totalAudioBytes: this.totalAudioBytes,
+      requestId: this.currentSarvamRequestId,
+    })
   }
 
   reset(newLanguage) {
@@ -493,6 +526,11 @@ class SimplifiedSarvamTTSProcessor {
     this.totalAudioBytes = 0
     this.currentSarvamRequestId = 0
     // Connection will be re-established on next synthesizeAndStream call if needed
+    sarvamLog("reset", "Reset TTS processor", {
+      language: this.language,
+      sarvamLanguage: this.sarvamLanguage,
+      streamSid: this.streamSid,
+    })
   }
 
   async connectSarvamWs(requestId) {
@@ -516,6 +554,12 @@ class SimplifiedSarvamTTSProcessor {
     }
 
     const timer = createTimer("SARVAM_WS_CONNECT");
+    sarvamLog("connect_attempt", "Connecting to Sarvam TTS WebSocket", {
+      requestId,
+      language: this.sarvamLanguage,
+      voice: this.voice,
+      streamSid: this.streamSid,
+    })
     try {
       const sarvamUrl = new URL("wss://api.sarvam.ai/text-to-speech/ws");
       sarvamUrl.searchParams.append("model", "bulbul:v2"); 
@@ -531,6 +575,10 @@ class SimplifiedSarvamTTSProcessor {
           }
           this.sarvamWsConnected = true;
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected.`);
+          sarvamLog("connected", "Sarvam TTS WebSocket connected", {
+            requestId,
+            streamSid: this.streamSid,
+          })
 
           // Send initial config message
           const configMessage = {
@@ -551,6 +599,14 @@ class SimplifiedSarvamTTSProcessor {
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
           console.log("Sarvam TTS config sent.");
+          sarvamLog("config", "Config sent to Sarvam", {
+            requestId,
+            // Note: current implementation sends fixed values below
+            target_language_code: "hi-IN",
+            speaker: "anushka",
+            speech_sample_rate: 8000,
+            output_audio_codec: "linear16",
+          })
           resolve(true);
         };
 
@@ -564,32 +620,65 @@ class SimplifiedSarvamTTSProcessor {
               const audioBuffer = Buffer.from(response.data.audio, "base64");
               this.audioQueue.push(audioBuffer);
               this.totalAudioBytes += audioBuffer.length;
+              this._sarvamAudioChunks += 1;
+              const now = Date.now();
+              if (now - this._lastAudioLogTs > 1000 || this._sarvamAudioChunks === 1) {
+                sarvamLog("audio_recv", "Received audio from Sarvam", {
+                  requestId,
+                  chunkBytes: audioBuffer.length,
+                  queueLen: this.audioQueue.length,
+                  totalAudioBytes: this.totalAudioBytes,
+                  chunks: this._sarvamAudioChunks,
+                })
+                this._lastAudioLogTs = now;
+              }
               if (!this.isStreamingToSIP) {
                 this.startStreamingToSIP(requestId);
               }
             } else if (response.type === "error") {
               console.error(`❌ Sarvam TTS WS Error: ${response.data.message} (Code: ${response.data.code})`);
               // Handle specific errors if needed
+              sarvamLog("ws_error", "Sarvam TTS WS Error", {
+                requestId,
+                code: response.data?.code,
+                message: response.data?.message,
+              })
             }
           } catch (parseError) {
             console.error("Error parsing Sarvam WS message:", parseError);
+            sarvamLog("parse_error", "Error parsing Sarvam WS message", {
+              requestId,
+              error: String(parseError?.message || parseError),
+            })
           }
         };
 
         this.sarvamWs.onerror = (error) => {
           this.sarvamWsConnected = false;
           console.error(`❌ [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket error:`, error.message);
+          sarvamLog("ws_error", "Sarvam TTS WebSocket error", {
+            requestId,
+            error: String(error?.message || error),
+          })
           reject(error);
         };
 
         this.sarvamWs.onclose = () => {
           this.sarvamWsConnected = false;
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket closed.`);
+          sarvamLog("closed", "Sarvam TTS WebSocket closed", {
+            requestId,
+            totalAudioBytes: this.totalAudioBytes,
+          })
           // If closed unexpectedly, it will attempt to reconnect on next synthesizeAndStream
         };
       });
     } catch (error) {
       console.error(`❌ [SARVAM-WS-CONNECT] ${timer.end()}ms - Failed to connect to Sarvam TTS WebSocket: ${error.message}`);
+      sarvamLog("connect_fail", "Failed to connect to Sarvam TTS WebSocket", {
+        requestId,
+        error: String(error?.message || error),
+      })
       return false;
     }
   }
@@ -602,11 +691,21 @@ class SimplifiedSarvamTTSProcessor {
     this.isStreamingToSIP = false; // Reset streaming flag
 
     const timer = createTimer("TTS_SYNTHESIS_WS");
+    sarvamLog("synthesize_request", "Sending text to Sarvam", {
+      requestId,
+      textLen: (text || "").length,
+      preview: String(text || "").slice(0, 120),
+    })
 
     try {
       const connected = await this.connectSarvamWs(requestId);
       if (!connected || this.isInterrupted || this.currentSarvamRequestId !== requestId) {
         console.log("Sarvam WS not connected or interrupted/outdated request, aborting synthesis.");
+        sarvamLog("synthesize_abort", "Sarvam WS not connected or request outdated", {
+          requestId,
+          isInterrupted: this.isInterrupted,
+          currentSarvamRequestId: this.currentSarvamRequestId,
+        })
         return;
       }
 
@@ -621,6 +720,9 @@ class SimplifiedSarvamTTSProcessor {
       this.sarvamWs.send(JSON.stringify(flushMessage));
       
       console.log(`🕒 [TTS-SYNTHESIS-WS] ${timer.end()}ms - Text and flush signal sent to Sarvam WS.`);
+      sarvamLog("synthesize_flush_sent", "Text and flush sent to Sarvam", {
+        requestId,
+      })
 
       if (this.callLogger && text) {
         // Log AI response after sending to TTS, assuming it will be spoken
@@ -632,6 +734,10 @@ class SimplifiedSarvamTTSProcessor {
     } catch (error) {
       if (!this.isInterrupted) {
         console.error(`❌ [TTS-SYNTHESIS-WS] ${timer.end()}ms - Error sending text to Sarvam WS: ${error.message}`);
+        sarvamLog("synthesize_error", "Error sending text to Sarvam WS", {
+          requestId,
+          error: String(error?.message || error),
+        })
         throw error;
       }
     }
@@ -643,6 +749,10 @@ class SimplifiedSarvamTTSProcessor {
     }
     this.isStreamingToSIP = true;
     console.log("Starting streaming audio from Sarvam to SIP...");
+    sarvamLog("streaming_start", "Starting streaming audio from Sarvam to SIP", {
+      requestId,
+      streamSid: this.streamSid,
+    })
 
     const SAMPLE_RATE = 8000;
     const BYTES_PER_SAMPLE = 2; // linear16 is 16-bit, so 2 bytes
@@ -670,13 +780,30 @@ class SimplifiedSarvamTTSProcessor {
           if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
             try {
               this.ws.send(JSON.stringify(mediaMessage));
+              this._sentBytes += chunk.length;
+              const now = Date.now();
+              if (now - this._lastThroughputLogTs > 1000) {
+                sarvamLog("streaming_progress", "Streaming audio to SIP", {
+                  requestId,
+                  sentBytes: this._sentBytes,
+                  queueLen: this.audioQueue.length,
+                })
+                this._lastThroughputLogTs = now;
+              }
             } catch (error) {
               console.error("Error sending media to SIP WS:", error.message);
+              sarvamLog("sip_send_error", "Error sending media to SIP WS", {
+                requestId,
+                error: String(error?.message || error),
+              })
               this.isInterrupted = true; // Stop streaming on error
               break;
             }
           } else {
             console.log("SIP WS not open or interrupted, stopping streaming.");
+            sarvamLog("sip_ws_closed", "SIP WS not open or interrupted, stopping streaming", {
+              requestId,
+            })
             this.isInterrupted = true;
             break;
           }
@@ -696,6 +823,11 @@ class SimplifiedSarvamTTSProcessor {
     }
     this.isStreamingToSIP = false;
     console.log("Stopped streaming audio from Sarvam to SIP.");
+    sarvamLog("streaming_stop", "Stopped streaming audio from Sarvam to SIP", {
+      requestId,
+      sentBytes: this._sentBytes,
+      totalAudioBytes: this.totalAudioBytes,
+    })
   }
 
   getStats() {
