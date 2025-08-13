@@ -364,6 +364,7 @@ class EnhancedCallLogger {
     this.callerId = null
     this.streamSid = null
     this.callSid = null
+    this.accountSid = null
     this.ws = null // Store WebSocket reference for disconnection
   }
 
@@ -425,21 +426,58 @@ class EnhancedCallLogger {
     try {
       console.log(`🛑 [CALL-DISCONNECT] Disconnecting call: ${reason}`)
       
-      // Send stop event to terminate the call
+      // Send stop event to terminate the call with proper structure
       const stopMessage = {
         event: "stop",
-        streamSid: this.streamSid,
-        reason: reason
+        sequenceNumber: stopEventSequence++,
+        stop: {
+          accountSid: this.accountSid || "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+          callSid: this.callSid || "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        },
+        streamSid: this.streamSid
       }
       
-      this.ws.send(JSON.stringify(stopMessage))
+      console.log(`🛑 [CALL-DISCONNECT] Sending stop event:`, JSON.stringify(stopMessage, null, 2))
+      
+      // Check WebSocket state before sending
+      if (this.ws.readyState === WebSocket.OPEN) {
+        // Try sending the stop event
+        this.ws.send(JSON.stringify(stopMessage))
+        console.log(`🛑 [CALL-DISCONNECT] Stop event sent successfully`)
+        
+        // Also try sending as a close event as fallback
+        setTimeout(() => {
+          if (this.ws.readyState === WebSocket.OPEN) {
+            const closeMessage = {
+              event: "close",
+              streamSid: this.streamSid,
+              reason: reason
+            }
+            console.log(`🛑 [CALL-DISCONNECT] Sending fallback close event:`, JSON.stringify(closeMessage, null, 2))
+            this.ws.send(JSON.stringify(closeMessage))
+            
+            // Force close the WebSocket after a delay if still open
+            setTimeout(() => {
+              if (this.ws.readyState === WebSocket.OPEN) {
+                console.log(`🛑 [CALL-DISCONNECT] Force closing WebSocket connection`)
+                this.ws.close(1000, `Call terminated: ${reason}`)
+              }
+            }, 2000)
+          }
+        }, 1000)
+      } else {
+        console.log(`⚠️ [CALL-DISCONNECT] WebSocket not open (state: ${this.ws.readyState}), cannot send stop event`)
+      }
       
       // Update call log to mark as inactive
       if (this.callLogId) {
         await CallLog.findByIdAndUpdate(this.callLogId, {
           'metadata.isActive': false,
           'metadata.callEndTime': new Date(),
-          'metadata.lastUpdated': new Date()
+          'metadata.lastUpdated': new Date(),
+          'metadata.terminationReason': reason,
+          'metadata.terminatedAt': new Date(),
+          'metadata.terminationMethod': 'manual_api'
         })
       }
       
@@ -456,6 +494,7 @@ class EnhancedCallLogger {
     return {
       streamSid: this.streamSid,
       callSid: this.callSid,
+      accountSid: this.accountSid,
       callLogId: this.callLogId,
       clientId: this.clientId,
       mobile: this.mobile,
@@ -1448,6 +1487,7 @@ const setupUnifiedVoiceServer = (wss) => {
             callLogger.callerId = callerId || undefined;
             callLogger.streamSid = streamSid;
             callLogger.callSid = data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid;
+            callLogger.accountSid = accountSid;
             callLogger.ws = ws; // Store WebSocket reference
 
             // Create initial call log entry immediately
@@ -1607,6 +1647,9 @@ const setupUnifiedVoiceServer = (wss) => {
 // Global map to store active call loggers by streamSid
 const activeCallLoggers = new Map()
 
+// Global sequence counter for stop events
+let stopEventSequence = 1
+
 /**
  * Terminate a call by streamSid
  * @param {string} streamSid - The stream SID to terminate
@@ -1622,6 +1665,13 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
     
     if (callLogger) {
       console.log(`🛑 [MANUAL-TERMINATION] Found active call logger, terminating gracefully...`)
+      console.log(`🛑 [MANUAL-TERMINATION] Call Logger Info:`, callLogger.getCallInfo())
+      
+      // Check WebSocket state
+      if (callLogger.ws) {
+        console.log(`🛑 [MANUAL-TERMINATION] WebSocket State: ${callLogger.ws.readyState} (0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)`)
+      }
+      
       await callLogger.disconnectCall(reason)
       return {
         success: true,
