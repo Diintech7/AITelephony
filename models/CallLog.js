@@ -36,6 +36,10 @@ const CallLogSchema = new mongoose.Schema({
     default: 'maybe' 
   },
   
+  // Telephony identifiers for call management
+  streamSid: { type: String, index: true }, // For active call tracking
+  callSid: { type: String, index: true },   // For call identification
+  
   // Enhanced metadata for live tracking
   metadata: {
     userTranscriptCount: { type: Number, default: 0 },
@@ -69,6 +73,8 @@ CallLogSchema.index({ clientId: 1, campaignId: 1, agentId: 1, time: -1 });
 CallLogSchema.index({ clientId: 1, leadStatus: 1 });
 CallLogSchema.index({ 'metadata.isActive': 1, 'metadata.lastUpdated': 1 }); // For active call queries
 CallLogSchema.index({ clientId: 1, 'metadata.isActive': 1 }); // For client's active calls
+CallLogSchema.index({ streamSid: 1 }); // For active call lookup by streamSid
+CallLogSchema.index({ callSid: 1 });   // For call lookup by callSid
 
 // Pre-save middleware to update metadata
 CallLogSchema.pre('save', function(next) {
@@ -87,6 +93,14 @@ CallLogSchema.statics.getActiveCalls = function(clientId) {
     clientId: clientId, 
     'metadata.isActive': true 
   }).sort({ 'metadata.lastUpdated': -1 });
+};
+
+// Static method to find active call by streamSid
+CallLogSchema.statics.findActiveCallByStreamSid = function(streamSid) {
+  return this.findOne({ 
+    streamSid: streamSid, 
+    'metadata.isActive': true 
+  });
 };
 
 // Static method to cleanup stale active calls (calls marked active but haven't updated in 10 minutes)

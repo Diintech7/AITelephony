@@ -362,6 +362,9 @@ class EnhancedCallLogger {
     this.batchTimeout = 3000 // Or save every 3 seconds
     this.customParams = {}
     this.callerId = null
+    this.streamSid = null
+    this.callSid = null
+    this.ws = null // Store WebSocket reference for disconnection
   }
 
   // Create initial call log entry immediately when call starts
@@ -376,6 +379,8 @@ class EnhancedCallLogger {
         transcript: "",
         duration: 0,
         leadStatus: normalizeLeadStatus(leadStatusInput, 'not_connected'),
+        streamSid: this.streamSid,
+        callSid: this.callSid,
         metadata: {
           userTranscriptCount: 0,
           aiResponseCount: 0,
@@ -396,11 +401,92 @@ class EnhancedCallLogger {
       this.callLogId = savedLog._id
       this.isCallLogCreated = true
 
+      // Add to active call loggers map for manual termination
+      if (this.streamSid) {
+        activeCallLoggers.set(this.streamSid, this)
+        console.log(`📋 [ACTIVE-CALL-LOGGERS] Added call logger for streamSid: ${this.streamSid}`)
+      }
+
       console.log(`🕒 [INITIAL-CALL-LOG] ${timer.end()}ms - Created: ${savedLog._id}`)
       return savedLog
     } catch (error) {
       console.log(`❌ [INITIAL-CALL-LOG] ${timer.end()}ms - Error: ${error.message}`)
       throw error
+    }
+  }
+
+  // Method to disconnect the call
+  async disconnectCall(reason = 'user_disconnected') {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.log("⚠️ [CALL-DISCONNECT] WebSocket not available for disconnection")
+      return false
+    }
+
+    try {
+      console.log(`🛑 [CALL-DISCONNECT] Disconnecting call: ${reason}`)
+      
+      // Send stop event to terminate the call
+      const stopMessage = {
+        event: "stop",
+        streamSid: this.streamSid,
+        reason: reason
+      }
+      
+      this.ws.send(JSON.stringify(stopMessage))
+      
+      // Update call log to mark as inactive
+      if (this.callLogId) {
+        await CallLog.findByIdAndUpdate(this.callLogId, {
+          'metadata.isActive': false,
+          'metadata.callEndTime': new Date(),
+          'metadata.lastUpdated': new Date()
+        })
+      }
+      
+      console.log("✅ [CALL-DISCONNECT] Call disconnected successfully")
+      return true
+    } catch (error) {
+      console.log(`❌ [CALL-DISCONNECT] Error disconnecting call: ${error.message}`)
+      return false
+    }
+  }
+
+  // Method to get call information for external disconnection
+  getCallInfo() {
+    return {
+      streamSid: this.streamSid,
+      callSid: this.callSid,
+      callLogId: this.callLogId,
+      clientId: this.clientId,
+      mobile: this.mobile,
+      isActive: this.isCallLogCreated && this.callLogId
+    }
+  }
+
+  // Method to gracefully end call with goodbye message
+  async gracefulCallEnd(goodbyeMessage = "Thank you for your time. Have a great day!", language = "en") {
+    try {
+      console.log("👋 [GRACEFUL-END] Ending call gracefully with goodbye message")
+      
+      // Log the goodbye message
+      this.logAIResponse(goodbyeMessage, language)
+      
+      // Update call log immediately
+      if (this.callLogId) {
+        await CallLog.findByIdAndUpdate(this.callLogId, {
+          'metadata.lastUpdated': new Date()
+        })
+      }
+      
+      // Wait a moment for the message to be processed, then disconnect
+      setTimeout(async () => {
+        await this.disconnectCall('graceful_termination')
+      }, 1500)
+      
+      return true
+    } catch (error) {
+      console.log(`❌ [GRACEFUL-END] Error in graceful call end: ${error.message}`)
+      return false
     }
   }
 
@@ -540,6 +626,8 @@ class EnhancedCallLogger {
           transcript: this.generateFullTranscript(),
           duration: this.totalDuration,
           leadStatus: leadStatus,
+          streamSid: this.streamSid,
+          callSid: this.callSid,
           'metadata.userTranscriptCount': this.transcripts.length,
           'metadata.aiResponseCount': this.responses.length,
           'metadata.languages': [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
@@ -567,6 +655,8 @@ class EnhancedCallLogger {
           transcript: this.generateFullTranscript(),
           duration: this.totalDuration,
           leadStatus: leadStatus,
+          streamSid: this.streamSid,
+          callSid: this.callSid,
           metadata: {
             userTranscriptCount: this.transcripts.length,
             aiResponseCount: this.responses.length,
@@ -595,6 +685,12 @@ class EnhancedCallLogger {
     if (this.batchTimer) {
       clearTimeout(this.batchTimer)
       this.batchTimer = null
+    }
+    
+    // Remove from active call loggers map
+    if (this.streamSid) {
+      activeCallLoggers.delete(this.streamSid)
+      console.log(`📋 [ACTIVE-CALL-LOGGERS] Removed call logger for streamSid: ${this.streamSid}`)
     }
   }
 
@@ -677,6 +773,57 @@ const processWithOpenAI = async (
   } catch (error) {
     console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
     return null
+  }
+}
+
+// Intelligent call disconnection detection using OpenAI
+const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("DISCONNECTION_DETECTION")
+  try {
+    const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
+- "thank you", "thanks", "bye", "goodbye", "end call", "hang up"
+- "hold on", "wait", "not available", "busy", "call back later"
+- "not interested", "no thanks", "stop calling"
+- Any indication they want to end the conversation
+
+User message: "${userMessage}"
+
+Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they want to continue.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: disconnectionPrompt },
+        ],
+        max_tokens: 10,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "CONTINUE" // Default to continue on error
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
+
+    if (result === "DISCONNECT") {
+      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
+      return "DISCONNECT"
+    } else {
+      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
+      return "CONTINUE"
+    }
+  } catch (error) {
+    console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "CONTINUE" // Default to continue on error
   }
 }
 
@@ -886,6 +1033,32 @@ const findAgentForCall = async (callData) => {
   }
 }
 
+// Utility function to handle external call disconnection
+const handleExternalCallDisconnection = async (streamSid, reason = 'external_disconnection') => {
+  try {
+    const activeCall = await CallLog.findActiveCallByStreamSid(streamSid)
+    if (activeCall) {
+      console.log(`🛑 [EXTERNAL-DISCONNECT] Disconnecting call ${streamSid}: ${reason}`)
+      
+      // Update call log to mark as inactive
+      await CallLog.findByIdAndUpdate(activeCall._id, {
+        'metadata.isActive': false,
+        'metadata.callEndTime': new Date(),
+        'metadata.lastUpdated': new Date()
+      })
+      
+      console.log(`✅ [EXTERNAL-DISCONNECT] Call ${streamSid} marked as disconnected`)
+      return true
+    } else {
+      console.log(`⚠️ [EXTERNAL-DISCONNECT] No active call found for streamSid: ${streamSid}`)
+      return false
+    }
+  } catch (error) {
+    console.log(`❌ [EXTERNAL-DISCONNECT] Error handling external disconnection: ${error.message}`)
+    return false
+  }
+}
+
 // Main WebSocket server setup with enhanced live transcript functionality
 const setupUnifiedVoiceServer = (wss) => {
   wss.on("connection", (ws, req) => {
@@ -1029,6 +1202,21 @@ const setupUnifiedVoiceServer = (wss) => {
         if (detectedLanguage !== currentLanguage) {
           console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
           currentLanguage = detectedLanguage
+        }
+
+        // Check if user wants to disconnect (fast detection to minimize latency)
+        console.log("🔍 [USER-UTTERANCE] Checking disconnection intent...")
+        const disconnectionIntent = await detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
+        
+        if (disconnectionIntent === "DISCONNECT") {
+          console.log("🛑 [USER-UTTERANCE] User wants to disconnect - ending call gracefully")
+          
+          // Use graceful call end method
+          if (callLogger) {
+            await callLogger.gracefulCallEnd("Thank you for your time. Have a great day!", detectedLanguage)
+          }
+          
+          return
         }
 
         console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
@@ -1247,6 +1435,8 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🎯 [SIP-CALL-SETUP] Mobile Number:", mobile)
             console.log("🎯 [SIP-CALL-SETUP] Call Direction:", callDirection)
             console.log("🎯 [SIP-CALL-SETUP] Client ID:", agentConfig.clientId || accountSid)
+            console.log("🎯 [SIP-CALL-SETUP] StreamSID:", streamSid)
+            console.log("🎯 [SIP-CALL-SETUP] CallSID:", data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid)
 
             // Create enhanced call logger with live transcript capability
             callLogger = new EnhancedCallLogger(
@@ -1256,11 +1446,15 @@ const setupUnifiedVoiceServer = (wss) => {
             );
             callLogger.customParams = customParams;
             callLogger.callerId = callerId || undefined;
+            callLogger.streamSid = streamSid;
+            callLogger.callSid = data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid;
+            callLogger.ws = ws; // Store WebSocket reference
 
             // Create initial call log entry immediately
             try {
               await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
               console.log("✅ [SIP-CALL-SETUP] Initial call log created successfully")
+              console.log("✅ [SIP-CALL-SETUP] Call Log ID:", callLogger.callLogId)
             } catch (error) {
               console.log("❌ [SIP-CALL-SETUP] Failed to create initial call log:", error.message)
               // Continue anyway - fallback will create log at end
@@ -1319,6 +1513,11 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🛑 [SIP-STOP] StreamSID:", streamSid)
             console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
             console.log("🛑 [SIP-STOP] Mobile:", mobile)
+            
+            // Handle external call disconnection
+            if (streamSid) {
+              await handleExternalCallDisconnection(streamSid, 'sip_stop_event')
+            }
             
             if (callLogger) {
               const stats = callLogger.getStats()
@@ -1405,4 +1604,90 @@ const setupUnifiedVoiceServer = (wss) => {
   })
 }
 
-module.exports = { setupUnifiedVoiceServer }
+// Global map to store active call loggers by streamSid
+const activeCallLoggers = new Map()
+
+/**
+ * Terminate a call by streamSid
+ * @param {string} streamSid - The stream SID to terminate
+ * @param {string} reason - Reason for termination
+ * @returns {Object} Result of termination attempt
+ */
+const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination') => {
+  try {
+    console.log(`🛑 [MANUAL-TERMINATION] Attempting to terminate call with streamSid: ${streamSid}`)
+    
+    // Check if we have an active call logger for this streamSid
+    const callLogger = activeCallLoggers.get(streamSid)
+    
+    if (callLogger) {
+      console.log(`🛑 [MANUAL-TERMINATION] Found active call logger, terminating gracefully...`)
+      await callLogger.disconnectCall(reason)
+      return {
+        success: true,
+        message: 'Call terminated successfully',
+        streamSid,
+        reason,
+        method: 'graceful_termination'
+      }
+    } else {
+      console.log(`🛑 [MANUAL-TERMINATION] No active call logger found, updating database directly...`)
+      
+      // Fallback: Update the call log directly in the database
+      try {
+        const CallLog = require("../models/CallLog")
+        const result = await CallLog.updateMany(
+          { streamSid, 'metadata.isActive': true },
+          { 
+            'metadata.isActive': false,
+            'metadata.terminationReason': reason,
+            'metadata.terminatedAt': new Date(),
+            'metadata.terminationMethod': 'api_manual',
+            leadStatus: 'disconnected_api'
+          }
+        )
+        
+        if (result.modifiedCount > 0) {
+          return {
+            success: true,
+            message: 'Call marked as terminated in database',
+            streamSid,
+            reason,
+            method: 'database_update',
+            modifiedCount: result.modifiedCount
+          }
+        } else {
+          return {
+            success: false,
+            message: 'No active calls found with this streamSid',
+            streamSid,
+            reason,
+            method: 'database_update'
+          }
+        }
+      } catch (dbError) {
+        console.error(`❌ [MANUAL-TERMINATION] Database update error:`, dbError.message)
+        return {
+          success: false,
+          message: 'Failed to update database',
+          streamSid,
+          reason,
+          method: 'database_update',
+          error: dbError.message
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`❌ [MANUAL-TERMINATION] Error terminating call:`, error.message)
+    return {
+      success: false,
+      message: 'Failed to terminate call',
+      streamSid,
+      reason,
+      method: 'error',
+      error: error.message
+    }
+  }
+}
+
+module.exports = { setupUnifiedVoiceServer, terminateCallByStreamSid }

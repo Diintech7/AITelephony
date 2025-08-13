@@ -14,7 +14,7 @@ const {
 } = require("./config/database");
 
 // Import the unified voice server from aitota.js
-const { setupUnifiedVoiceServer } = require("./websocket/aitota");
+const { setupUnifiedVoiceServer, terminateCallByStreamSid } = require("./websocket/aitota");
 
 // Environment configuration
 const PORT = process.env.PORT || 3000;
@@ -271,11 +271,63 @@ app.post("/api/logs/cleanup", async (req, res) => {
   }
 });
 
+// Terminate active call by streamSid
+app.post("/api/calls/terminate", async (req, res) => {
+  try {
+    const { streamSid, reason } = req.body;
+    
+    if (!streamSid) {
+      return res.status(400).json({
+        error: "Missing required parameter",
+        message: "streamSid is required",
+        timestamp: new Date().toISOString(),
+      });
+    }
+    
+    console.log(`🛑 [API-TERMINATE] Terminating call with streamSid: ${streamSid}, reason: ${reason || 'manual_termination'}`);
+    
+    const result = await terminateCallByStreamSid(streamSid, reason || 'manual_termination');
+    
+    if (result.success) {
+      res.json({
+        success: true,
+        message: result.message,
+        data: {
+          streamSid,
+          reason: reason || 'manual_termination',
+          method: result.method,
+          timestamp: new Date().toISOString(),
+        }
+      });
+    } else {
+      res.status(404).json({
+        success: false,
+        message: result.message,
+        data: {
+          streamSid,
+          reason: reason || 'manual_termination',
+          method: result.method,
+          timestamp: new Date().toISOString(),
+        }
+      });
+    }
+    
+  } catch (error) {
+    console.error("❌ [API-TERMINATE] Error terminating call:", error.message);
+    res.status(500).json({
+      error: "Failed to terminate call",
+      message: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
 console.log("📊 [SERVER] Live logs API routes registered:");
 console.log("📊 [SERVER] GET /api/logs - Get call logs with filtering");
 console.log("📊 [SERVER] GET /api/logs/:id - Get specific call log");
 console.log("📊 [SERVER] GET /api/logs/stats - Get live statistics");
 console.log("📊 [SERVER] POST /api/logs/cleanup - Cleanup stale active calls");
+console.log("📊 [SERVER] POST /api/calls/terminate - Terminate active call by streamSid");
 
 
 // Health check endpoint
