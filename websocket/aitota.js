@@ -654,7 +654,22 @@ class EnhancedCallLogger {
       // 1. Log the goodbye message (non-blocking)
       this.logAIResponse(goodbyeMessage, language)
       
-      // 2. Send stop event immediately (non-blocking)
+      // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
+      let ttsStarted = false
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        
+        // Start TTS and wait for it to begin
+        try {
+          await tts.synthesizeAndStream(goodbyeMessage)
+          ttsStarted = true
+          console.log(`🚀 [ULTRA-FAST-TERMINATE] Goodbye message TTS completed`)
+        } catch (err) {
+          console.log(`⚠️ [ULTRA-FAST-TERMINATE] TTS error: ${err.message}`)
+        }
+      }
+      
+      // 3. Send stop event after TTS starts (non-blocking)
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         const stopMessage = {
           event: "stop",
@@ -668,19 +683,10 @@ class EnhancedCallLogger {
         
         try {
           this.ws.send(JSON.stringify(stopMessage))
-          console.log(`🚀 [ULTRA-FAST-TERMINATE] Stop event sent immediately`)
+          console.log(`🚀 [ULTRA-FAST-TERMINATE] Stop event sent after TTS`)
         } catch (error) {
           console.log(`⚠️ [ULTRA-FAST-TERMINATE] Error sending stop event: ${error.message}`)
         }
-      }
-      
-      // 3. Start TTS synthesis (non-blocking, fire-and-forget)
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
-        tts.synthesizeAndStream(goodbyeMessage).catch(err => 
-          console.log(`⚠️ [ULTRA-FAST-TERMINATE] TTS error: ${err.message}`)
-        )
-        console.log(`🚀 [ULTRA-FAST-TERMINATE] Goodbye message TTS started`)
       }
       
       // 4. Update call log (non-blocking)
@@ -697,7 +703,7 @@ class EnhancedCallLogger {
         allPromises.push(callLogUpdate)
       }
       
-      // 5. Force close WebSocket after minimal delay (non-blocking)
+      // 5. Force close WebSocket after ensuring TTS is sent (non-blocking)
       const forceClosePromise = new Promise((resolve) => {
         setTimeout(() => {
           if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -705,7 +711,7 @@ class EnhancedCallLogger {
             this.ws.close(1000, `Call terminated: ${reason}`)
           }
           resolve()
-        }, 200) // Ultra-fast: only 200ms delay
+        }, 500) // Increased delay to ensure TTS is sent
       })
       allPromises.push(forceClosePromise)
       
@@ -716,6 +722,41 @@ class EnhancedCallLogger {
       return true
     } catch (error) {
       console.log(`❌ [ULTRA-FAST-TERMINATE] Error in ultra-fast termination: ${error.message}`)
+      return false
+    }
+  }
+
+  // Controlled termination with proper timing - ensures message is sent before disconnection
+  async controlledTerminateWithMessage(goodbyeMessage = "Thank you, goodbye!", language = "en", reason = 'controlled_termination', delayMs = 2000) {
+    try {
+      console.log(`⏱️ [CONTROLLED-TERMINATE] Controlled termination with message: ${reason}, delay: ${delayMs}ms`)
+      
+      // 1. Log the goodbye message
+      this.logAIResponse(goodbyeMessage, language)
+      
+      // 2. Start TTS synthesis and wait for completion
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        
+        try {
+          console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
+          await tts.synthesizeAndStream(goodbyeMessage)
+          console.log(`⏱️ [CONTROLLED-TERMINATE] TTS synthesis completed`)
+        } catch (err) {
+          console.log(`⚠️ [CONTROLLED-TERMINATE] TTS error: ${err.message}`)
+        }
+      }
+      
+      // 3. Wait for specified delay to ensure message is processed
+      console.log(`⏱️ [CONTROLLED-TERMINATE] Waiting ${delayMs}ms before disconnection...`)
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      
+      // 4. Now terminate the call
+      console.log(`⏱️ [CONTROLLED-TERMINATE] Delay completed, now terminating call...`)
+      return await this.fastTerminateCall(reason)
+      
+    } catch (error) {
+      console.log(`❌ [CONTROLLED-TERMINATE] Error in controlled termination: ${error.message}`)
       return false
     }
   }
@@ -952,6 +993,12 @@ const processWithOpenAI = async (
   try {
     let systemPrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
 
+    // Add token limit instruction to system prompt
+    const tokenLimitInstruction = "IMPORTANT: Keep your responses concise and under 100 tokens. Be brief but helpful."
+    
+    // Combine system prompt with token limit instruction
+    systemPrompt = `${systemPrompt}\n\n${tokenLimitInstruction}`
+
     if (Buffer.byteLength(systemPrompt, "utf8") > 150) {
       let truncated = systemPrompt
       while (Buffer.byteLength(truncated, "utf8") > 150) {
@@ -980,7 +1027,7 @@ const processWithOpenAI = async (
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 50,
+        max_tokens: 100, // Increased to match the instruction
         temperature: 0.3,
       }),
     })
@@ -1457,13 +1504,19 @@ const setupUnifiedVoiceServer = (wss) => {
         ])
         
         if (disconnectionIntent === "DISCONNECT") {
-          console.log("🛑 [USER-UTTERANCE] User wants to disconnect - ending call with ultra-fast termination")
+          console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
           
-          // Use ultra-fast termination for minimal latency (non-blocking)
-          if (callLogger) {
-            callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
-              .catch(err => console.log(`⚠️ [USER-UTTERANCE] Ultra-fast termination error: ${err.message}`))
-          }
+          // Wait 2 seconds to ensure last message is processed, then terminate
+          setTimeout(async () => {
+            if (callLogger) {
+              try {
+                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
+                console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
+              } catch (err) {
+                console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
+              }
+            }
+          }, 2000)
           
           return
         }
