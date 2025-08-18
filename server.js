@@ -458,6 +458,7 @@ app.get("/api/info", async (req, res) => {
         logsStats: `/api/logs/stats`,
         logsCleanup: `/api/logs/cleanup`,
         callsTerminate: `/api/calls/terminate`,
+        clickToCallSupport: `/api/click-to-call-support`,
       },
     })
   } catch (error) {
@@ -519,6 +520,59 @@ app.get("/api/stats", async (req, res) => {
     res.status(500).json({
       error: "Failed to get server statistics",
       message: error.message,
+    })
+  }
+})
+
+// Proxy endpoint for Tata Smartflo Click-to-Call Support
+app.post("/api/click-to-call-support", async (req, res) => {
+  try {
+    const { api_key, customer_number, caller_id, get_call_id, async: asyncFlag } = req.body || {}
+
+    if (!api_key || !customer_number) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required parameters: api_key and customer_number",
+        timestamp: new Date().toISOString(),
+      })
+    }
+
+    const payload = {
+      api_key,
+      customer_number,
+    }
+
+    if (caller_id) payload.caller_id = caller_id
+    if (get_call_id !== undefined) payload.get_call_id = Number(get_call_id) ? 1 : 0
+    if (asyncFlag !== undefined) payload.async = Number(asyncFlag) ? 1 : 0
+
+    const CLICK_TO_CALL_URL = "https://api-smartflo.tatateleservices.com/v1/click_to_call_support"
+
+    const upstream = await fetch(CLICK_TO_CALL_URL, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    })
+
+    const text = await upstream.text()
+    let json
+    try {
+      json = JSON.parse(text)
+    } catch (_) {
+      json = { raw: text }
+    }
+
+    return res.status(upstream.status).json(json)
+  } catch (error) {
+    console.error("❌ [C2C] Click-to-Call proxy error:", error.message)
+    return res.status(500).json({
+      success: false,
+      message: "Failed to initiate click-to-call",
+      error: error.message,
+      timestamp: new Date().toISOString(),
     })
   }
 })
