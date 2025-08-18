@@ -73,6 +73,88 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return "pavithra" // Default fallback
 }
 
+// -------- Audio utils: WAV PCM16 -> µ-law (8kHz mono) --------
+function linearPcmSampleToMuLaw(sample) {
+  // Clamp to 16-bit signed range
+  if (sample > 32767) sample = 32767
+  if (sample < -32768) sample = -32768
+
+  const MU = 255
+
+  let sign = 0
+  if (sample < 0) {
+    sign = 0x80
+    sample = -sample
+  }
+
+  // Bias for μ-law
+  sample = sample + 132
+  if (sample > 32635) sample = 32635
+
+  // Determine exponent
+  let exponent = 7
+  for (let expMask = 0x4000; (sample & expMask) === 0 && exponent > 0; expMask >>= 1) {
+    exponent--
+  }
+
+  const mantissa = (sample >> (exponent + 3)) & 0x0f
+  const muLawByte = ~(sign | (exponent << 4) | mantissa) & 0xff
+  return muLawByte
+}
+
+function wavPcm16ToMuLawBase64(wavBase64) {
+  try {
+    const buffer = Buffer.from(wavBase64, "base64")
+    if (buffer.length < 44) return null
+    // Basic WAV header checks
+    if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
+      return null
+    }
+
+    // Parse fmt chunk
+    let offset = 12
+    let fmtChunkFound = false
+    let audioFormat = 1
+    let numChannels = 1
+    let sampleRate = 8000
+    let bitsPerSample = 16
+    let dataOffset = -1
+    let dataSize = 0
+
+    while (offset + 8 <= buffer.length) {
+      const chunkId = buffer.toString("ascii", offset, offset + 4)
+      const chunkSize = buffer.readUInt32LE(offset + 4)
+      const next = offset + 8 + chunkSize
+      if (chunkId === "fmt ") {
+        fmtChunkFound = true
+        audioFormat = buffer.readUInt16LE(offset + 8)
+        numChannels = buffer.readUInt16LE(offset + 10)
+        sampleRate = buffer.readUInt32LE(offset + 12)
+        bitsPerSample = buffer.readUInt16LE(offset + 22)
+      } else if (chunkId === "data") {
+        dataOffset = offset + 8
+        dataSize = chunkSize
+      }
+      offset = next
+    }
+
+    if (!fmtChunkFound || dataOffset < 0 || dataSize <= 0) return null
+    if (audioFormat !== 1 || numChannels !== 1 || bitsPerSample !== 16) return null
+    if (sampleRate !== 8000) return null
+
+    const pcmData = buffer.slice(dataOffset, dataOffset + dataSize)
+    const sampleCount = pcmData.length / 2
+    const muLawBuffer = Buffer.alloc(sampleCount)
+    for (let i = 0; i < sampleCount; i++) {
+      const sample = pcmData.readInt16LE(i * 2)
+      muLawBuffer[i] = linearPcmSampleToMuLaw(sample)
+    }
+    return muLawBuffer.toString("base64")
+  } catch (err) {
+    return null
+  }
+}
+
 class SipCallSession extends EventEmitter {
   constructor(ws, callSid) {
     super()
@@ -101,7 +183,8 @@ class SipCallSession extends EventEmitter {
       const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
       deepgramUrl.searchParams.append("sample_rate", "8000")
       deepgramUrl.searchParams.append("channels", "1")
-      deepgramUrl.searchParams.append("encoding", "linear16")
+      // Incoming SIP audio is µ-law 8k; match Deepgram input encoding
+      deepgramUrl.searchParams.append("encoding", "mulaw")
       deepgramUrl.searchParams.append("model", "nova-2")
       deepgramUrl.searchParams.append("language", deepgramLanguage)
       deepgramUrl.searchParams.append("interim_results", "true")
@@ -273,8 +356,9 @@ class SipCallSession extends EventEmitter {
       const audioBase64 = responseData.audios?.[0]
 
       if (audioBase64) {
-        // Send audio back to SIP client
-        this.sendAudioToClient(audioBase64)
+        // Sarvam typically returns WAV PCM. Convert to µ-law/8000 base64 for SIP client.
+        const muLawBase64 = wavPcm16ToMuLawBase64(audioBase64) || audioBase64
+        this.sendAudioToClient(muLawBase64)
       } else {
         throw new Error("No audio data received from Sarvam API")
       }
@@ -362,6 +446,9 @@ function setupSipWebSocketServer(wss) {
         console.log(`📨 [SIP-WS] Received event: ${data.event}`)
 
         switch (data.event) {
+          case "connected":
+            // Some vendors send an initial connected event; acknowledge by ignoring
+            break
           case "start":
             await handleStart(ws, data)
             break
@@ -422,31 +509,39 @@ function setupSipWebSocketServer(wss) {
 }
 
 async function handleStart(ws, data) {
-  const { callSid, streamSid } = data
+  const startInfo = data.start || {}
+  const callSid = data.callSid || startInfo.callSid || startInfo.call_sid || startInfo.callsid
+  const streamSid = data.streamSid || startInfo.streamSid || startInfo.stream_sid || data.streamsid
 
-  console.log(`🚀 [SIP-START] Starting call session: ${callSid}`)
+  console.log(`🚀 [SIP-START] Starting call session: ${callSid || "(unknown)"} | streamSid: ${streamSid || "(missing)"}`)
 
   // Create new session (no database validation - accept all)
-  const session = new SipCallSession(ws, callSid)
+  const sessionKey = callSid || streamSid
+  const session = new SipCallSession(ws, sessionKey)
   session.streamSid = streamSid
   session.isActive = true
 
-  // Store session
-  activeSessions.set(callSid, session)
+  // Store session using whichever identifier is available
+  activeSessions.set(sessionKey, session)
 
   // Send acknowledgment
   ws.send(
     JSON.stringify({
       event: "start_ack",
-      callSid: callSid,
-      streamSid: streamSid,
+      callSid: callSid || null,
+      streamSid: streamSid || null,
       status: "accepted",
       message: "Call session started successfully",
       timestamp: new Date().toISOString(),
     }),
   )
 
-  console.log(`✅ [SIP-START] Session started for call: ${callSid}`)
+  console.log(`✅ [SIP-START] Session started. Key: ${sessionKey}`)
+
+  // Optionally send an initial greeting to test audio path
+  try {
+    await session.convertToSpeech("Hello, you are now connected. How can I help you?")
+  } catch (_) {}
 }
 
 async function handleMedia(ws, data) {
@@ -467,39 +562,49 @@ async function handleMedia(ws, data) {
 }
 
 async function handleStop(ws, data) {
-  const { callSid, streamSid } = data
+  const callSid = data.callSid
+  const streamSid = data.streamSid
 
-  console.log(`🛑 [SIP-STOP] Stopping call session: ${callSid}`)
+  console.log(`🛑 [SIP-STOP] Stopping call session. callSid: ${callSid || "(missing)"}, streamSid: ${streamSid || "(missing)"}`)
 
-  const session = activeSessions.get(callSid)
-  if (session) {
+  let sessionKey = callSid
+  let session = sessionKey ? activeSessions.get(sessionKey) : undefined
+  if (!session && streamSid) {
+    session = Array.from(activeSessions.values()).find((s) => s.streamSid === streamSid)
+    sessionKey = session ? session.callSid || session.streamSid : undefined
+  }
+
+  if (session && sessionKey) {
     session.terminate("call_ended")
-    activeSessions.delete(callSid)
+    activeSessions.delete(sessionKey)
 
     // Send acknowledgment
     ws.send(
       JSON.stringify({
         event: "stop_ack",
-        callSid: callSid,
-        streamSid: streamSid,
+        callSid: callSid || null,
+        streamSid: streamSid || null,
         status: "terminated",
         timestamp: new Date().toISOString(),
       }),
     )
 
-    console.log(`✅ [SIP-STOP] Session terminated for call: ${callSid}`)
+    console.log(`✅ [SIP-STOP] Session terminated. Key: ${sessionKey}`)
   }
 }
 
 async function handleDtmf(ws, data) {
-  const { callSid, dtmf } = data
+  const { callSid, dtmf, streamSid } = data
 
-  console.log(`📞 [SIP-DTMF] DTMF received for call ${callSid}: ${dtmf.digit}`)
+  console.log(`📞 [SIP-DTMF] DTMF received. callSid: ${callSid || "(missing)"}, streamSid: ${streamSid || "(missing)"}, digit: ${dtmf?.digit}`)
 
-  const session = activeSessions.get(callSid)
+  let session = (callSid && activeSessions.get(callSid)) || null
+  if (!session && streamSid) {
+    session = Array.from(activeSessions.values()).find((s) => s.streamSid === streamSid) || null
+  }
   if (session) {
     // Handle DTMF input (could be used for menu navigation, etc.)
-    session.sendTextToClient(`DTMF digit received: ${dtmf.digit}`)
+    session.sendTextToClient(`DTMF digit received: ${dtmf?.digit}`)
   }
 }
 
@@ -520,11 +625,14 @@ async function handleMark(ws, data) {
 }
 
 async function handleClear(ws, data) {
-  const { callSid } = data
+  const { callSid, streamSid } = data
 
-  console.log(`🧹 [SIP-CLEAR] Clear received for call: ${callSid}`)
+  console.log(`🧹 [SIP-CLEAR] Clear received. callSid: ${callSid || "(missing)"}, streamSid: ${streamSid || "(missing)"}`)
 
-  const session = activeSessions.get(callSid)
+  let session = (callSid && activeSessions.get(callSid)) || null
+  if (!session && streamSid) {
+    session = Array.from(activeSessions.values()).find((s) => s.streamSid === streamSid) || null
+  }
   if (session) {
     // Clear any queued audio or reset session state
     session.audioBuffer = []
@@ -532,7 +640,8 @@ async function handleClear(ws, data) {
     ws.send(
       JSON.stringify({
         event: "clear_ack",
-        callSid: callSid,
+        callSid: callSid || null,
+        streamSid: streamSid || null,
         status: "cleared",
         timestamp: new Date().toISOString(),
       }),
