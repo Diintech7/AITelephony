@@ -991,21 +991,22 @@ const processWithOpenAI = async (
   const timer = createTimer("LLM_PROCESSING")
 
   try {
-    let systemPrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    // Build a stricter system prompt that embeds firstMessage and sets answering policy
+    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    const firstMessage = (agentConfig.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage
+      ? `FirstGreeting: "${firstMessage}"\n`
+      : ""
 
-    // Add token limit instruction to system prompt
-    const tokenLimitInstruction = "IMPORTANT: Keep your responses concise and under 100 tokens. Be brief but helpful."
-    
-    // Combine system prompt with token limit instruction
-    systemPrompt = `${systemPrompt}\n\n${tokenLimitInstruction}`
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
+      "If the information is not present, reply briefly that you don't have that information.",
+      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
+      "Keep the entire reply under 100 tokens.",
+    ].join(" ")
 
-    if (Buffer.byteLength(systemPrompt, "utf8") > 150) {
-      let truncated = systemPrompt
-      while (Buffer.byteLength(truncated, "utf8") > 150) {
-        truncated = truncated.slice(0, -1)
-      }
-      systemPrompt = truncated
-    }
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
 
     const personalizationMessage = userName && userName.trim()
       ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
@@ -1027,7 +1028,7 @@ const processWithOpenAI = async (
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 100, // Increased to match the instruction
+        max_tokens: 120,
         temperature: 0.3,
       }),
     })
@@ -1038,9 +1039,27 @@ const processWithOpenAI = async (
     }
 
     const data = await response.json()
-    const fullResponse = data.choices[0]?.message?.content?.trim()
+    let fullResponse = data.choices[0]?.message?.content?.trim()
 
     console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
+
+    // Ensure a follow-up question is present at the end
+    if (fullResponse) {
+      const needsFollowUp = !/[?]\s*$/.test(fullResponse)
+      if (needsFollowUp) {
+        const followUps = {
+          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
+          en: "Is there anything else I can help you with?",
+          bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
+          ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
+          te: "ఇంకేమైనా సహాయం కావాలా?",
+          mr: "आणखी काही मदत हवी आहे का?",
+          gu: "શું બીજી કોઈ મદદ કરી શકું?",
+        }
+        const fu = followUps[detectedLanguage] || followUps.en
+        fullResponse = `${fullResponse} ${fu}`.trim()
+      }
+    }
 
     if (callLogger && fullResponse) {
       callLogger.logAIResponse(fullResponse, detectedLanguage)
