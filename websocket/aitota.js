@@ -3,6 +3,7 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
+const { sendWhatsApp } = require("../controller/whatsappmsgcontroller")
 
 // Import franc with fallback for different versions
 let franc;
@@ -1876,6 +1877,34 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
           const savedLog = await callLogger.saveToDatabase("maybe")
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
+
+          // Send WhatsApp follow-up message once per call
+          try {
+            const mobileDigits = (callLogger.mobile || "").replace(/\D+/g, "")
+            // Assume India if no country code; prefix +91
+            const normalizedPhone = mobileDigits.startsWith("+")
+              ? mobileDigits
+              : (mobileDigits.length === 10 ? `+91${mobileDigits}` : `+${mobileDigits}`)
+
+            const agentName = ws.sessionAgentConfig?.agentName || "our agent"
+            const clientName = ws.sessionAgentConfig?.clientId || "our team"
+            const durationMin = Math.max(1, Math.round((stats.duration || 0) / 60))
+
+            const followupMessage = [
+              `Thank you for speaking with ${agentName} from ${clientName}.`,
+              `If you have any more questions, just reply here.`,
+              `Have a great day!`
+            ].join(" ")
+
+            if (mobileDigits) {
+              const result = await sendWhatsApp(normalizedPhone, followupMessage)
+              console.log("📲 [WHATSAPP] Follow-up sent:", result)
+            } else {
+              console.log("⚠️ [WHATSAPP] Skipped: invalid mobile number")
+            }
+          } catch (waErr) {
+            console.log("❌ [WHATSAPP] Error sending follow-up:", waErr.message)
+          }
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
         } finally {
