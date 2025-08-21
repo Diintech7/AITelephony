@@ -73,6 +73,108 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return "pavithra" // Default fallback
 }
 
+// -------- Debug decode helpers --------
+function isPrintableAscii(text) {
+  if (typeof text !== "string") return false
+  // Allow common whitespace; disallow control chars
+  return /^[\x09\x0A\x0D\x20-\x7E\u00A0-\uFFFF]*$/.test(text)
+}
+
+function isProbablyBase64(str) {
+  if (typeof str !== "string") return false
+  if (str.length < 8) return false
+  if (str.length % 4 !== 0) return false
+  // Common base64 chars only
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(str)) return false
+  return true
+}
+
+function tryDecodeBase64ToUtf8(str) {
+  try {
+    const buf = Buffer.from(str, "base64")
+    if (buf.length === 0) return null
+    const asUtf8 = buf.toString("utf8")
+    if (isPrintableAscii(asUtf8)) return asUtf8
+    return null
+  } catch (_) {
+    return null
+  }
+}
+
+function summarizeBase64Binary(str, maxPreviewBytes = 16) {
+  try {
+    const buf = Buffer.from(str, "base64")
+    const preview = buf.slice(0, maxPreviewBytes)
+    const hexPreview = Array.from(preview)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(" ")
+    return {
+      _encoding: "base64",
+      _summary: `binary ${buf.length} bytes`,
+      _preview_hex: hexPreview,
+    }
+  } catch (_) {
+    return { _encoding: "base64", _summary: "invalid base64" }
+  }
+}
+
+function isProbablyUrlEncoded(str) {
+  if (typeof str !== "string") return false
+  // Heuristic: presence of %XX or + as space and typical separators
+  return /%[0-9A-Fa-f]{2}/.test(str) || (str.includes("+") && /%|=|&/.test(str))
+}
+
+function tryDecodeUrl(str) {
+  try {
+    // Replace + with space as in application/x-www-form-urlencoded
+    const replaced = str.replace(/\+/g, " ")
+    const decoded = decodeURIComponent(replaced)
+    if (decoded !== str) return decoded
+    return null
+  } catch (_) {
+    return null
+  }
+}
+
+function decodeStringFieldByHeuristics(key, value) {
+  if (typeof value !== "string") return value
+
+  // Large payload keys: summarize instead of full dump
+  const lowerKey = (key || "").toString().toLowerCase()
+  const isLikelyPayload = lowerKey.includes("payload") || lowerKey.includes("audio")
+
+  if (isProbablyBase64(value)) {
+    if (isLikelyPayload) {
+      return summarizeBase64Binary(value)
+    }
+    const asUtf8 = tryDecodeBase64ToUtf8(value)
+    if (asUtf8 !== null) return asUtf8
+    return summarizeBase64Binary(value)
+  }
+
+  const urlDecoded = tryDecodeUrl(value)
+  if (urlDecoded !== null) return urlDecoded
+
+  return value
+}
+
+function deepDecodeObject(input, currentKey = "") {
+  if (Array.isArray(input)) {
+    return input.map((v) => deepDecodeObject(v, currentKey))
+  }
+  if (input && typeof input === "object") {
+    const out = {}
+    for (const [k, v] of Object.entries(input)) {
+      out[k] = deepDecodeObject(v, k)
+    }
+    return out
+  }
+  if (typeof input === "string") {
+    return decodeStringFieldByHeuristics(currentKey, input)
+  }
+  return input
+}
+
 // -------- Audio utils: WAV PCM16 -> µ-law (8kHz mono) --------
 function linearPcmSampleToMuLaw(sample) {
   // Clamp to 16-bit signed range
@@ -444,6 +546,22 @@ function setupSipWebSocketServer(wss) {
       try {
         const data = JSON.parse(message.toString())
         console.log(`📨 [SIP-WS] Received event: ${data.event}`)
+
+        // Emit decoded debug snapshot for visibility
+        try {
+          const decodedSnapshot = deepDecodeObject(data)
+          const debugPayload = {
+            event: "sip_debug",
+            original_event: data.event || "unknown",
+            decoded: decodedSnapshot,
+            timestamp: new Date().toISOString(),
+          }
+          // Log compactly to avoid flooding
+          console.log("🔍 [SIP-DEBUG]", JSON.stringify(debugPayload).slice(0, 2000))
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(debugPayload))
+          }
+        } catch (_) {}
 
         switch (data.event) {
           case "connected":
