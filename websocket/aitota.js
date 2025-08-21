@@ -1164,6 +1164,8 @@ class SimplifiedSarvamTTSProcessor {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          // Prefer x-api-key; some tenants also accept API-Subscription-Key
+          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
@@ -1174,7 +1176,6 @@ class SimplifiedSarvamTTSProcessor {
           pace: 1.0,
           loudness: 1.0,
           speech_sample_rate: 8000,
-          enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
@@ -1182,7 +1183,8 @@ class SimplifiedSarvamTTSProcessor {
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+          const errorText = await response.text().catch(() => "")
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status} ${errorText}`)
           throw new Error(`Sarvam API error: ${response.status}`)
         }
         return
