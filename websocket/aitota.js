@@ -3,7 +3,7 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
-const { sendWhatsApp } = require("../controller/whatsappmsgcontroller")
+const { sendWhatsApp, normalizeToE164India } = require("../controller/whatsappmsgcontroller")
 
 // Import franc with fallback for different versions
 let franc;
@@ -1880,11 +1880,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
           // Send WhatsApp follow-up message once per call
           try {
-            const mobileDigits = (callLogger.mobile || "").replace(/\D+/g, "")
-            // Assume India if no country code; prefix +91
-            const normalizedPhone = mobileDigits.startsWith("+")
-              ? mobileDigits
-              : (mobileDigits.length === 10 ? `+91${mobileDigits}` : `+${mobileDigits}`)
+            const normalizedPhone = normalizeToE164India(callLogger.mobile || "")
 
             const agentName = ws.sessionAgentConfig?.agentName || "our agent"
             const clientName = ws.sessionAgentConfig?.clientId || "our team"
@@ -1896,7 +1892,7 @@ const setupUnifiedVoiceServer = (wss) => {
               `Have a great day!`
             ].join(" ")
 
-            if (mobileDigits) {
+            if (normalizedPhone) {
               const result = await sendWhatsApp(normalizedPhone, followupMessage)
               console.log("📲 [WHATSAPP] Follow-up sent:", result)
             } else {

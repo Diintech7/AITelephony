@@ -6,16 +6,27 @@ const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID;
 const WHATSAPP_BUSINESS_ACCOUNT_ID = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
 
+// Normalize Indian numbers to E.164 (+91XXXXXXXXXX)
+const normalizeToE164India = (phoneNumber) => {
+    const digits = String(phoneNumber || "").replace(/\D+/g, "");
+    if (!digits) {
+        throw new Error('Invalid phone number');
+    }
+    // Always take last 10 as local mobile and prefix +91
+    const last10 = digits.slice(-10);
+    if (last10.length !== 10) {
+        throw new Error('Invalid Indian mobile number');
+    }
+    return `+91${last10}`;
+};
+
 // Core utility to send WhatsApp message (reusable)
 const sendWhatsApp = async (phoneNumber, message) => {
     if (!phoneNumber || !message) {
         throw new Error('Phone number and message are required');
     }
 
-    const cleanPhoneNumber = phoneNumber.replace(/\s+/g, '');
-    if (!cleanPhoneNumber.startsWith('+')) {
-        throw new Error('Phone number must include country code (e.g., +1234567890)');
-    }
+    const cleanPhoneNumber = normalizeToE164India(phoneNumber);
 
     const url = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_ID}/messages`;
     const headers = {
@@ -101,5 +112,6 @@ const getMessageStatus = async (req, res) => {
 module.exports = {
     sendWhatsAppMessage,
     getMessageStatus,
-    sendWhatsApp
+    sendWhatsApp,
+    normalizeToE164India
 };
