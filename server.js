@@ -12,6 +12,7 @@ const { connectDatabase, checkDatabaseHealth, getDatabaseStats, getConnectionSta
 // Import the unified voice server from aitota.js
 const { setupUnifiedVoiceServer, terminateCallByStreamSid } = require("./websocket/aitota")
 const { setupSipWebSocketServer } = require("./websocket/sip-server")
+const { setupSanPbxWebSocketServer } = require("./websocket/sanpbx-server")
 
 // Environment configuration
 const PORT = process.env.PORT || 3000
@@ -43,6 +44,8 @@ let activeConnections = 0
 let totalConnections = 0
 let sipActiveConnections = 0
 let sipTotalConnections = 0
+let sanpbxActiveConnections = 0
+let sanpbxTotalConnections = 0
 
 // Create WebSocket servers WITHOUT path specification initially
 const wss = new WebSocket.Server({
@@ -52,6 +55,12 @@ const wss = new WebSocket.Server({
 })
 
 const sipWss = new WebSocket.Server({
+  noServer: true, // This is key - we'll handle upgrades manually
+  perMessageDeflate: false,
+  clientTracking: true,
+})
+
+const sanpbxWss = new WebSocket.Server({
   noServer: true, // This is key - we'll handle upgrades manually
   perMessageDeflate: false,
   clientTracking: true,
@@ -70,6 +79,10 @@ server.on("upgrade", (request, socket, head) => {
   } else if (pathname === "/sip-ws") {
     sipWss.handleUpgrade(request, socket, head, (ws) => {
       sipWss.emit("connection", ws, request)
+    })
+  } else if (pathname === "/sanpbx-ws") {
+    sanpbxWss.handleUpgrade(request, socket, head, (ws) => {
+      sanpbxWss.emit("connection", ws, request)
     })
   } else {
     console.log(`❌ [SERVER] Unknown WebSocket path: ${pathname}`)
@@ -132,7 +145,33 @@ sipWss.on("connection", (ws, req) => {
   })
 })
 
-// Add error handling for both WebSocket servers
+// SanIPPBX WebSocket connection handling
+sanpbxWss.on("connection", (ws, req) => {
+  sanpbxActiveConnections++
+  sanpbxTotalConnections++
+
+  const clientIP = req.socket.remoteAddress
+  console.log(`🔗 [SANPBX-WS] New connection from ${clientIP}`)
+  console.log(`📊 [SANPBX-WS] Active: ${sanpbxActiveConnections}, Total: ${sanpbxTotalConnections}`)
+
+  // Add connection metadata
+  ws.connectionId = `sanpbx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  ws.connectedAt = new Date()
+  ws.clientIP = clientIP
+
+  ws.on("close", (code, reason) => {
+    sanpbxActiveConnections--
+    const duration = Date.now() - ws.connectedAt.getTime()
+    console.log(`🔗 [SANPBX-WS] Connection closed: ${ws.connectionId}`)
+    console.log(`📊 [SANPBX-WS] Duration: ${Math.round(duration / 1000)}s, Active: ${sanpbxActiveConnections}`)
+  })
+
+  ws.on("error", (error) => {
+    console.error(`❌ [SANPBX-WS] Connection error for ${ws.connectionId}:`, error.message)
+  })
+})
+
+// Add error handling for all WebSocket servers
 wss.on("error", (error) => {
   console.error("❌ [AITOTA-WS] WebSocket server error:", error.message)
 })
@@ -141,12 +180,20 @@ sipWss.on("error", (error) => {
   console.error("❌ [SIP-WS] WebSocket server error:", error.message)
 })
 
+sanpbxWss.on("error", (error) => {
+  console.error("❌ [SANPBX-WS] WebSocket server error:", error.message)
+})
+
 // Initialize the unified voice server with the WebSocket server
 setupUnifiedVoiceServer(wss)
 
 // Setup SIP WebSocket server
 setupSipWebSocketServer(sipWss)
 console.log("✅ [SERVER] SIP WebSocket server setup enabled")
+
+// Setup SanIPPBX WebSocket server
+setupSanPbxWebSocketServer(sanpbxWss)
+console.log("✅ [SERVER] SanIPPBX WebSocket server setup enabled")
 
 // ==================== API ENDPOINTS ====================
 
@@ -288,8 +335,8 @@ app.get("/api/logs/stats", async (req, res) => {
       server: {
         uptime: process.uptime(),
         memory: process.memoryUsage(),
-        activeConnections: activeConnections + sipActiveConnections,
-        totalConnections: totalConnections + sipTotalConnections,
+        activeConnections: activeConnections + sipActiveConnections + sanpbxActiveConnections,
+        totalConnections: totalConnections + sipTotalConnections + sanpbxTotalConnections,
       },
     }
 
@@ -405,6 +452,10 @@ app.get("/health", async (req, res) => {
           clients: sipWss.clients.size,
           active: sipActiveConnections,
         },
+        sanpbx: {
+          clients: sanpbxWss.clients.size,
+          active: sanpbxActiveConnections,
+        },
       },
     }
 
@@ -450,6 +501,7 @@ app.get("/api/info", async (req, res) => {
       endpoints: {
         websocket: `/ws`,
         sipWebsocket: `/sip-ws`,
+        sanpbxWebsocket: `/sanpbx-ws`,
         health: `/health`,
         stats: `/api/stats`,
         info: `/api/info`,
@@ -480,8 +532,8 @@ app.get("/api/stats", async (req, res) => {
       server: {
         uptime: process.uptime(),
         memory: process.memoryUsage(),
-        activeConnections: activeConnections + sipActiveConnections,
-        totalConnections: totalConnections + sipTotalConnections,
+        activeConnections: activeConnections + sipActiveConnections + sanpbxActiveConnections,
+        totalConnections: totalConnections + sipTotalConnections + sanpbxTotalConnections,
         timestamp: new Date().toISOString(),
       },
       websocket: {
@@ -501,6 +553,17 @@ app.get("/api/stats", async (req, res) => {
           active: sipActiveConnections,
           total: sipTotalConnections,
           connections: Array.from(sipWss.clients).map((ws) => ({
+            id: ws.connectionId,
+            connectedAt: ws.connectedAt,
+            readyState: ws.readyState,
+            clientIP: ws.clientIP?.replace(/^.*:/, ""), // Hide full IP for privacy
+          })),
+        },
+        sanpbx: {
+          clients: sanpbxWss.clients.size,
+          active: sanpbxActiveConnections,
+          total: sanpbxTotalConnections,
+          connections: Array.from(sanpbxWss.clients).map((ws) => ({
             id: ws.connectionId,
             connectedAt: ws.connectedAt,
             readyState: ws.readyState,
@@ -611,13 +674,21 @@ const gracefulShutdown = (signal) => {
       ws.terminate()
     })
 
+    sanpbxWss.clients.forEach((ws) => {
+      ws.terminate()
+    })
+
     wss.close(() => {
       console.log("🔌 [SERVER] AITOTA WebSocket server closed")
 
       sipWss.close(() => {
         console.log("🔌 [SERVER] SIP WebSocket server closed")
-        console.log("✅ [SERVER] Graceful shutdown complete")
-        process.exit(0)
+
+        sanpbxWss.close(() => {
+          console.log("🔌 [SERVER] SanIPPBX WebSocket server closed")
+          console.log("✅ [SERVER] Graceful shutdown complete")
+          process.exit(0)
+        })
       })
     })
   })
@@ -659,6 +730,7 @@ const startServer = async () => {
       console.log(`🌍 Environment: ${NODE_ENV}`)
       console.log(`🔗 AITOTA WebSocket endpoint: ws://localhost:${PORT}/ws`)
       console.log(`🔗 SIP WebSocket endpoint: ws://localhost:${PORT}/sip-ws`)
+      console.log(`🔗 SanIPPBX WebSocket endpoint: ws://localhost:${PORT}/sanpbx-ws`)
       console.log(`🩺 Health check: http://localhost:${PORT}/health`)
       console.log(`📊 Server stats: http://localhost:${PORT}/api/stats`)
       console.log(`📋 Server info: http://localhost:${PORT}/api/info`)
@@ -679,4 +751,4 @@ const startServer = async () => {
 startServer()
 
 // Export server for testing purposes
-module.exports = { app, server, wss, sipWss }
+module.exports = { app, server, wss, sipWss, sanpbxWss }
