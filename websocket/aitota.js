@@ -3,6 +3,7 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
+const { sendWhatsApp, normalizeToE164India } = require("../controller/whatsappmsgcontroller")
 
 // Import franc with fallback for different versions
 let franc;
@@ -1164,8 +1165,6 @@ class SimplifiedSarvamTTSProcessor {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Prefer x-api-key; some tenants also accept API-Subscription-Key
-          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
@@ -1176,6 +1175,7 @@ class SimplifiedSarvamTTSProcessor {
           pace: 1.0,
           loudness: 1.0,
           speech_sample_rate: 8000,
+          enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
@@ -1183,8 +1183,7 @@ class SimplifiedSarvamTTSProcessor {
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
-          const errorText = await response.text().catch(() => "")
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status} ${errorText}`)
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
           throw new Error(`Sarvam API error: ${response.status}`)
         }
         return
@@ -1878,6 +1877,30 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
           const savedLog = await callLogger.saveToDatabase("maybe")
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
+
+          // Send WhatsApp follow-up message once per call
+          try {
+            const normalizedPhone = normalizeToE164India(callLogger.mobile || "")
+
+            const agentName = ws.sessionAgentConfig?.agentName || "our agent"
+            const clientName = ws.sessionAgentConfig?.clientId || "our team"
+            const durationMin = Math.max(1, Math.round((stats.duration || 0) / 60))
+
+            const followupMessage = [
+              `Thank you for speaking with ${agentName} from ${clientName}.`,
+              `If you have any more questions, just reply here.`,
+              `Have a great day!`
+            ].join(" ")
+
+            if (normalizedPhone) {
+              const result = await sendWhatsApp(normalizedPhone, followupMessage)
+              console.log("📲 [WHATSAPP] Follow-up sent:", result)
+            } else {
+              console.log("⚠️ [WHATSAPP] Skipped: invalid mobile number")
+            }
+          } catch (waErr) {
+            console.log("❌ [WHATSAPP] Error sending follow-up:", waErr.message)
+          }
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
         } finally {
