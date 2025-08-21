@@ -75,6 +75,34 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return "pavithra" // Default fallback
 }
 
+// -------- Base64 helpers --------
+function isProbablyBase64(str) {
+  if (typeof str !== "string") return false
+  if (str.length < 8) return false
+  if (str.length % 4 !== 0) return false
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(str)
+}
+
+function normalizeBase64String(str) {
+  if (typeof str !== "string") return str
+  // Strip whitespace
+  let s = str.replace(/\s+/g, "")
+  if (isProbablyBase64(s)) return s
+  // Convert URL-safe base64 to standard
+  let urlFixed = s.replace(/-/g, "+").replace(/_/g, "/")
+  const pad = urlFixed.length % 4
+  if (pad) urlFixed = urlFixed + "=".repeat(4 - pad)
+  if (isProbablyBase64(urlFixed)) return urlFixed
+  // Fallback: attempt to interpret as binary (latin1) and encode
+  try {
+    const buf = Buffer.from(str, "binary")
+    const b64 = buf.toString("base64")
+    return b64
+  } catch (_) {
+    return str
+  }
+}
+
 // -------- Audio utils: LINEAR16 (44.1kHz) -> LINEAR16 (8kHz) --------
 function resampleLinear16To8kHz(audioBuffer) {
   try {
@@ -641,8 +669,12 @@ async function handleMedia(ws, data) {
   }
 
   if (media && media.payload) {
-    // Process audio chunk
-    await session.processAudioChunk(media.payload)
+    // Ensure payload is base64 for downstream processing
+    const normalized = normalizeBase64String(media.payload)
+    if (normalized !== media.payload) {
+      console.log("🔁 [SANPBX-MEDIA] Normalized incoming payload to base64")
+    }
+    await session.processAudioChunk(normalized)
   }
 }
 
