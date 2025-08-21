@@ -797,8 +797,8 @@ async function handleStart(ws, data) {
       serviceProvider: "tata",
     }
 
-    // Client ID strictly from Agent when available
-    const clientId = agent ? agent.clientId : "unknown"
+    // Client ID from Agent when available; fallback to accountSid or "unknown"
+    const clientId = (agent && agent.clientId) ? agent.clientId : (startInfo.accountSid || "unknown")
 
     const callLog = await CallLog.create({
       clientId: clientId,
