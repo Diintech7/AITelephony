@@ -72,7 +72,18 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   if (VALID_SARVAM_VOICES.has(normalized)) {
     return normalized
   }
-  return "pavithra" // Default fallback
+  // Map generic labels to closest Sarvam voices
+  const voiceMapping = {
+    "male-professional": "arvind",
+    "female-professional": "pavithra",
+    "male-friendly": "amol",
+    "female-friendly": "maya",
+    neutral: "pavithra",
+    default: "pavithra",
+    male: "arvind",
+    female: "pavithra",
+  }
+  return voiceMapping[normalized] || "pavithra"
 }
 
 // -------- Phone utils --------
@@ -301,6 +312,9 @@ class SipCallSession extends EventEmitter {
     this.createdAt = new Date()
     this.callLogId = null
     this.agent = null
+    this.systemPromptOverride = null
+    this.voiceOverride = null
+    this.firstMessageText = null
 
     this.deepgramWs = null
     this.deepgramReady = false
@@ -428,8 +442,9 @@ class SipCallSession extends EventEmitter {
         language: this.detectedLanguage,
       })
 
-      // Create system prompt with token limit instruction
-      const systemPrompt = `${this.getSystemPrompt(this.detectedLanguage)}\n\nIMPORTANT: Keep your responses concise and under 100 tokens. Be brief but helpful.`
+      // Create system prompt with token limit instruction (prefer agent-provided)
+      const baseSystem = this.systemPromptOverride || this.getSystemPrompt(this.detectedLanguage)
+      const systemPrompt = `${baseSystem}\n\nIMPORTANT: Keep your responses concise and under 100 tokens. Be brief but helpful.`
 
       // Prepare messages for OpenAI
       const messages = [
@@ -504,7 +519,7 @@ class SipCallSession extends EventEmitter {
   async convertToSpeech(text) {
     try {
       const sarvamLanguage = getSarvamLanguage(this.detectedLanguage)
-      const voice = getValidSarvamVoice("pavithra")
+      const voice = getValidSarvamVoice(this.voiceOverride || "pavithra")
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -717,17 +732,42 @@ async function handleStart(ws, data) {
   // Store session using whichever identifier is available
   activeSessions.set(sessionKey, session)
 
-  // Match agent by callingNumber and persist CallLog
+  // Match agent by 'to' number (preferred) and persist CallLog
   try {
     const fromNumber = startInfo.from || data.from
     const toNumber = startInfo.to || data.to
-    const agent = await findActiveAgentByNumber(fromNumber, toNumber)
+    const toLast = last10Digits(toNumber)
+    let agent = null
+    try {
+      const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
+        .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language")
+        .lean()
+      agent = candidates.find((a) => last10Digits(a.callingNumber) === toLast) || null
+    } catch (_) {}
+    if (!agent) {
+      agent = await findActiveAgentByNumber(fromNumber, toNumber)
+    }
     session.agent = agent || null
+
+    // Apply agent configuration overrides if available
+    if (agent) {
+      if (agent.systemPrompt && typeof agent.systemPrompt === "string") {
+        session.systemPromptOverride = agent.systemPrompt
+      }
+      if (agent.voiceSelection) {
+        session.voiceOverride = agent.voiceSelection
+      }
+      if (agent.firstMessage && typeof agent.firstMessage === "string") {
+        session.firstMessageText = agent.firstMessage
+      }
+      if (agent.language && typeof agent.language === "string") {
+        session.detectedLanguage = agent.language
+      }
+    }
 
     const agentCalling = agent?.callingNumber
     const agentLast = agentCalling ? last10Digits(agentCalling) : null
     const fromLast = last10Digits(fromNumber)
-    const toLast = last10Digits(toNumber)
 
     let callDirection = "inbound"
     if (agentLast) {
@@ -754,10 +794,11 @@ async function handleStart(ws, data) {
       sttProvider: (agent && agent.sttSelection) || "deepgram",
       ttsProvider: (agent && agent.ttsSelection) || "sarvam",
       llmProvider: (agent && agent.llmSelection) || "openai",
+      serviceProvider: "tata",
     }
 
-    // Try to set a meaningful clientId; fall back to accountSid if no agent
-    const clientId = (agent && agent.clientId) || startInfo.accountSid || "unknown"
+    // Client ID strictly from Agent when available
+    const clientId = agent ? agent.clientId : "unknown"
 
     const callLog = await CallLog.create({
       clientId: clientId,
@@ -794,7 +835,10 @@ async function handleStart(ws, data) {
 
   // Optionally send an initial greeting to test audio path
   try {
-    await session.convertToSpeech("Hello, you are now connected. How can I help you?")
+    const greeting = session.firstMessageText && typeof session.firstMessageText === "string"
+      ? session.firstMessageText
+      : "Hello, you are now connected. How can I help you?"
+    await session.convertToSpeech(greeting)
   } catch (_) {}
 }
 
