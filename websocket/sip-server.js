@@ -1,5 +1,7 @@
 const WebSocket = require("ws")
 const EventEmitter = require("events")
+const Agent = require("../models/Agent")
+const CallLog = require("../models/CallLog")
 require("dotenv").config()
 
 const API_KEYS = {
@@ -71,6 +73,35 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
     return normalized
   }
   return "pavithra" // Default fallback
+}
+
+// -------- Phone utils --------
+function extractDigits(value) {
+  if (!value) return ""
+  return String(value).replace(/\D+/g, "")
+}
+
+function last10Digits(value) {
+  const digits = extractDigits(value)
+  return digits.slice(-10)
+}
+
+async function findActiveAgentByNumber(dialedNumberA, dialedNumberB) {
+  // Fallback-friendly in-memory match by last 10 digits
+  const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
+    .select("_id clientId callingNumber sttSelection ttsSelection llmSelection")
+    .lean()
+  const aLast = last10Digits(dialedNumberA)
+  const bLast = last10Digits(dialedNumberB)
+  let best = null
+  for (const ag of candidates) {
+    const agLast = last10Digits(ag.callingNumber)
+    if (agLast && (agLast === aLast || agLast === bLast)) {
+      best = ag
+      break
+    }
+  }
+  return best
 }
 
 // -------- Debug decode helpers --------
@@ -268,6 +299,8 @@ class SipCallSession extends EventEmitter {
     this.conversationHistory = []
     this.detectedLanguage = "en"
     this.createdAt = new Date()
+    this.callLogId = null
+    this.agent = null
 
     this.deepgramWs = null
     this.deepgramReady = false
@@ -337,6 +370,27 @@ class SipCallSession extends EventEmitter {
           // Detect language if available
           if (data.channel.detected_language) {
             this.detectedLanguage = data.channel.detected_language
+          }
+
+          // Persist user transcript line
+          try {
+            let callLog = null
+            if (this.callLogId) {
+              callLog = await CallLog.findById(this.callLogId)
+            } else if (this.streamSid) {
+              callLog = await CallLog.findActiveCallByStreamSid(this.streamSid)
+            }
+            if (callLog) {
+              callLog.addLiveTranscriptEntry({
+                type: "user",
+                language: this.detectedLanguage || "en",
+                text: transcript,
+                timestamp: new Date(),
+              })
+              await callLog.save()
+            }
+          } catch (err) {
+            console.error("❌ [CALLLOG] Failed to persist user transcript:", err.message)
           }
 
           // Process with OpenAI
@@ -417,6 +471,27 @@ class SipCallSession extends EventEmitter {
           timestamp: new Date(),
           language: this.detectedLanguage,
         })
+
+        // Persist AI response line
+        try {
+          let callLog = null
+          if (this.callLogId) {
+            callLog = await CallLog.findById(this.callLogId)
+          } else if (this.streamSid) {
+            callLog = await CallLog.findActiveCallByStreamSid(this.streamSid)
+          }
+          if (callLog) {
+            callLog.addLiveTranscriptEntry({
+              type: "ai",
+              language: this.detectedLanguage || "en",
+              text: aiResponse,
+              timestamp: new Date(),
+            })
+            await callLog.save()
+          }
+        } catch (err) {
+          console.error("❌ [CALLLOG] Failed to persist AI response:", err.message)
+        }
 
         // Convert to speech using Sarvam AI
         await this.convertToSpeech(aiResponse)
@@ -642,6 +717,66 @@ async function handleStart(ws, data) {
   // Store session using whichever identifier is available
   activeSessions.set(sessionKey, session)
 
+  // Match agent by callingNumber and persist CallLog
+  try {
+    const fromNumber = startInfo.from || data.from
+    const toNumber = startInfo.to || data.to
+    const agent = await findActiveAgentByNumber(fromNumber, toNumber)
+    session.agent = agent || null
+
+    const agentCalling = agent?.callingNumber
+    const agentLast = agentCalling ? last10Digits(agentCalling) : null
+    const fromLast = last10Digits(fromNumber)
+    const toLast = last10Digits(toNumber)
+
+    let callDirection = "inbound"
+    if (agentLast) {
+      if (agentLast === fromLast) callDirection = "outbound"
+      else if (agentLast === toLast) callDirection = "inbound"
+    } else if (typeof startInfo.direction === "string" && isPrintableAscii(startInfo.direction)) {
+      callDirection = startInfo.direction.trim().toLowerCase()
+    }
+
+    // Mobile is the counterparty
+    const mobile = callDirection === "outbound" ? toLast : fromLast
+
+    const meta = {
+      userTranscriptCount: 0,
+      aiResponseCount: 0,
+      languages: session.detectedLanguage ? [session.detectedLanguage] : [],
+      callEndTime: undefined,
+      callDirection,
+      isActive: true,
+      lastUpdated: new Date(),
+      customParams: (startInfo.customParameters && typeof startInfo.customParameters === "object") ? startInfo.customParameters : {},
+      callerId: fromLast,
+      totalUpdates: 0,
+      sttProvider: (agent && agent.sttSelection) || "deepgram",
+      ttsProvider: (agent && agent.ttsSelection) || "sarvam",
+      llmProvider: (agent && agent.llmSelection) || "openai",
+    }
+
+    // Try to set a meaningful clientId; fall back to accountSid if no agent
+    const clientId = (agent && agent.clientId) || startInfo.accountSid || "unknown"
+
+    const callLog = await CallLog.create({
+      clientId: clientId,
+      agentId: agent ? agent._id : undefined,
+      mobile: mobile,
+      time: new Date(),
+      transcript: "",
+      duration: 0,
+      leadStatus: "maybe",
+      streamSid: streamSid,
+      callSid: callSid,
+      metadata: meta,
+    })
+
+    session.callLogId = callLog._id
+  } catch (err) {
+    console.error("❌ [CALLLOG] Failed to create CallLog:", err.message)
+  }
+
   // Send acknowledgment
   ws.send(
     JSON.stringify({
@@ -650,6 +785,7 @@ async function handleStart(ws, data) {
       streamSid: streamSid || null,
       status: "accepted",
       message: "Call session started successfully",
+      agent: session.agent ? { id: session.agent._id, clientId: session.agent.clientId, callingNumber: session.agent.callingNumber } : null,
       timestamp: new Date().toISOString(),
     }),
   )
@@ -695,6 +831,28 @@ async function handleStop(ws, data) {
   if (session && sessionKey) {
     session.terminate("call_ended")
     activeSessions.delete(sessionKey)
+
+    // Update CallLog with end info
+    try {
+      let callLog = null
+      if (session.callLogId) {
+        callLog = await CallLog.findById(session.callLogId)
+      } else if (streamSid) {
+        callLog = await CallLog.findActiveCallByStreamSid(streamSid)
+      }
+      if (callLog) {
+        const startTime = callLog.time ? new Date(callLog.time).getTime() : Date.now()
+        const endTime = Date.now()
+        const durationSec = Math.max(0, Math.round((endTime - startTime) / 1000))
+        callLog.duration = durationSec
+        callLog.metadata.isActive = false
+        callLog.metadata.callEndTime = new Date(endTime)
+        callLog.metadata.lastUpdated = new Date(endTime)
+        await callLog.save()
+      }
+    } catch (err) {
+      console.error("❌ [CALLLOG] Failed to finalize CallLog:", err.message)
+    }
 
     // Send acknowledgment
     ws.send(

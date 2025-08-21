@@ -2,8 +2,17 @@ const mongoose = require("mongoose")
 
 const agentSchema = new mongoose.Schema({
   // Client Information
-  clientId: { type: String, required: true, index: true },
-
+  clientId: { type: String }, // Optional - can be set by admin or client
+  
+  // Creation tracking
+  createdBy: { type: String }, // ID of the user who created the agent
+  createdByType: { 
+    type: String, 
+    enum: ["client", "admin"], 
+    default: "admin" 
+  }, // Type of user who created the agent
+  
+  agentId: {type: String},
   // Active Status
   isActive: { type: Boolean, default: true, index: true },
 
@@ -39,13 +48,11 @@ const agentSchema = new mongoose.Schema({
   voiceSelection: {
     type: String,
     enum: [
-      "default",
       "male-professional",
       "female-professional",
       "male-friendly",
       "female-friendly",
       "neutral",
-      "abhilash",
       "anushka",
       "meera",
       "pavithra",
@@ -59,13 +66,8 @@ const agentSchema = new mongoose.Schema({
       "vian",
       "arjun",
       "maya",
-      "manisha",
-      "vidya",
-      "arya",
-      "karun",
-      "hitesh",
     ],
-    default: "default",
+    default: "anushka",
   },
   contextMemory: { type: String },
   brandInfo: { type: String },
@@ -80,11 +82,13 @@ const agentSchema = new mongoose.Schema({
 
   // Telephony
   accountSid: { type: String },
+  callingNumber: { type: String }, // Add missing callingNumber field
   callerId: { type: String, index: true }, // For outbound call matching
   serviceProvider: {
     type: String,
-    enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
+    enum: ["twilio", "vonage", "plivo", "bandwidth", "other", "c-zentrix", "tata"],
   },
+  X_API_KEY: { type: String }, // Add missing X_API_KEY field
 
   // Audio storage - Store as base64 string instead of Buffer
   audioFile: { type: String }, // File path (legacy support)
@@ -111,14 +115,31 @@ const agentSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
 })
 
-// Compound index for client + agent name uniqueness
-agentSchema.index({ clientId: 1, agentName: 1 }, { unique: true })
+// // Compound index for client + agent name uniqueness
+// agentSchema.index({ clientId: 1, agentName: 1 }, { unique: true })
 
-// Additional index for callerId lookup (outbound calls) with isActive filter
-agentSchema.index({ callerId: 1, isActive: 1 })
+// // Additional index for callerId lookup (outbound calls) with isActive filter
+// agentSchema.index({ callerId: 1, isActive: 1 })
 
-// Additional index for accountSid lookup with isActive filter
-agentSchema.index({ accountSid: 1, isActive: 1 })
+// // Additional index for accountSid lookup with isActive filter
+// agentSchema.index({ accountSid: 1, isActive: 1 })
+
+// // Ensure only one active agent per (clientId, accountSid)
+// // Partial unique index applies only when isActive is true and accountSid exists
+// try {
+//   agentSchema.index(
+//     { clientId: 1, accountSid: 1 },
+//     {
+//       unique: true,
+//       partialFilterExpression: {
+//         isActive: true,
+//         accountSid: { $exists: true, $type: 'string' },
+//       },
+//     }
+//   )
+// } catch (e) {
+//   // Index creation failures will be logged by Mongoose at startup; continue
+// }
 
 // Update the updatedAt field before saving
 agentSchema.pre("save", function (next) {
