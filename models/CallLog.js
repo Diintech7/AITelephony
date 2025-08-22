@@ -62,7 +62,18 @@ const CallLogSchema = new mongoose.Schema({
     // Technical details
     sttProvider: { type: String, default: 'deepgram' },
     ttsProvider: { type: String, default: 'sarvam' },
-    llmProvider: { type: String, default: 'openai' }
+    llmProvider: { type: String, default: 'openai' },
+    // WhatsApp integration
+    whatsappSent: { type: Boolean, default: false },
+    whatsappSentAt: { type: Date },
+    whatsappAttemptedAt: { type: Date },
+    whatsappError: { type: String },
+    whatsappData: {
+      phoneNumber: { type: String },
+      orgName: { type: String },
+      courseName: { type: String },
+      response: { type: Object }
+    }
   }
 }, {
   timestamps: true

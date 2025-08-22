@@ -876,7 +876,7 @@ class EnhancedCallLogger {
   }
 
   // Final save with complete call data
-  async saveToDatabase(leadStatusInput = 'maybe') {
+  async saveToDatabase(leadStatusInput = 'maybe', agentConfig = null) {
     const timer = createTimer("FINAL_CALL_LOG_SAVE")
     try {
       const callEndTime = new Date()
@@ -916,6 +916,19 @@ class EnhancedCallLogger {
         )
 
         console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Updated: ${updatedLog._id}`)
+        
+        // Send WhatsApp message after call ends (non-blocking)
+        if (agentConfig && this.mobile) {
+          console.log(`📱 [FINAL-CALL-LOG-SAVE] Triggering WhatsApp message after call...`)
+          setImmediate(async () => {
+            try {
+              await sendWhatsAppAfterCall(this, agentConfig)
+            } catch (error) {
+              console.log(`⚠️ [FINAL-CALL-LOG-SAVE] WhatsApp error: ${error.message}`)
+            }
+          })
+        }
+        
         return updatedLog
       } else {
         // Fallback: create new call log if initial creation failed
@@ -943,6 +956,19 @@ class EnhancedCallLogger {
         const callLog = new CallLog(callLogData)
         const savedLog = await callLog.save()
         console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Created: ${savedLog._id}`)
+        
+        // Send WhatsApp message after call ends (non-blocking)
+        if (agentConfig && this.mobile) {
+          console.log(`📱 [FINAL-CALL-LOG-SAVE] Triggering WhatsApp message after call...`)
+          setImmediate(async () => {
+            try {
+              await sendWhatsAppAfterCall(this, agentConfig)
+            } catch (error) {
+              console.log(`⚠️ [FINAL-CALL-LOG-SAVE] WhatsApp error: ${error.message}`)
+            }
+          })
+        }
+        
         return savedLog
       }
     } catch (error) {
@@ -1351,6 +1377,186 @@ const handleExternalCallDisconnection = async (streamSid, reason = 'external_dis
     }
   } catch (error) {
     console.log(`❌ [EXTERNAL-DISCONNECT] Error handling external disconnection: ${error.message}`)
+    return false
+  }
+}
+
+// WhatsApp Template Module URL
+const WHATSAPP_TEMPLATE_URL = "https://whatsapp-template-module.onrender.com"
+
+// Utility function to normalize Indian phone numbers to E.164 format
+const normalizeToE164India = (phoneNumber) => {
+  const digits = String(phoneNumber || "").replace(/\D+/g, "");
+  if (!digits) {
+    throw new Error('Invalid phone number');
+  }
+  // Always take last 10 as local mobile and prefix +91
+  const last10 = digits.slice(-10);
+  if (last10.length !== 10) {
+    throw new Error('Invalid Indian mobile number');
+  }
+  return `+91${last10}`;
+};
+
+// Function to extract organization name and course name from agent description using AI
+const extractOrgAndCourseFromDescription = async (description) => {
+  const timer = createTimer("AI_DESCRIPTION_EXTRACTION")
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `Extract organization name and course name from the given description. Return ONLY a JSON object with two fields:
+- "orgName": The organization/institution name
+- "courseName": The course name or program name
+
+If you can't find either, use "Unknown" as the value.
+
+Example output:
+{"orgName": "EG Classes", "courseName": "UPSE Online Course"}
+
+Return only the JSON, nothing else.`
+          },
+          {
+            role: "user",
+            content: description || "No description available"
+          }
+        ],
+        max_tokens: 100,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`AI extraction failed: ${response.status}`)
+    }
+
+    const data = await response.json()
+    const extractedText = data.choices[0]?.message?.content?.trim()
+    
+    if (extractedText) {
+      try {
+        const parsed = JSON.parse(extractedText)
+        console.log(`🕒 [AI-DESCRIPTION-EXTRACTION] ${timer.end()}ms - Extracted:`, parsed)
+        return {
+          orgName: parsed.orgName || "Unknown",
+          courseName: parsed.courseName || "Unknown"
+        }
+      } catch (parseError) {
+        console.log(`⚠️ [AI-DESCRIPTION-EXTRACTION] JSON parse error: ${parseError.message}`)
+        return { orgName: "Unknown", courseName: "Unknown" }
+      }
+    }
+
+    return { orgName: "Unknown", courseName: "Unknown" }
+  } catch (error) {
+    console.log(`❌ [AI-DESCRIPTION-EXTRACTION] ${timer.end()}ms - Error: ${error.message}`)
+    return { orgName: "Unknown", courseName: "Unknown" }
+  }
+}
+
+// Function to send WhatsApp message after call ends
+const sendWhatsAppAfterCall = async (callLogger, agentConfig) => {
+  const timer = createTimer("WHATSAPP_AFTER_CALL")
+  try {
+    // Get phone number from call logger
+    const phoneNumber = callLogger.mobile
+    if (!phoneNumber) {
+      console.log(`⚠️ [WHATSAPP-AFTER-CALL] No phone number available for WhatsApp message`)
+      return false
+    }
+
+    // Normalize phone number
+    const normalizedPhone = normalizeToE164India(phoneNumber)
+    console.log(`📱 [WHATSAPP-AFTER-CALL] Sending WhatsApp to: ${normalizedPhone}`)
+
+    // Extract org name and course name from agent description
+    const { orgName, courseName } = await extractOrgAndCourseFromDescription(agentConfig.description)
+    console.log(`📱 [WHATSAPP-AFTER-CALL] Extracted - Org: ${orgName}, Course: ${courseName}`)
+
+    // Prepare request body
+    const requestBody = {
+      to: normalizedPhone,
+      orgName: orgName,
+      courseName: courseName
+    }
+
+    console.log(`📱 [WHATSAPP-AFTER-CALL] Request body:`, JSON.stringify(requestBody, null, 2))
+
+    // Send request to WhatsApp template module
+    const response = await fetch(WHATSAPP_TEMPLATE_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "Unknown error")
+      throw new Error(`WhatsApp API error: ${response.status} - ${errorText}`)
+    }
+
+    const result = await response.json()
+    console.log(`✅ [WHATSAPP-AFTER-CALL] ${timer.end()}ms - WhatsApp sent successfully:`, result)
+    
+    // Update call log with WhatsApp status
+    if (callLogger.callLogId) {
+      await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+        'metadata.whatsappSent': true,
+        'metadata.whatsappSentAt': new Date(),
+        'metadata.whatsappData': {
+          phoneNumber: normalizedPhone,
+          orgName: orgName,
+          courseName: courseName,
+          response: result
+        }
+      }).catch(err => console.log(`⚠️ [WHATSAPP-AFTER-CALL] Call log update error: ${err.message}`))
+    }
+
+    return true
+  } catch (error) {
+    console.log(`❌ [WHATSAPP-AFTER-CALL] ${timer.end()}ms - Error: ${error.message}`)
+    
+    // Update call log with WhatsApp failure
+    if (callLogger.callLogId) {
+      await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+        'metadata.whatsappSent': false,
+        'metadata.whatsappError': error.message,
+        'metadata.whatsappAttemptedAt': new Date()
+      }).catch(err => console.log(`⚠️ [WHATSAPP-AFTER-CALL] Call log update error: ${err.message}`))
+    }
+    
+    return false
+  }
+}
+
+// Test function to manually trigger WhatsApp sending (for testing purposes)
+const testWhatsAppSending = async (phoneNumber, agentDescription) => {
+  console.log("🧪 [TEST-WHATSAPP] Testing WhatsApp integration...")
+  
+  const mockCallLogger = {
+    mobile: phoneNumber,
+    callLogId: null
+  }
+  
+  const mockAgentConfig = {
+    description: agentDescription || "EG Classes offers UPSE Online Course for competitive exam preparation"
+  }
+  
+  try {
+    const result = await sendWhatsAppAfterCall(mockCallLogger, mockAgentConfig)
+    console.log("🧪 [TEST-WHATSAPP] Test result:", result)
+    return result
+  } catch (error) {
+    console.log("🧪 [TEST-WHATSAPP] Test error:", error.message)
     return false
   }
 }
@@ -1838,7 +2044,7 @@ const setupUnifiedVoiceServer = (wss) => {
               
               try {
                 console.log("💾 [SIP-STOP] Saving final call log to database...")
-                const savedLog = await callLogger.saveToDatabase("maybe")
+                const savedLog = await callLogger.saveToDatabase("maybe", agentConfig)
                 console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
               } catch (error) {
                 console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
@@ -1874,7 +2080,7 @@ const setupUnifiedVoiceServer = (wss) => {
         
         try {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
-          const savedLog = await callLogger.saveToDatabase("maybe")
+          const savedLog = await callLogger.saveToDatabase("maybe", agentConfig)
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
@@ -2021,5 +2227,12 @@ module.exports = {
     graceful: (callLogger, message, language) => callLogger?.gracefulCallEnd(message, language),
     fast: (callLogger, reason) => callLogger?.fastTerminateCall(reason),
     ultraFast: (callLogger, message, language, reason) => callLogger?.ultraFastTerminateWithMessage(message, language, reason)
+  },
+  // Export WhatsApp methods for external use
+  whatsappMethods: {
+    sendWhatsAppAfterCall,
+    extractOrgAndCourseFromDescription,
+    normalizeToE164India,
+    testWhatsAppSending
   }
 }
