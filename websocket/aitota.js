@@ -1,4 +1,5 @@
 const WebSocket = require("ws")
+const { spawn } = require("child_process")
 require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
@@ -111,7 +112,7 @@ const VALID_SARVAM_VOICES = new Set([
   "neel",
   "misha",
   "vian",
-  "manisha",
+  "arjun",
   "maya",
   "manisha",
   "vidya",
@@ -1467,6 +1468,42 @@ class SimplifiedSarvamTTSProcessor {
     this.useWebSocket = true // Flag to control WebSocket vs API usage
   }
 
+  // Transcode MP3 buffer to PCM16 mono 8k using ffmpeg
+  async transcodeMp3ToPcm16(mp3Buffer) {
+    return new Promise((resolve, reject) => {
+      try {
+        const ffmpegArgs = [
+          "-hide_banner", "-loglevel", "error",
+          "-f", "mp3",
+          "-i", "pipe:0",
+          "-ac", "1",
+          "-ar", "8000",
+          "-f", "s16le",
+          "pipe:1",
+        ]
+
+        const ff = spawn("ffmpeg", ffmpegArgs)
+        const chunks = []
+
+        ff.stdout.on("data", (chunk) => chunks.push(chunk))
+        ff.stderr.on("data", () => {})
+        ff.on("error", (err) => reject(err))
+        ff.on("close", (code) => {
+          if (code === 0) {
+            resolve(Buffer.concat(chunks))
+          } else {
+            reject(new Error(`ffmpeg exited with code ${code}`))
+          }
+        })
+
+        ff.stdin.write(mp3Buffer)
+        ff.stdin.end()
+      } catch (e) {
+        reject(e)
+      }
+    })
+  }
+
   interrupt() {
     this.isInterrupted = true
     if (this.currentAudioStreaming) {
@@ -1548,43 +1585,43 @@ class SimplifiedSarvamTTSProcessor {
       console.log(`🎤 [SARVAM-WS] Connecting to ${wsUrl} with subprotocol`)
       this.sarvamWs = new WebSocket(wsUrl, [`api-subscription-key.${API_KEYS.sarvam}`])
 
-      this.sarvamWs.onopen = () => {
-        this.sarvamReady = true
-        const configMessage = {
+              this.sarvamWs.onopen = () => {
+                this.sarvamReady = true
+                const configMessage = {
           type: 'config',
           data: {
-            target_language_code: this.sarvamLanguage,
-            speaker: this.voice,
-            pitch: 0,
-            pace: 1.0,
-            loudness: 1.0,
+                  target_language_code: this.sarvamLanguage,
+                  speaker: this.voice,
+                  pitch: 0,
+                  pace: 1.0,
+                  loudness: 1.0,
             output_audio_codec: 'mp3',
             output_audio_bitrate: '64k',
-            speech_sample_rate: 8000,
+                  speech_sample_rate: 8000,
             enable_preprocessing: true
-          }
+                }
         }
-        this.sarvamWs.send(JSON.stringify(configMessage))
-        this.processQueuedAudio()
-      }
+                this.sarvamWs.send(JSON.stringify(configMessage))
+                this.processQueuedAudio()
+              }
 
-      this.sarvamWs.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          this.handleSarvamMessage(data)
+              this.sarvamWs.onmessage = (event) => {
+                try {
+                  const data = JSON.parse(event.data)
+                  this.handleSarvamMessage(data)
         } catch {}
-      }
+              }
 
       this.sarvamWs.onerror = () => {
-        this.sarvamReady = false
-      }
+                this.sarvamReady = false
+              }
 
       this.sarvamWs.onclose = () => {
-        this.sarvamReady = false
-      }
+                this.sarvamReady = false
+              }
 
       await new Promise((resolve) => setTimeout(resolve, 500))
-      if (!this.sarvamReady) {
+                  if (!this.sarvamReady) {
         this.useWebSocket = false
       }
     } catch {
@@ -1753,9 +1790,18 @@ class SimplifiedSarvamTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
-    const audioBuffer = Buffer.from(audioBase64, "base64")
+    const inputMp3Buffer = Buffer.from(audioBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
+    
+    let pcmBuffer
+    try {
+      pcmBuffer = await this.transcodeMp3ToPcm16(inputMp3Buffer)
+    } catch (err) {
+      // If transcoding fails, stop to avoid sending unsupported MP3 to SIP
+      this.currentAudioStreaming = null
+      return
+    }
 
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
@@ -1766,10 +1812,10 @@ class SimplifiedSarvamTTSProcessor {
     let chunkIndex = 0
     let successfulChunks = 0
 
-    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = audioBuffer.length - position
+    while (position < pcmBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = pcmBuffer.length - position
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-      const chunk = audioBuffer.slice(position, position + chunkSize)
+      const chunk = pcmBuffer.slice(position, position + chunkSize)
 
       const mediaMessage = {
         event: "media",
@@ -1790,7 +1836,7 @@ class SimplifiedSarvamTTSProcessor {
         break
       }
 
-      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+      if (position + chunkSize < pcmBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
         const delayMs = Math.max(chunkDurationMs - 2, 10)
         await new Promise((resolve) => setTimeout(resolve, delayMs))
