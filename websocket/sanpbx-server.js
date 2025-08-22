@@ -103,29 +103,8 @@ function normalizeBase64String(str) {
   }
 }
 
-// -------- Audio utils: LINEAR16 (44.1kHz) -> LINEAR16 (8kHz) --------
-function resampleLinear16To8kHz(audioBuffer) {
-  try {
-    // SanIPPBX sends LINEAR16 at 44.1kHz, we need to convert to 8kHz for Deepgram
-    const originalSampleRate = 44100
-    const targetSampleRate = 8000
-    const ratio = targetSampleRate / originalSampleRate
-    
-    const originalSamples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.length / 2)
-    const targetSampleCount = Math.floor(originalSamples.length * ratio)
-    const targetBuffer = new Int16Array(targetSampleCount)
-    
-    for (let i = 0; i < targetSampleCount; i++) {
-      const originalIndex = Math.floor(i / ratio)
-      targetBuffer[i] = originalSamples[originalIndex]
-    }
-    
-    return Buffer.from(targetBuffer.buffer)
-  } catch (err) {
-    console.error("❌ [SANPBX-AUDIO] Resampling error:", err.message)
-    return audioBuffer // Return original if resampling fails
-  }
-}
+// -------- Audio utils: Base64 audio processing --------
+// SanIPPBX sends base64 audio directly, no conversion needed
 
 // -------- Audio utils: LINEAR16 -> µ-law (8kHz mono) --------
 function linearPcmSampleToMuLaw(sample) {
@@ -218,7 +197,7 @@ class SanPbxCallSession extends EventEmitter {
       const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
       deepgramUrl.searchParams.append("sample_rate", "8000")
       deepgramUrl.searchParams.append("channels", "1")
-      deepgramUrl.searchParams.append("encoding", "linear16") // SanIPPBX uses LINEAR16
+      deepgramUrl.searchParams.append("encoding", "mulaw") // Use mulaw like SIP for base64 audio
       deepgramUrl.searchParams.append("model", "nova-2")
       deepgramUrl.searchParams.append("language", deepgramLanguage)
       deepgramUrl.searchParams.append("interim_results", "true")
@@ -315,28 +294,24 @@ class SanPbxCallSession extends EventEmitter {
       // Update audio packet statistics
       this.updateAudioPacketStats(audioData)
       
-      // SanIPPBX sends LINEAR16 at 44.1kHz, convert to 8kHz for Deepgram
+      // Convert base64 to buffer for Deepgram (no resampling needed)
       const audioBuffer = Buffer.from(normalizedAudioData, "base64")
-      const resampledBuffer = resampleLinear16To8kHz(audioBuffer)
 
       // Log the processed audio format
       if (!this.processedFormatLogged) {
         console.log(`🎵 [SANPBX-AUDIO] Processed audio format:`)
-        console.log(`   - Original buffer size: ${audioBuffer.length} bytes`)
-        console.log(`   - Resampled buffer size: ${resampledBuffer.length} bytes`)
-        console.log(`   - Resampled base64 length: ${resampledBuffer.toString('base64').length}`)
-        console.log(`   - Estimated samples (original): ${Math.floor(audioBuffer.length / 2)}`)
-        console.log(`   - Estimated samples (resampled): ${Math.floor(resampledBuffer.length / 2)}`)
-        console.log(`   - Estimated duration (original): ${(audioBuffer.length / 2 / 44100 * 1000).toFixed(2)}ms`)
-        console.log(`   - Estimated duration (resampled): ${(resampledBuffer.length / 2 / 8000 * 1000).toFixed(2)}ms`)
+        console.log(`   - Buffer size: ${audioBuffer.length} bytes`)
+        console.log(`   - Base64 length: ${normalizedAudioData.length}`)
+        console.log(`   - Estimated samples: ${Math.floor(audioBuffer.length)}`)
+        console.log(`   - Estimated duration: ${(audioBuffer.length / 8000 * 1000).toFixed(2)}ms`)
         this.processedFormatLogged = true
       }
 
       if (this.deepgramReady && this.deepgramWs) {
-        this.deepgramWs.send(resampledBuffer)
+        this.deepgramWs.send(audioBuffer)
       } else {
         // Queue audio if Deepgram not ready
-        this.deepgramAudioQueue.push(resampledBuffer)
+        this.deepgramAudioQueue.push(audioBuffer)
       }
     } catch (error) {
       console.error(`❌ [SANPBX-STT] Error processing audio:`, error.message)
@@ -442,9 +417,8 @@ class SanPbxCallSession extends EventEmitter {
       const audioBase64 = responseData.audios?.[0]
 
       if (audioBase64) {
-        // Sarvam returns WAV PCM, convert to LINEAR16 base64 for SanIPPBX
-        const linear16Base64 = this.convertWavToLinear16Base64(audioBase64) || audioBase64
-        this.sendAudioToClient(linear16Base64)
+        // Send base64 audio directly to SanIPPBX (no conversion needed)
+        this.sendAudioToClient(audioBase64)
       } else {
         throw new Error("No audio data received from Sarvam API")
       }
@@ -455,46 +429,7 @@ class SanPbxCallSession extends EventEmitter {
     }
   }
 
-  convertWavToLinear16Base64(wavBase64) {
-    try {
-      const buffer = Buffer.from(wavBase64, "base64")
-      if (buffer.length < 44) return null
-      
-      // Basic WAV header checks
-      if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
-        return null
-      }
 
-      // Parse fmt chunk
-      let offset = 12
-      let fmtChunkFound = false
-      let dataOffset = -1
-      let dataSize = 0
-
-      while (offset + 8 <= buffer.length) {
-        const chunkId = buffer.toString("ascii", offset, offset + 4)
-        const chunkSize = buffer.readUInt32LE(offset + 4)
-        const next = offset + 8 + chunkSize
-        
-        if (chunkId === "fmt ") {
-          fmtChunkFound = true
-        } else if (chunkId === "data") {
-          dataOffset = offset + 8
-          dataSize = chunkSize
-        }
-        offset = next
-      }
-
-      if (!fmtChunkFound || dataOffset < 0 || dataSize <= 0) return null
-
-      // Extract PCM data
-      const pcmData = buffer.slice(dataOffset, dataOffset + dataSize)
-      return pcmData.toString("base64")
-    } catch (err) {
-      console.error("❌ [SANPBX-AUDIO] WAV to LINEAR16 conversion error:", err.message)
-      return null
-    }
-  }
 
   sendAudioToClient(base64Audio) {
     if (this.ws.readyState === WebSocket.OPEN && this.isAnswered) {
@@ -518,8 +453,8 @@ class SanPbxCallSession extends EventEmitter {
         media: {
           payload: normalizedAudio,
           format: {
-            encoding: "LINEAR16",
-            sampleRate: 44100,
+            encoding: "base64",
+            sampleRate: 8000,
             channels: 1
           }
         },
@@ -682,7 +617,7 @@ function setupSanPbxWebSocketServer(wss) {
     ws.on("message", async (message) => {
       try {
         const data = JSON.parse(message.toString())
-        console.log(`📨 [SANPBX-WS] Received event: ${data}`)
+        console.log(`📨 [SANPBX-WS] Received event: ${data.event}`)
 
         switch (data.event) {
           case "connected":
