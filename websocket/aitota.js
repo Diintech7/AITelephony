@@ -1376,18 +1376,16 @@ Return ONLY the email address if found, or "NO_EMAIL" if no valid email is found
   }
 }
 
-// Generate Google Meet link
+// Generate Google Meet link (format: xxx-yyyy-zzz)
 const generateGoogleMeetLink = () => {
-  // Generate a random meeting ID (10 characters)
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
-  let meetingId = ''
-  for (let i = 0; i < 10; i++) {
-    meetingId += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  
+  // Google Meet codes typically look like xxx-yyyy-zzz (letters only)
+  const letters = 'abcdefghijklmnopqrstuvwxyz'
+  const segment = (len) => Array.from({ length: len }, () => letters[Math.floor(Math.random() * letters.length)]).join('')
+  const meetingId = `${segment(3)}-${segment(4)}-${segment(3)}`
+
   // Create Google Meet link
   const meetLink = `https://meet.google.com/${meetingId}`
-  
+
   // Generate meeting details
   const meetingDetails = {
     link: meetLink,
@@ -1396,7 +1394,7 @@ const generateGoogleMeetLink = () => {
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
     status: 'active'
   }
-  
+
   return meetingDetails
 }
 
