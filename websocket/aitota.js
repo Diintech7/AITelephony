@@ -366,6 +366,15 @@ class EnhancedCallLogger {
     this.callSid = null
     this.accountSid = null
     this.ws = null // Store WebSocket reference for disconnection
+    
+    // Google Meet state management
+    this.googleMeetState = {
+      isRequested: false,
+      emailProvided: false,
+      email: null,
+      meetingDetails: null,
+      emailSent: false
+    }
   }
 
   // Create initial call log entry immediately when call starts
@@ -929,6 +938,21 @@ class EnhancedCallLogger {
           })
         }
         
+        // Update call log with Google Meet data if applicable
+        if (this.googleMeetState.isRequested) {
+          console.log(`📹 [FINAL-CALL-LOG-SAVE] Updating call log with Google Meet data...`)
+          const googleMeetUpdate = {
+            'metadata.googleMeetRequested': true,
+            'metadata.googleMeetEmail': this.googleMeetState.email || null,
+            'metadata.googleMeetDetails': this.googleMeetState.meetingDetails || null,
+            'metadata.googleMeetEmailSent': this.googleMeetState.emailSent || false,
+            'metadata.googleMeetEmailSentAt': this.googleMeetState.emailSent ? new Date() : null
+          }
+          
+          await CallLog.findByIdAndUpdate(this.callLogId, googleMeetUpdate)
+            .catch(err => console.log(`⚠️ [FINAL-CALL-LOG-SAVE] Google Meet update error: ${err.message}`))
+        }
+        
         return updatedLog
       } else {
         // Fallback: create new call log if initial creation failed
@@ -967,6 +991,21 @@ class EnhancedCallLogger {
               console.log(`⚠️ [FINAL-CALL-LOG-SAVE] WhatsApp error: ${error.message}`)
             }
           })
+        }
+        
+        // Update call log with Google Meet data if applicable
+        if (this.googleMeetState.isRequested) {
+          console.log(`📹 [FINAL-CALL-LOG-SAVE] Updating call log with Google Meet data...`)
+          const googleMeetUpdate = {
+            'metadata.googleMeetRequested': true,
+            'metadata.googleMeetEmail': this.googleMeetState.email || null,
+            'metadata.googleMeetDetails': this.googleMeetState.meetingDetails || null,
+            'metadata.googleMeetEmailSent': this.googleMeetState.emailSent || false,
+            'metadata.googleMeetEmailSentAt': this.googleMeetState.emailSent ? new Date() : null
+          }
+          
+          await CallLog.findByIdAndUpdate(savedLog._id, googleMeetUpdate)
+            .catch(err => console.log(`⚠️ [FINAL-CALL-LOG-SAVE] Google Meet update error: ${err.message}`))
         }
         
         return savedLog
@@ -1146,6 +1185,186 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
   } catch (error) {
     console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
     return "CONTINUE" // Default to continue on error
+  }
+}
+
+// Google Meet request detection using OpenAI
+const detectGoogleMeetRequest = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("GOOGLE_MEET_DETECTION")
+  try {
+    const meetRequestPrompt = `Analyze if the user wants to schedule a Google Meet or video call. Look for:
+- "google meet", "meet", "video call", "video meeting", "online meeting"
+- "schedule a meeting", "book a meeting", "set up a call"
+- "zoom", "teams", "skype", "video conference"
+- "meet online", "virtual meeting", "screen share"
+- Any request for a video/online meeting
+
+User message: "${userMessage}"
+
+Return ONLY: "GOOGLE_MEET" if they want a video meeting, or "CONTINUE" if they want to continue normally.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: meetRequestPrompt },
+        ],
+        max_tokens: 10,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [GOOGLE-MEET-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "CONTINUE" // Default to continue on error
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
+
+    if (result === "GOOGLE_MEET") {
+      console.log(`🕒 [GOOGLE-MEET-DETECTION] ${timer.end()}ms - User wants Google Meet`)
+      return "GOOGLE_MEET"
+    } else {
+      console.log(`🕒 [GOOGLE-MEET-DETECTION] ${timer.end()}ms - No Google Meet request`)
+      return "CONTINUE"
+    }
+  } catch (error) {
+    console.log(`❌ [GOOGLE-MEET-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "CONTINUE" // Default to continue on error
+  }
+}
+
+// Email validation function
+const validateEmail = (email) => {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  return emailRegex.test(email)
+}
+
+// Extract email from text using AI
+const extractEmailFromText = async (text) => {
+  const timer = createTimer("EMAIL_EXTRACTION")
+  try {
+    const emailPrompt = `Extract email address from the given text. Look for:
+- Standard email formats (user@domain.com)
+- Gmail addresses (user@gmail.com)
+- Any valid email pattern
+
+Text: "${text}"
+
+Return ONLY the email address if found, or "NO_EMAIL" if no valid email is found.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: emailPrompt },
+        ],
+        max_tokens: 50,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`Email extraction failed: ${response.status}`)
+    }
+
+    const data = await response.json()
+    const extractedEmail = data.choices[0]?.message?.content?.trim()
+
+    if (extractedEmail && extractedEmail !== "NO_EMAIL" && validateEmail(extractedEmail)) {
+      console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - Extracted: ${extractedEmail}`)
+      return extractedEmail
+    }
+
+    console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - No valid email found`)
+    return null
+  } catch (error) {
+    console.log(`❌ [EMAIL-EXTRACTION] ${timer.end()}ms - Error: ${error.message}`)
+    return null
+  }
+}
+
+// Generate Google Meet link
+const generateGoogleMeetLink = () => {
+  // Generate a random meeting ID (10 characters)
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  let meetingId = ''
+  for (let i = 0; i < 10; i++) {
+    meetingId += chars.charAt(Math.floor(Math.random() * chars.length))
+  }
+  
+  // Create Google Meet link
+  const meetLink = `https://meet.google.com/${meetingId}`
+  
+  // Generate meeting details
+  const meetingDetails = {
+    link: meetLink,
+    meetingId: meetingId,
+    createdAt: new Date(),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
+    status: 'active'
+  }
+  
+  return meetingDetails
+}
+
+// Send Google Meet link via email (placeholder for email service integration)
+const sendGoogleMeetEmail = async (email, meetingDetails, agentConfig) => {
+  const timer = createTimer("GOOGLE_MEET_EMAIL")
+  try {
+    console.log(`📧 [GOOGLE-MEET-EMAIL] Sending meeting link to: ${email}`)
+    
+    // Extract organization name from agent description
+    const { orgName } = await extractOrgAndCourseFromDescription(agentConfig.description)
+    
+    // Email content
+    const emailContent = {
+      to: email,
+      subject: `Google Meet Invitation - ${orgName}`,
+      body: `
+Dear User,
+
+Thank you for your interest in scheduling a meeting with ${orgName}.
+
+Your Google Meet link: ${meetingDetails.link}
+Meeting ID: ${meetingDetails.meetingId}
+
+This link will be active for 24 hours.
+
+Best regards,
+${orgName} Team
+      `.trim()
+    }
+    
+    // TODO: Integrate with your email service (SendGrid, AWS SES, etc.)
+    // For now, we'll just log the email content
+    console.log(`📧 [GOOGLE-MEET-EMAIL] Email content:`, JSON.stringify(emailContent, null, 2))
+    
+    // Update call log with meeting details
+    return {
+      success: true,
+      email: email,
+      meetingDetails: meetingDetails,
+      emailContent: emailContent
+    }
+    
+  } catch (error) {
+    console.log(`❌ [GOOGLE-MEET-EMAIL] ${timer.end()}ms - Error: ${error.message}`)
+    return {
+      success: false,
+      error: error.message
+    }
   }
 }
 
@@ -1709,10 +1928,14 @@ const setupUnifiedVoiceServer = (wss) => {
         // Check if user wants to disconnect (fast detection to minimize latency)
         console.log("🔍 [USER-UTTERANCE] Checking disconnection intent...")
         
-        // Start disconnection detection in parallel with other processing
-        const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
+        // Check for Google Meet request
+        console.log("🔍 [USER-UTTERANCE] Checking Google Meet request...")
         
-        // Continue with other processing while checking disconnection
+        // Start all detection processes in parallel
+        const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
+        const googleMeetCheckPromise = detectGoogleMeetRequest(text, conversationHistory, detectedLanguage)
+        
+        // Continue with other processing while checking
         console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
         const openaiPromise = processWithOpenAI(
           text,
@@ -1722,9 +1945,10 @@ const setupUnifiedVoiceServer = (wss) => {
           agentConfig,
         )
         
-        // Wait for both operations to complete
-        const [disconnectionIntent, aiResponse] = await Promise.all([
+        // Wait for all operations to complete
+        const [disconnectionIntent, googleMeetIntent, aiResponse] = await Promise.all([
           disconnectionCheckPromise,
+          googleMeetCheckPromise,
           openaiPromise
         ])
         
@@ -1744,6 +1968,144 @@ const setupUnifiedVoiceServer = (wss) => {
           }, 2000)
           
           return
+        }
+
+        // Handle Google Meet request
+        if (googleMeetIntent === "GOOGLE_MEET" && !callLogger.googleMeetState.isRequested) {
+          console.log("📹 [USER-UTTERANCE] Google Meet requested - asking for email")
+          callLogger.googleMeetState.isRequested = true
+          
+          // Ask for email in the appropriate language
+          const emailRequestMessages = {
+            hi: "बहुत अच्छा! मैं आपके लिए Google Meet शेड्यूल कर सकता हूं। कृपया अपना Gmail ID बताएं।",
+            en: "Great! I can schedule a Google Meet for you. Please provide your Gmail address.",
+            bn: "দারুণ! আমি আপনার জন্য Google Meet শিডিউল করতে পারি। অনুগ্রহ করে আপনার Gmail ঠিকানা দিন।",
+            ta: "நல்லது! நான் உங்களுக்கு Google Meet ஷெட்யூல் செய்யலாம். தயவுசெய்து உங்கள் Gmail முகவரியை வழங்கவும்.",
+            te: "బాగుంది! నేను మీ కోసం Google Meet షెడ్యూల్ చేయగలను. దయచేసి మీ Gmail చిరునామాను అందించండి.",
+            mr: "छान! मी तुमच्यासाठी Google Meet शेड्यूल करू शकतो. कृपया तुमचा Gmail पत्ता द्या.",
+            gu: "બહુ સરસ! હું તમારા માટે Google Meet શેડ્યૂલ કરી શકું છું. કૃપા કરીને તમારું Gmail સરનામું આપો."
+          }
+          
+          const emailRequest = emailRequestMessages[detectedLanguage] || emailRequestMessages.en
+          
+          if (callLogger) {
+            callLogger.logAIResponse(emailRequest, detectedLanguage)
+          }
+          
+          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          await currentTTS.synthesizeAndStream(emailRequest)
+          
+          conversationHistory.push(
+            { role: "user", content: text },
+            { role: "assistant", content: emailRequest }
+          )
+          
+          return
+        }
+
+        // Handle email collection for Google Meet
+        if (callLogger.googleMeetState.isRequested && !callLogger.googleMeetState.emailProvided) {
+          console.log("📧 [USER-UTTERANCE] Extracting email for Google Meet...")
+          
+          const extractedEmail = await extractEmailFromText(text)
+          
+          if (extractedEmail) {
+            console.log(`📧 [USER-UTTERANCE] Email extracted: ${extractedEmail}`)
+            callLogger.googleMeetState.emailProvided = true
+            callLogger.googleMeetState.email = extractedEmail
+            
+            // Generate Google Meet link
+            const meetingDetails = generateGoogleMeetLink()
+            callLogger.googleMeetState.meetingDetails = meetingDetails
+            
+            // Send email with meeting link
+            const emailResult = await sendGoogleMeetEmail(extractedEmail, meetingDetails, agentConfig)
+            
+            if (emailResult.success) {
+              callLogger.googleMeetState.emailSent = true
+              
+              // Success message in appropriate language
+              const successMessages = {
+                hi: `धन्यवाद! मैंने आपके Gmail ${extractedEmail} पर Google Meet लिंक भेज दिया है। आपको अभी ईमेल मिल जाएगा।`,
+                en: `Thank you! I've sent the Google Meet link to your Gmail ${extractedEmail}. You should receive the email shortly.`,
+                bn: `ধন্যবাদ! আমি আপনার Gmail ${extractedEmail} এ Google Meet লিংক পাঠিয়েছি। আপনি শীঘ্রই ইমেল পাবেন।`,
+                ta: `நன்றி! நான் உங்கள் Gmail ${extractedEmail} க்கு Google Meet இணைப்பை அனுப்பியுள்ளேன். நீங்கள் விரைவில் மின்னஞ்சலைப் பெறுவீர்கள்.`,
+                te: `ధన్యవాదాలు! నేను మీ Gmail ${extractedEmail} కి Google Meet లింక్ పంపాను. మీరు త్వరలో ఇమెయిల్ అందుకుంటారు.`,
+                mr: `धन्यवाद! मी तुमच्या Gmail ${extractedEmail} वर Google Meet लिंक पाठवला आहे. तुम्हाला लवकरच ईमेल मिळेल.`,
+                gu: `આભાર! મેં તમારા Gmail ${extractedEmail} પર Google Meet લિંક મોકલી છે. તમને ટૂંક સમયમાં ઇમેઇલ મળશે.`
+              }
+              
+              const successMessage = successMessages[detectedLanguage] || successMessages.en
+              
+              if (callLogger) {
+                callLogger.logAIResponse(successMessage, detectedLanguage)
+              }
+              
+              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+              await currentTTS.synthesizeAndStream(successMessage)
+              
+              conversationHistory.push(
+                { role: "user", content: text },
+                { role: "assistant", content: successMessage }
+              )
+              
+              return
+            } else {
+              // Error message
+              const errorMessages = {
+                hi: "माफ़ करें, ईमेल भेजने में समस्या आई। कृपया बाद में पुनः प्रयास करें।",
+                en: "Sorry, there was an issue sending the email. Please try again later.",
+                bn: "দুঃখিত, ইমেল পাঠাতে সমস্যা হয়েছে। অনুগ্রহ করে পরে আবার চেষ্টা করুন।",
+                ta: "மன்னிக்கவும், மின்னஞ்சலை அனுப்புவதில் சிக்கல் ஏற்பட்டது. தயவுசெய்து பின்னர் மீண்டும் முயற்சிக்கவும்.",
+                te: "క్షమించండి, ఇమెయిల్ పంపడంలో సమస్య ఉంది. దయచేసి తర్వాత మళ్లీ ప్రయత్నించండి.",
+                mr: "माफ करा, ईमेल पाठवण्यात समस्या आली. कृपया नंतर पुन्हा प्रयत्न करा.",
+                gu: "માફ કરશો, ઇમેઇલ મોકલવામાં સમસ્યા આવી. કૃપા કરીને પછીથી ફરીથી પ્રયાસ કરો."
+              }
+              
+              const errorMessage = errorMessages[detectedLanguage] || errorMessages.en
+              
+              if (callLogger) {
+                callLogger.logAIResponse(errorMessage, detectedLanguage)
+              }
+              
+              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+              await currentTTS.synthesizeAndStream(errorMessage)
+              
+              conversationHistory.push(
+                { role: "user", content: text },
+                { role: "assistant", content: errorMessage }
+              )
+              
+              return
+            }
+          } else {
+            // Invalid email message
+            const invalidEmailMessages = {
+              hi: "कृपया एक वैध Gmail पता प्रदान करें। उदाहरण: user@gmail.com",
+              en: "Please provide a valid Gmail address. Example: user@gmail.com",
+              bn: "অনুগ্রহ করে একটি বৈধ Gmail ঠিকানা দিন। উদাহরণ: user@gmail.com",
+              ta: "தயவுசெய்து சரியான Gmail முகவரியை வழங்கவும். எடுத்துக்காட்டு: user@gmail.com",
+              te: "దయచేసి చెల్లుబాటు అయ్యే Gmail చిరునామాను అందించండి. ఉదాహరణ: user@gmail.com",
+              mr: "कृपया वैध Gmail पत्ता द्या. उदाहरण: user@gmail.com",
+              gu: "કૃપા કરીને માન્ય Gmail સરનામું આપો. ઉદાહરણ: user@gmail.com"
+            }
+            
+            const invalidEmailMessage = invalidEmailMessages[detectedLanguage] || invalidEmailMessages.en
+            
+            if (callLogger) {
+              callLogger.logAIResponse(invalidEmailMessage, detectedLanguage)
+            }
+            
+            currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+            await currentTTS.synthesizeAndStream(invalidEmailMessage)
+            
+            conversationHistory.push(
+              { role: "user", content: text },
+              { role: "assistant", content: invalidEmailMessage }
+            )
+            
+            return
+          }
         }
 
         if (processingRequestId === currentRequestId && aiResponse) {
@@ -2234,5 +2596,13 @@ module.exports = {
     extractOrgAndCourseFromDescription,
     normalizeToE164India,
     testWhatsAppSending
+  },
+  // Export Google Meet methods for external use
+  googleMeetMethods: {
+    detectGoogleMeetRequest,
+    extractEmailFromText,
+    validateEmail,
+    generateGoogleMeetLink,
+    sendGoogleMeetEmail
   }
 }

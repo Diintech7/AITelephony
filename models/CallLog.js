@@ -73,7 +73,20 @@ const CallLogSchema = new mongoose.Schema({
       orgName: { type: String },
       courseName: { type: String },
       response: { type: Object }
-    }
+    },
+    // Google Meet integration
+    googleMeetRequested: { type: Boolean, default: false },
+    googleMeetEmail: { type: String },
+    googleMeetDetails: {
+      link: { type: String },
+      meetingId: { type: String },
+      createdAt: { type: Date },
+      expiresAt: { type: Date },
+      status: { type: String, default: 'active' }
+    },
+    googleMeetEmailSent: { type: Boolean, default: false },
+    googleMeetEmailSentAt: { type: Date },
+    googleMeetEmailError: { type: String }
   }
 }, {
   timestamps: true
