@@ -3,6 +3,7 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
+const { spawn } = require("child_process")
 
 // Import franc with fallback for different versions
 let franc;
@@ -1754,6 +1755,51 @@ class SimplifiedSarvamTTSProcessor {
     }
   }
 
+  async transcodeMp3ToPcm16(mp3Buffer) {
+    return new Promise((resolve, reject) => {
+      const ffmpeg = spawn('ffmpeg', [
+        '-i', 'pipe:0',           // Read from stdin
+        '-f', 's16le',            // PCM16 signed little-endian
+        '-ac', '1',               // Mono audio
+        '-ar', '8000',            // 8kHz sample rate
+        '-acodec', 'pcm_s16le',   // PCM16 codec
+        'pipe:1'                  // Output to stdout
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+
+      let pcmData = Buffer.alloc(0)
+      let errorOutput = ''
+
+      ffmpeg.stdout.on('data', (data) => {
+        pcmData = Buffer.concat([pcmData, data])
+      })
+
+      ffmpeg.stderr.on('data', (data) => {
+        errorOutput += data.toString()
+      })
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0 && pcmData.length > 0) {
+          console.log(`🔄 [TRANSCODE] MP3→PCM16: ${mp3Buffer.length} bytes → ${pcmData.length} bytes`)
+          resolve(pcmData)
+        } else {
+          console.error(`❌ [TRANSCODE] FFmpeg failed with code ${code}: ${errorOutput}`)
+          reject(new Error(`FFmpeg transcoding failed: ${errorOutput}`))
+        }
+      })
+
+      ffmpeg.on('error', (error) => {
+        console.error(`❌ [TRANSCODE] FFmpeg spawn error: ${error.message}`)
+        reject(error)
+      })
+
+      // Send MP3 data to FFmpeg
+      ffmpeg.stdin.write(mp3Buffer)
+      ffmpeg.stdin.end()
+    })
+  }
+
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
@@ -1761,22 +1807,33 @@ class SimplifiedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    // For MP3, we use a fixed chunk size and delay, as SIP is now expected to handle MP3 chunks
-    const MP3_CHUNK_SIZE = 1600; // A common audio packet size, now for MP3 data
-    const MP3_CHUNK_DELAY_MS = 40; // Simulate 40ms packet interval
+    // Transcode MP3 to PCM16 mono 8kHz for SIP compatibility
+    let pcm16Buffer
+    try {
+      console.log(`🔄 [TRANSCODE] Converting MP3 (${audioBuffer.length} bytes) to PCM16 mono 8kHz...`)
+      pcm16Buffer = await this.transcodeMp3ToPcm16(audioBuffer)
+    } catch (error) {
+      console.error(`❌ [TRANSCODE] Failed to transcode MP3 to PCM16: ${error.message}`)
+      // Fallback to original MP3 if transcoding fails
+      pcm16Buffer = audioBuffer
+    }
 
-    console.log(`🎵 [AUDIO-STREAM] Starting SIP audio stream (MP3): ${audioBuffer.length} bytes`)
+    // For PCM16, we use a fixed chunk size and delay optimized for SIP
+    const PCM16_CHUNK_SIZE = 1600; // 800 bytes of PCM16 = 400 samples at 8kHz = 50ms of audio
+    const PCM16_CHUNK_DELAY_MS = 50; // 50ms packet interval for smooth streaming
+
+    console.log(`🎵 [AUDIO-STREAM] Starting SIP audio stream (PCM16): ${pcm16Buffer.length} bytes`)
 
     let position = 0
     let chunkIndex = 0
     let successfulChunks = 0
 
-    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = audioBuffer.length - position;
-      const chunkSize = Math.min(MP3_CHUNK_SIZE, remaining);
-      const chunk = audioBuffer.slice(position, position + chunkSize)
+    while (position < pcm16Buffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = pcm16Buffer.length - position;
+      const chunkSize = Math.min(PCM16_CHUNK_SIZE, remaining);
+      const chunk = pcm16Buffer.slice(position, position + chunkSize)
 
-      // Create SIP media message with MP3 payload
+      // Create SIP media message with PCM16 payload
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
@@ -1789,24 +1846,24 @@ class SimplifiedSarvamTTSProcessor {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++;
-          console.log(`🎵 [AUDIO-STREAM] Sent MP3 chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / audioBuffer.length) * 100)}% complete`)
+          console.log(`🎵 [AUDIO-STREAM] Sent PCM16 chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / pcm16Buffer.length) * 100)}% complete`)
         } catch (error) {
-          console.log(`❌ [AUDIO-STREAM] Error sending MP3 chunk ${chunkIndex + 1}: ${error.message}`)
+          console.log(`❌ [AUDIO-STREAM] Error sending PCM16 chunk ${chunkIndex + 1}: ${error.message}`)
           break
         }
       } else {
-        console.log(`⚠️ [AUDIO-STREAM] WebSocket not ready or interrupted, stopping MP3 stream`)
+        console.log(`⚠️ [AUDIO-STREAM] WebSocket not ready or interrupted, stopping PCM16 stream`)
         break
       }
 
-      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-        await new Promise((resolve) => setTimeout(resolve, MP3_CHUNK_DELAY_MS))
+      if (position + chunkSize < pcm16Buffer.length && !this.isInterrupted) {
+        await new Promise((resolve) => setTimeout(resolve, PCM16_CHUNK_DELAY_MS))
       }
 
       position += chunkSize
       chunkIndex++
     }
-    console.log(`✅ [AUDIO-STREAM] MP3 stream completed: ${successfulChunks} chunks sent, ${Math.round((position / audioBuffer.length) * 100)}% of audio streamed`)
+    console.log(`✅ [AUDIO-STREAM] PCM16 stream completed: ${successfulChunks} chunks sent, ${Math.round((position / pcm16Buffer.length) * 100)}% of audio streamed`)
     this.currentAudioStreaming = null
   }
 
