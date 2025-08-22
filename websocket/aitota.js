@@ -1488,9 +1488,54 @@ class SimplifiedSarvamTTSProcessor {
     this.isProcessing = false
   }
 
+  // Test API key with REST API first
+  async testApiKey() {
+    try {
+      console.log("🧪 [SARVAM-TEST] Testing API key with REST API...")
+      
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": API_KEYS.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: ["test"],
+          target_language_code: "hi-IN",
+          speaker: "pavithra",
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: true,
+          model: "bulbul:v1",
+        }),
+      })
+
+      if (response.ok) {
+        console.log("✅ [SARVAM-TEST] API key is valid - REST API works")
+        return true
+      } else {
+        console.log(`❌ [SARVAM-TEST] API key test failed: ${response.status} ${response.statusText}`)
+        return false
+      }
+    } catch (error) {
+      console.log(`❌ [SARVAM-TEST] API key test error: ${error.message}`)
+      return false
+    }
+  }
+
   // Connect to Sarvam WebSocket
   async connectToSarvam() {
     try {
+      // First test if API key works with REST API
+      const apiKeyValid = await this.testApiKey()
+      if (!apiKeyValid) {
+        console.log("⚠️ [SARVAM-WS] API key validation failed, skipping WebSocket attempts")
+        this.useWebSocket = false
+        return
+      }
+
       // Try different possible WebSocket endpoints
       const possibleEndpoints = [
         "wss://api.sarvam.ai/tts/stream",
@@ -1504,82 +1549,104 @@ class SimplifiedSarvamTTSProcessor {
       for (const endpoint of possibleEndpoints) {
         try {
           console.log(`🎤 [SARVAM-WS] Trying endpoint: ${endpoint}`)
+          console.log(`🎤 [SARVAM-WS] Using API key: ${API_KEYS.sarvam ? API_KEYS.sarvam.substring(0, 10) + '...' : 'NOT SET'}`)
           
-          this.sarvamWs = new WebSocket(endpoint, {
-            headers: {
-              "API-Subscription-Key": API_KEYS.sarvam,
-            }
-          })
-
-          // Set up event handlers
-          this.sarvamWs.onopen = () => {
-            console.log(`🎤 [SARVAM-WS] WebSocket connected to ${endpoint}`)
-            this.sarvamReady = true
-            
-            // Send configuration message
-            const configMessage = {
-              type: "config",
-              target_language_code: this.sarvamLanguage,
-              speaker: this.voice,
-              pitch: 0,
-              pace: 1.0,
-              loudness: 1.0,
-              speech_sample_rate: 8000,
-              enable_preprocessing: true,
-              model: "bulbul:v1"
-            }
-            
-            this.sarvamWs.send(JSON.stringify(configMessage))
-            console.log("🎤 [SARVAM-WS] Configuration sent")
-            
-            // Process queued audio
-            this.processQueuedAudio()
-            connected = true
-          }
-
-          this.sarvamWs.onmessage = (event) => {
+          // Try different header formats for WebSocket authentication
+          const headerOptions = [
+            { "API-Subscription-Key": API_KEYS.sarvam },
+            { "x-api-key": API_KEYS.sarvam },
+            { "Authorization": `Bearer ${API_KEYS.sarvam}` },
+            { "X-API-Key": API_KEYS.sarvam }
+          ]
+          
+          for (const headers of headerOptions) {
             try {
-              const data = JSON.parse(event.data)
-              this.handleSarvamMessage(data)
-            } catch (error) {
-              console.log("❌ [SARVAM-WS] Error parsing message:", error.message)
-            }
-          }
+              console.log(`🎤 [SARVAM-WS] Trying headers:`, Object.keys(headers))
+              
+              this.sarvamWs = new WebSocket(endpoint, { headers })
 
-          this.sarvamWs.onerror = (error) => {
-            console.log(`❌ [SARVAM-WS] WebSocket error for ${endpoint}:`, error.message)
-            this.sarvamReady = false
-          }
-
-          this.sarvamWs.onclose = () => {
-            console.log(`🔌 [SARVAM-WS] WebSocket closed for ${endpoint}`)
-            this.sarvamReady = false
-          }
-
-          // Wait for connection with timeout
-          await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              if (!this.sarvamReady) {
-                this.sarvamWs.close()
-                reject(new Error(`Connection timeout for ${endpoint}`))
+              // Set up event handlers
+              this.sarvamWs.onopen = () => {
+                console.log(`🎤 [SARVAM-WS] WebSocket connected to ${endpoint} with headers:`, Object.keys(headers))
+                this.sarvamReady = true
+                
+                // Send configuration message
+                const configMessage = {
+                  type: "config",
+                  target_language_code: this.sarvamLanguage,
+                  speaker: this.voice,
+                  pitch: 0,
+                  pace: 1.0,
+                  loudness: 1.0,
+                  speech_sample_rate: 8000,
+                  enable_preprocessing: true,
+                  model: "bulbul:v1"
+                }
+                
+                this.sarvamWs.send(JSON.stringify(configMessage))
+                console.log("🎤 [SARVAM-WS] Configuration sent")
+                
+                // Process queued audio
+                this.processQueuedAudio()
+                connected = true
               }
-            }, 5000)
 
-            this.sarvamWs.onopen = () => {
-              clearTimeout(timeout)
-              resolve()
+              this.sarvamWs.onmessage = (event) => {
+                try {
+                  const data = JSON.parse(event.data)
+                  console.log("📨 [SARVAM-WS] Received message:", data.type || 'unknown')
+                  this.handleSarvamMessage(data)
+                } catch (error) {
+                  console.log("❌ [SARVAM-WS] Error parsing message:", error.message)
+                }
+              }
+
+              this.sarvamWs.onerror = (error) => {
+                console.log(`❌ [SARVAM-WS] WebSocket error for ${endpoint}:`, error.message)
+                console.log(`❌ [SARVAM-WS] Error details:`, error)
+                this.sarvamReady = false
+              }
+
+              this.sarvamWs.onclose = (event) => {
+                console.log(`🔌 [SARVAM-WS] WebSocket closed for ${endpoint}`)
+                console.log(`🔌 [SARVAM-WS] Close code: ${event.code}, reason: ${event.reason}`)
+                this.sarvamReady = false
+              }
+
+              // Wait for connection with timeout
+              await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                  if (!this.sarvamReady) {
+                    this.sarvamWs.close()
+                    reject(new Error(`Connection timeout for ${endpoint}`))
+                  }
+                }, 3000) // Reduced timeout
+
+                this.sarvamWs.onopen = () => {
+                  clearTimeout(timeout)
+                  resolve()
+                }
+
+                this.sarvamWs.onerror = (error) => {
+                  clearTimeout(timeout)
+                  reject(error)
+                }
+              })
+
+              if (connected) {
+                console.log(`✅ [SARVAM-WS] Successfully connected to ${endpoint}`)
+                break
+              }
+
+            } catch (headerError) {
+              console.log(`❌ [SARVAM-WS] Failed with headers ${Object.keys(headers)}:`, headerError.message)
+              if (this.sarvamWs) {
+                this.sarvamWs.close()
+              }
             }
-
-            this.sarvamWs.onerror = (error) => {
-              clearTimeout(timeout)
-              reject(error)
-            }
-          })
-
-          if (connected) {
-            console.log(`✅ [SARVAM-WS] Successfully connected to ${endpoint}`)
-            break
           }
+
+          if (connected) break
 
         } catch (error) {
           console.log(`❌ [SARVAM-WS] Failed to connect to ${endpoint}:`, error.message)
@@ -1590,7 +1657,13 @@ class SimplifiedSarvamTTSProcessor {
       }
 
       if (!connected) {
-        console.log("⚠️ [SARVAM-WS] All WebSocket endpoints failed, falling back to API")
+        console.log("⚠️ [SARVAM-WS] All WebSocket endpoints and header combinations failed")
+        console.log("⚠️ [SARVAM-WS] This might indicate:")
+        console.log("   - WebSocket not supported by Sarvam")
+        console.log("   - API key doesn't have WebSocket permissions")
+        console.log("   - Different authentication method required")
+        console.log("   - WebSocket endpoints are incorrect")
+        console.log("⚠️ [SARVAM-WS] Falling back to API method")
         this.useWebSocket = false
       }
 
