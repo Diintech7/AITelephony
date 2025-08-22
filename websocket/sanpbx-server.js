@@ -671,12 +671,17 @@ function setupSanPbxWebSocketServer(wss) {
       console.log(`🔗 [SANPBX-WS] Connection closed: ${code} - ${reason}`)
 
       // Clean up any active sessions for this connection
-      for (const [callId, session] of activeSessions.entries()) {
+      const keysToDelete = []
+      for (const [key, session] of activeSessions.entries()) {
         if (session.ws === ws) {
           session.terminate("connection_closed")
-          activeSessions.delete(callId)
+          keysToDelete.push(key)
         }
       }
+      
+      // Delete all keys for this connection
+      keysToDelete.forEach(key => activeSessions.delete(key))
+      console.log(`🔍 [SANPBX-WS] Cleaned up ${keysToDelete.length} session keys`)
     })
 
     ws.on("error", (error) => {
@@ -724,8 +729,14 @@ async function handleStart(ws, data) {
   session.mediaFormat = mediaFormat
   session.isActive = true
 
-  // Store session
+  // Store session with both callId and streamId as keys (like SIP server)
   activeSessions.set(callId, session)
+  if (streamId && streamId !== callId) {
+    activeSessions.set(streamId, session)
+  }
+  
+  console.log(`🔍 [SANPBX-START] Session stored with keys: callId=${callId}, streamId=${streamId}`)
+  console.log(`🔍 [SANPBX-START] Active sessions count: ${activeSessions.size}`)
 
   // Connect to Deepgram
   await session.connectToDeepgram()
@@ -758,14 +769,34 @@ async function handleAnswer(ws, data) {
 }
 
 async function handleMedia(ws, data) {
+  console.log(`🎵 [SANPBX-MEDIA] === MEDIA EVENT RECEIVED ===`)
+  
   const { streamId, media } = data
   const callId = data.callId
 
-  // Find session by callId
-  const session = activeSessions.get(callId)
+  // Debug: Log the media event data structure
+  console.log(`🔍 [SANPBX-MEDIA] Media event data:`, {
+    streamId,
+    callId,
+    mediaKeys: media ? Object.keys(media) : 'no media',
+    hasPayload: media && media.payload ? 'yes' : 'no',
+    payloadLength: media && media.payload ? media.payload.length : 0
+  })
+
+  // Find session by streamId (like SIP server) or callId
+  let session = null
+  if (streamId) {
+    session = Array.from(activeSessions.values()).find((s) => s.streamId === streamId)
+    console.log(`🔍 [SANPBX-MEDIA] Looking for session with streamId: ${streamId}, found:`, session ? 'yes' : 'no')
+  }
+  if (!session && callId) {
+    session = Array.from(activeSessions.values()).find((s) => s.callId === callId)
+    console.log(`🔍 [SANPBX-MEDIA] Looking for session with callId: ${callId}, found:`, session ? 'yes' : 'no')
+  }
 
   if (!session) {
-    console.log(`⚠️ [SANPBX-MEDIA] No active session found for callId: ${callId}`)
+    console.log(`⚠️ [SANPBX-MEDIA] No active session found for streamId: ${streamId} or callId: ${callId}`)
+    console.log(`🔍 [SANPBX-MEDIA] Available sessions:`, Array.from(activeSessions.keys()))
     return
   }
 
@@ -882,16 +913,30 @@ async function handleDtmf(ws, data) {
 
 async function handleStop(ws, data) {
   const callId = data.callId
+  const streamId = data.streamId
   const disconnectedBy = data.disconnectedBy
 
-  console.log(`🛑 [SANPBX-STOP] Stopping call session. callId: ${callId}, disconnected by: ${disconnectedBy}`)
+  console.log(`🛑 [SANPBX-STOP] Stopping call session. callId: ${callId}, streamId: ${streamId}, disconnected by: ${disconnectedBy}`)
 
-  const session = activeSessions.get(callId)
+  // Find and terminate session
+  let session = activeSessions.get(callId)
+  if (!session && streamId) {
+    session = activeSessions.get(streamId)
+  }
+
   if (session) {
     session.terminate("call_ended")
+    
+    // Clean up both keys
     activeSessions.delete(callId)
+    if (streamId && streamId !== callId) {
+      activeSessions.delete(streamId)
+    }
 
-    console.log(`✅ [SANPBX-STOP] Session terminated. CallId: ${callId}`)
+    console.log(`✅ [SANPBX-STOP] Session terminated. CallId: ${callId}, streamId: ${streamId}`)
+    console.log(`🔍 [SANPBX-STOP] Remaining active sessions: ${activeSessions.size}`)
+  } else {
+    console.log(`⚠️ [SANPBX-STOP] No session found for callId: ${callId} or streamId: ${streamId}`)
   }
 }
 
@@ -916,10 +961,16 @@ async function handleTransferCall(ws, data) {
   )
 
   // Terminate the session
-  const session = activeSessions.get(callId)
+  let session = activeSessions.get(callId)
+  if (!session && streamId) {
+    session = activeSessions.get(streamId)
+  }
   if (session) {
     session.terminate("call_transferred")
     activeSessions.delete(callId)
+    if (streamId && streamId !== callId) {
+      activeSessions.delete(streamId)
+    }
   }
 }
 
@@ -944,10 +995,16 @@ async function handleHangupCall(ws, data) {
   )
 
   // Terminate the session
-  const session = activeSessions.get(callId)
+  let session = activeSessions.get(callId)
+  if (!session && streamId) {
+    session = activeSessions.get(streamId)
+  }
   if (session) {
     session.terminate("call_hungup")
     activeSessions.delete(callId)
+    if (streamId && streamId !== callId) {
+      activeSessions.delete(streamId)
+    }
   }
 }
 
