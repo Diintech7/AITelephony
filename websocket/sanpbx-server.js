@@ -271,9 +271,31 @@ class SanPbxCallSession extends EventEmitter {
 
   async processAudioChunk(audioData) {
     try {
+      // Log the incoming audio data format for debugging
+      if (!this.audioFormatLogged) {
+        console.log(`🎵 [SANPBX-AUDIO] Incoming audio format check:`)
+        console.log(`   - Data type: ${typeof audioData}`)
+        console.log(`   - Data length: ${audioData.length}`)
+        console.log(`   - Is base64: ${isProbablyBase64(audioData)}`)
+        console.log(`   - Sample data: ${audioData.substring(0, 50)}...`)
+        this.audioFormatLogged = true
+      }
+
+      // Ensure audioData is base64
+      const normalizedAudioData = normalizeBase64String(audioData)
+      
       // SanIPPBX sends LINEAR16 at 44.1kHz, convert to 8kHz for Deepgram
-      const audioBuffer = Buffer.from(audioData, "base64")
+      const audioBuffer = Buffer.from(normalizedAudioData, "base64")
       const resampledBuffer = resampleLinear16To8kHz(audioBuffer)
+
+      // Log the processed audio format
+      if (!this.processedFormatLogged) {
+        console.log(`🎵 [SANPBX-AUDIO] Processed audio format:`)
+        console.log(`   - Original buffer size: ${audioBuffer.length} bytes`)
+        console.log(`   - Resampled buffer size: ${resampledBuffer.length} bytes`)
+        console.log(`   - Resampled base64 length: ${resampledBuffer.toString('base64').length}`)
+        this.processedFormatLogged = true
+      }
 
       if (this.deepgramReady && this.deepgramWs) {
         this.deepgramWs.send(resampledBuffer)
@@ -441,13 +463,25 @@ class SanPbxCallSession extends EventEmitter {
 
   sendAudioToClient(base64Audio) {
     if (this.ws.readyState === WebSocket.OPEN && this.isAnswered) {
+      // Ensure the audio is in base64 format
+      const normalizedAudio = normalizeBase64String(base64Audio)
+      
+      // Log the outgoing audio format for debugging
+      if (!this.outgoingFormatLogged) {
+        console.log(`🎵 [SANPBX-AUDIO] Outgoing audio format:`)
+        console.log(`   - Original base64 length: ${base64Audio.length}`)
+        console.log(`   - Normalized base64 length: ${normalizedAudio.length}`)
+        console.log(`   - Sample data: ${normalizedAudio.substring(0, 50)}...`)
+        this.outgoingFormatLogged = true
+      }
+
       const audioMessage = {
         event: "media",
         streamId: this.streamId,
         channelId: this.channelId,
         callId: this.callId,
         media: {
-          payload: base64Audio,
+          payload: normalizedAudio,
           format: {
             encoding: "LINEAR16",
             sampleRate: 44100,
@@ -513,14 +547,18 @@ function setupSanPbxWebSocketServer(wss) {
   wss.on("connection", (ws, req) => {
     console.log("🔗 [SANPBX-WS] New SanIPPBX WebSocket connection established")
 
-    // Send immediate connection acknowledgment
+    // Send immediate connection acknowledgment with first message
     ws.send(
       JSON.stringify({
         event: "connected",
         protocol: "SanIPPBX-WebSocket-v1.0",
+        message: "SanIPPBX WebSocket server is ready to handle calls",
+        status: "ready",
         timestamp: new Date().toISOString(),
       }),
     )
+    
+    console.log("📝 [SANPBX-WS] Sent first connection message to client")
 
     ws.on("message", async (message) => {
       try {
@@ -653,11 +691,15 @@ async function handleAnswer(ws, data) {
   console.log(`📞 [SANPBX-ANSWER] Call answered: ${callId}`)
   session.isAnswered = true
 
-  // Send initial greeting
+  // Send initial greeting with enhanced message
   try {
-    await session.convertToSpeech("Hello, you are now connected. How can I help you?")
+    const greetingMessage = "Hello! Welcome to our AI assistant. I'm here to help you with any questions or assistance you need. Please speak clearly and I'll do my best to assist you. How can I help you today?"
+    console.log(`🎤 [SANPBX-ANSWER] Sending first message: ${greetingMessage}`)
+    await session.convertToSpeech(greetingMessage)
   } catch (error) {
     console.error("❌ [SANPBX-ANSWER] Error sending greeting:", error.message)
+    // Fallback: send text message if TTS fails
+    session.sendTextToClient("Hello! Welcome to our AI assistant. How can I help you today?")
   }
 }
 
@@ -674,6 +716,17 @@ async function handleMedia(ws, data) {
   }
 
   if (media && media.payload) {
+    // Log the incoming media format for debugging
+    if (!session.mediaFormatLogged) {
+      console.log(`🎵 [SANPBX-MEDIA] Incoming media format:`)
+      console.log(`   - Media encoding: ${media.format?.encoding || 'unknown'}`)
+      console.log(`   - Sample rate: ${media.format?.sampleRate || 'unknown'}`)
+      console.log(`   - Channels: ${media.format?.channels || 'unknown'}`)
+      console.log(`   - Payload type: ${typeof media.payload}`)
+      console.log(`   - Payload length: ${media.payload.length}`)
+      session.mediaFormatLogged = true
+    }
+
     // Ensure payload is base64 for downstream processing
     const normalized = normalizeBase64String(media.payload)
     if (normalized !== media.payload) {
