@@ -1246,10 +1246,89 @@ const validateEmail = (email) => {
   return emailRegex.test(email)
 }
 
+// Normalize spoken/transliterated email phrases (English/Hindi) to a valid email string
+const normalizeSpokenEmail = (rawText) => {
+  if (!rawText) return null
+  let text = String(rawText)
+    .toLowerCase()
+    .replace(/\s+/g, ' ') // collapse spaces
+    .trim()
+
+  // Convert Devanagari digits to ASCII
+  const devanagariDigits = {
+    '०': '0','१': '1','२': '2','३': '3','४': '4','५': '5','६': '6','७': '7','८': '8','९': '9'
+  }
+  text = text.replace(/[०१२३४५६७८९]/g, (m) => devanagariDigits[m] || m)
+
+  // Map Hindi number words to digits
+  const numWords = {
+    'शून्य': '0','zero': '0',
+    'एक': '1','ek': '1','one': '1',
+    'दो': '2','do': '2','two': '2',
+    'तीन': '3','teen': '3','three': '3',
+    'चार': '4','char': '4','four': '4',
+    'पांच': '5','पाँच': '5','paanch': '5','panch': '5','five': '5',
+    'छह': '6','cheh': '6','six': '6',
+    'सात': '7','saat': '7','seven': '7',
+    'आठ': '8','aath': '8','eight': '8',
+    'नौ': '9','nau': '9','nine': '9'
+  }
+  const wordBoundary = new RegExp(`\\b(${Object.keys(numWords).join('|')})\\b`, 'g')
+  text = text.replace(wordBoundary, (m) => numWords[m])
+
+  // Common connectors and noise words to remove
+  text = text
+    .replace(/\b(at\s*the\s*rate\s*of)\b/g, '@')
+    .replace(/\b(at\s*the\s*rate)\b/g, '@')
+    .replace(/\battherate\b/g, '@')
+    .replace(/\bat\s*rate\b/g, '@')
+    .replace(/\bरेट\b/g, '@')
+    .replace(/\bएट\s*द?\s*रेट\b/g, '@')
+    .replace(/\bat\b/g, '@') // often spoken as just 'at'
+    .replace(/\bडॉट\b/g, '.')
+    .replace(/\bडाट\b/g, '.')
+    .replace(/\bdot\b/g, '.')
+    .replace(/\bडॉ?ट\b/g, '.')
+    .replace(/\bडाट\b/g, '.')
+    .replace(/\bडॉट\s*कॉम\b/g, '.com')
+    .replace(/\bdot\s*com\b/g, '.com')
+    .replace(/\bडॉट\s*जीमेल\b/g, '.gmail')
+    .replace(/\bजीमेल\b/g, 'gmail')
+    .replace(/\bजी\s*मेल\b/g, 'gmail')
+    .replace(/\bg\s*mail\b/g, 'gmail')
+    .replace(/\bहाइ[\u095c\u095e]?फन\b/g, '-') // hyphen (Hindi)
+    .replace(/\bhyphen\b|\bdash\b|\bminus\b/g, '-')
+    .replace(/\bअंडरस्कोर\b/g, '_')
+    .replace(/\bunderscore\b/g, '_')
+    .replace(/\bप्लस\b|\bplus\b/g, '+')
+    .replace(/\bspace\b|\bस्पेस\b/g, '')
+    .replace(/\bof\b|\bthe\b|\btak\b/g, '')
+
+  // Remove quotes and trailing punctuation commonly added by STT
+  text = text.replace(/["'“”‘’]/g, '')
+  text = text.replace(/\s*\.$/, '')
+
+  // Remove spaces around @ and .
+  text = text.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.')
+
+  // If it looks like user said "gmail dot com" without username, keep as is for further AI handling
+
+  // Finally, try to pick the first email-like substring
+  const emailLikeMatch = text.match(/[a-z0-9._+\-]+@[a-z0-9.-]+\.[a-z]{2,}/i)
+  return emailLikeMatch ? emailLikeMatch[0] : null
+}
+
 // Extract email from text using AI
 const extractEmailFromText = async (text) => {
   const timer = createTimer("EMAIL_EXTRACTION")
   try {
+    // 1) Try local normalization first (fast path)
+    const normalizedLocal = normalizeSpokenEmail(text)
+    if (normalizedLocal && validateEmail(normalizedLocal)) {
+      console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - Local normalized: ${normalizedLocal}`)
+      return normalizedLocal
+    }
+
     const emailPrompt = `Extract email address from the given text. Look for:
 - Standard email formats (user@domain.com)
 - Gmail addresses (user@gmail.com)
@@ -1280,11 +1359,13 @@ Return ONLY the email address if found, or "NO_EMAIL" if no valid email is found
     }
 
     const data = await response.json()
-    const extractedEmail = data.choices[0]?.message?.content?.trim()
+    const extractedRaw = data.choices[0]?.message?.content?.trim()
 
-    if (extractedEmail && extractedEmail !== "NO_EMAIL" && validateEmail(extractedEmail)) {
-      console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - Extracted: ${extractedEmail}`)
-      return extractedEmail
+    // 2) Normalize AI output as well
+    const normalizedAI = normalizeSpokenEmail(extractedRaw)
+    if (normalizedAI && validateEmail(normalizedAI)) {
+      console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - AI normalized: ${normalizedAI}`)
+      return normalizedAI
     }
 
     console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - No valid email found`)
