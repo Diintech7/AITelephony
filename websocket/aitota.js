@@ -111,7 +111,7 @@ const VALID_SARVAM_VOICES = new Set([
   "neel",
   "misha",
   "vian",
-  "arjun",
+  "manisha",
   "maya",
   "manisha",
   "vidya",
@@ -1456,7 +1456,7 @@ class SimplifiedSarvamTTSProcessor {
     this.callLogger = callLogger
     // Static settings for WebSocket (default to English)
     this.sarvamLanguage = "en-IN"
-    this.voice = "arjun"
+    this.voice = "manisha"
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
@@ -1538,7 +1538,7 @@ class SimplifiedSarvamTTSProcessor {
       const lang = (this.language || 'en').toLowerCase()
       if (lang.startsWith('en')) {
         this.sarvamLanguage = 'en-IN'
-        this.voice = 'arjun'
+        this.voice = 'manisha'
       } else if (lang.startsWith('hi')) {
         this.sarvamLanguage = 'hi-IN'
         this.voice = 'pavithra'
