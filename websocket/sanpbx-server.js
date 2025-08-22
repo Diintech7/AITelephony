@@ -153,6 +153,36 @@ function linear16ToMuLawBase64(linear16Base64) {
   }
 }
 
+// Extract raw PCM16 data from a WAV base64 (assumes PCM16 LE), returns base64 of PCM chunk
+function extractPcm16FromWavBase64(wavBase64) {
+  try {
+    const buffer = Buffer.from(wavBase64, "base64")
+    if (buffer.length < 44) return null
+    if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") return null
+
+    let offset = 12
+    let dataOffset = -1
+    let dataSize = 0
+
+    while (offset + 8 <= buffer.length) {
+      const chunkId = buffer.toString("ascii", offset, offset + 4)
+      const chunkSize = buffer.readUInt32LE(offset + 4)
+      const next = offset + 8 + chunkSize
+      if (chunkId === "data") {
+        dataOffset = offset + 8
+        dataSize = chunkSize
+      }
+      offset = next
+    }
+
+    if (dataOffset < 0 || dataSize <= 0) return null
+    const pcmData = buffer.slice(dataOffset, dataOffset + dataSize)
+    return pcmData.toString("base64")
+  } catch (_) {
+    return null
+  }
+}
+
 class SanPbxCallSession extends EventEmitter {
   constructor(ws, callData) {
     super()
@@ -195,7 +225,7 @@ class SanPbxCallSession extends EventEmitter {
       const deepgramLanguage = getDeepgramLanguage(this.detectedLanguage)
 
       const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-      deepgramUrl.searchParams.append("sample_rate", "8000")
+      deepgramUrl.searchParams.append("sample_rate", "44100")
       deepgramUrl.searchParams.append("channels", "1")
       deepgramUrl.searchParams.append("encoding", "linear16")
       deepgramUrl.searchParams.append("model", "nova-2")
@@ -400,7 +430,7 @@ class SanPbxCallSession extends EventEmitter {
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000,
+          speech_sample_rate: 44100,
           enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
@@ -417,8 +447,9 @@ class SanPbxCallSession extends EventEmitter {
       const audioBase64 = responseData.audios?.[0]
 
       if (audioBase64) {
-        // Send base64 audio directly to SanIPPBX (no conversion needed)
-        this.sendAudioToClient(audioBase64)
+        // Sarvam often returns WAV; extract PCM16 data at 44100 for LINEAR16 streaming
+        const pcm16Base64 = extractPcm16FromWavBase64(audioBase64) || audioBase64
+        this.sendAudioToClient(pcm16Base64)
       } else {
         throw new Error("No audio data received from Sarvam API")
       }
@@ -448,9 +479,17 @@ class SanPbxCallSession extends EventEmitter {
       const audioMessage = {
         event: "media",
         streamId: this.streamId,
+        channelId: this.channelId,
+        callId: this.callId,
         media: {
           payload: normalizedAudio,
+          format: {
+            encoding: "LINEAR16",
+            sampleRate: 44100,
+            channels: 1
+          }
         },
+        timestamp: new Date().toISOString()
       }
 
       this.ws.send(JSON.stringify(audioMessage))
