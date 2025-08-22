@@ -106,7 +106,7 @@ function normalizeBase64String(str) {
 // -------- Audio utils: Base64 audio processing --------
 // SanIPPBX sends base64 audio directly, no conversion needed
 
-// -------- Audio utils: LINEAR16 -> µ-law (8kHz mono) --------
+// -------- Audio utils: base64 PCM -> µ-law (8kHz mono) --------
 function linearPcmSampleToMuLaw(sample) {
   // Clamp to 16-bit signed range
   if (sample > 32767) sample = 32767
@@ -135,9 +135,9 @@ function linearPcmSampleToMuLaw(sample) {
   return muLawByte
 }
 
-function linear16ToMuLawBase64(linear16Base64) {
+function pcm16ToMuLawBase64(pcm16Base64) {
   try {
-    const buffer = Buffer.from(linear16Base64, "base64")
+    const buffer = Buffer.from(pcm16Base64, "base64")
     const sampleCount = buffer.length / 2
     const muLawBuffer = Buffer.alloc(sampleCount)
     
@@ -149,7 +149,7 @@ function linear16ToMuLawBase64(linear16Base64) {
     return muLawBuffer.toString("base64")
   } catch (err) {
     console.error("❌ [SANPBX-AUDIO] Linear16 to µ-law conversion error:", err.message)
-    return linear16Base64 // Return original if conversion fails
+    return pcm16Base64 // Return original if conversion fails
   }
 }
 
@@ -227,7 +227,7 @@ class SanPbxCallSession extends EventEmitter {
       const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
       deepgramUrl.searchParams.append("sample_rate", "44100")
       deepgramUrl.searchParams.append("channels", "1")
-      deepgramUrl.searchParams.append("encoding", "linear16")
+      // Do not force encoding; stream base64 PCM as-is (44100 Hz mono)
       deepgramUrl.searchParams.append("model", "nova-2")
       deepgramUrl.searchParams.append("language", deepgramLanguage)
       deepgramUrl.searchParams.append("interim_results", "true")
@@ -447,9 +447,9 @@ class SanPbxCallSession extends EventEmitter {
       const audioBase64 = responseData.audios?.[0]
 
       if (audioBase64) {
-        // Sarvam often returns WAV; extract PCM16 data at 44100 for LINEAR16 streaming
-        const pcm16Base64 = extractPcm16FromWavBase64(audioBase64) || audioBase64
-        this.sendAudioToClient(pcm16Base64)
+        // Sarvam often returns WAV; extract PCM16 data at 44100 for base64 streaming
+        const pcmBase64 = extractPcm16FromWavBase64(audioBase64) || audioBase64
+        this.sendAudioToClient(pcmBase64)
       } else {
         throw new Error("No audio data received from Sarvam API")
       }
@@ -484,7 +484,7 @@ class SanPbxCallSession extends EventEmitter {
         media: {
           payload: normalizedAudio,
           format: {
-            encoding: "LINEAR16",
+            encoding: "base64",
             sampleRate: 44100,
             channels: 1
           }
@@ -868,7 +868,7 @@ async function handleMedia(ws, data) {
       // Calculate estimated audio duration
       try {
         const buffer = Buffer.from(media.payload, "base64")
-        const sampleCount = Math.floor(buffer.length / 2) // LINEAR16 = 2 bytes per sample
+        const sampleCount = Math.floor(buffer.length / 2) // PCM16 = 2 bytes per sample
         const sampleRate = media.format?.sampleRate || 44100
         const durationMs = (sampleCount / sampleRate) * 1000
         console.log(`   - Decoded buffer size: ${buffer.length} bytes`)
