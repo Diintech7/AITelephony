@@ -203,7 +203,8 @@ class SanPbxCallSession extends EventEmitter {
       averagePacketSize: 0,
       firstPacketTime: null,
       lastPacketTime: null,
-      packetSizes: []
+      packetSizes: [],
+      samplePackets: [] // Store sample packets for analysis
     }
 
     console.log(`📞 [SANPBX-SESSION] New session created: ${this.callId} | Stream: ${this.streamId}`)
@@ -566,6 +567,16 @@ class SanPbxCallSession extends EventEmitter {
     this.audioPacketStats.totalBytes += packetSize
     this.audioPacketStats.packetSizes.push(packetSize)
     
+    // Store sample packets for analysis (keep last 5)
+    if (this.audioPacketStats.samplePackets.length >= 5) {
+      this.audioPacketStats.samplePackets.shift()
+    }
+    this.audioPacketStats.samplePackets.push({
+      size: packetSize,
+      timestamp: now,
+      sample: audioData.substring(0, 50) + "..." // First 50 chars
+    })
+    
     if (!this.audioPacketStats.firstPacketTime) {
       this.audioPacketStats.firstPacketTime = now
     }
@@ -617,6 +628,12 @@ class SanPbxCallSession extends EventEmitter {
     })
     
     console.log(`   - Packet size distribution:`, sizeRanges)
+    
+    // Show sample packets
+    console.log(`📦 [SANPBX-STATS] Recent audio packet samples:`)
+    this.audioPacketStats.samplePackets.forEach((packet, index) => {
+      console.log(`   Packet ${index + 1}: ${packet.size} bytes - "${packet.sample}"`)
+    })
   }
 
   terminate(reason = "normal_termination") {
@@ -842,6 +859,29 @@ async function handleMedia(ws, data) {
         console.log(`   - Sequence: ${media.sequence}`)
       }
       
+      // Detailed base64 analysis
+      console.log(`🎵 [SANPBX-MEDIA] Base64 Audio Packet Analysis:`)
+      console.log(`   - Is valid base64: ${isProbablyBase64(media.payload)}`)
+      console.log(`   - First 20 chars: "${media.payload.substring(0, 20)}"`)
+      console.log(`   - Last 10 chars: "${media.payload.substring(media.payload.length - 10)}"`)
+      console.log(`   - Contains padding (=): ${media.payload.includes('=')}`)
+      console.log(`   - Padding count: ${(media.payload.match(/=/g) || []).length}`)
+      console.log(`   - Length divisible by 4: ${media.payload.length % 4 === 0}`)
+      
+      // Calculate estimated audio duration
+      try {
+        const buffer = Buffer.from(media.payload, "base64")
+        const sampleCount = Math.floor(buffer.length / 2) // LINEAR16 = 2 bytes per sample
+        const sampleRate = media.format?.sampleRate || 44100
+        const durationMs = (sampleCount / sampleRate) * 1000
+        console.log(`   - Decoded buffer size: ${buffer.length} bytes`)
+        console.log(`   - Estimated samples: ${sampleCount}`)
+        console.log(`   - Estimated duration: ${durationMs.toFixed(2)}ms`)
+        console.log(`   - Estimated frequency: ${(sampleRate / sampleCount * 1000).toFixed(2)}Hz`)
+      } catch (err) {
+        console.log(`   - Error decoding base64: ${err.message}`)
+      }
+      
       session.mediaFormatLogged = true
     }
 
@@ -850,6 +890,45 @@ async function handleMedia(ws, data) {
     if (normalized !== media.payload) {
       console.log("🔁 [SANPBX-MEDIA] Normalized incoming payload to base64")
     }
+    
+    // Log detailed packet info for first few packets
+    if (!session.detailedPacketLogged) {
+      console.log(`📦 [SANPBX-MEDIA] Detailed Audio Packet #${session.audioPacketStats.totalPackets + 1}:`)
+      console.log(`   - Raw payload length: ${media.payload.length}`)
+      console.log(`   - Normalized length: ${normalized.length}`)
+      console.log(`   - Base64 validation: ${isProbablyBase64(normalized)}`)
+      console.log(`   - Sample data (first 100 chars): "${media.payload.substring(0, 100)}"`)
+      console.log(`   - Sample data (last 50 chars): "${media.payload.substring(media.payload.length - 50)}"`)
+      
+      // Try to decode and analyze the audio data
+      try {
+        const buffer = Buffer.from(normalized, "base64")
+        console.log(`   - Decoded buffer size: ${buffer.length} bytes`)
+        console.log(`   - Buffer type: ${buffer.constructor.name}`)
+        
+        // Show first few bytes as hex
+        const hexBytes = buffer.slice(0, 16).toString('hex').match(/.{2}/g)?.join(' ') || ''
+        console.log(`   - First 16 bytes (hex): ${hexBytes}`)
+        
+        // Show first few bytes as decimal
+        const decBytes = Array.from(buffer.slice(0, 8)).join(', ')
+        console.log(`   - First 8 bytes (decimal): ${decBytes}`)
+        
+        // Calculate audio metrics
+        const sampleCount = Math.floor(buffer.length / 2)
+        const sampleRate = media.format?.sampleRate || 44100
+        const durationMs = (sampleCount / sampleRate) * 1000
+        console.log(`   - Estimated audio samples: ${sampleCount}`)
+        console.log(`   - Estimated duration: ${durationMs.toFixed(2)}ms`)
+        console.log(`   - Audio frequency: ${(sampleRate / sampleCount * 1000).toFixed(2)}Hz`)
+        
+      } catch (err) {
+        console.log(`   - Error analyzing audio data: ${err.message}`)
+      }
+      
+      session.detailedPacketLogged = true
+    }
+    
     await session.processAudioChunk(normalized)
   }
 }
