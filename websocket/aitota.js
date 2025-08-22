@@ -1509,6 +1509,7 @@ class SimplifiedSarvamTTSProcessor {
           speech_sample_rate: 8000,
           enable_preprocessing: true,
           model: "bulbul:v1",
+          output_audio_codec: "linear16", // Use linear16 for SIP compatibility
         }),
       })
 
@@ -1558,7 +1559,7 @@ class SimplifiedSarvamTTSProcessor {
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
-            output_audio_codec: 'mp3',
+            output_audio_codec: 'linear16',
             output_audio_bitrate: '64k',
             speech_sample_rate: 8000,
             enable_preprocessing: true
@@ -1650,7 +1651,8 @@ class SimplifiedSarvamTTSProcessor {
           loudness: 1.0,
           speech_sample_rate: 8000,
           enable_preprocessing: true,
-          model: "bulbul:v2",
+          model: "bulbul:v1",
+          output_audio_codec: "linear16", // Use linear16 instead of MP3 for SIP
         }),
       })
 
@@ -1750,6 +1752,7 @@ class SimplifiedSarvamTTSProcessor {
     }
   }
 
+  // Enhanced audio streaming optimized for SIP with proper format handling
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
@@ -1757,10 +1760,14 @@ class SimplifiedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
+    // SIP expects 8kHz, 16-bit, mono PCM audio (linear16)
     const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    const BYTES_PER_SAMPLE = 2 // 16-bit = 2 bytes
+    const CHANNELS = 1 // Mono
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS) / 1000
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // 40ms chunks
+
+    console.log(`🎵 [AUDIO-STREAM] Starting SIP audio stream: ${audioBuffer.length} bytes, ${SAMPLE_RATE}Hz, ${CHANNELS} channel(s)`)
 
     let position = 0
     let chunkIndex = 0
@@ -1771,11 +1778,15 @@ class SimplifiedSarvamTTSProcessor {
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
       const chunk = audioBuffer.slice(position, position + chunkSize)
 
+      // Create SIP media message with proper format
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
         media: {
           payload: chunk.toString("base64"),
+          track: "inbound", // Specify track direction
+          chunk: chunkIndex + 1,
+          timestamp: Date.now()
         },
       }
 
@@ -1783,16 +1794,25 @@ class SimplifiedSarvamTTSProcessor {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
+          
+          // Log progress every 10 chunks
+          if (successfulChunks % 10 === 0) {
+            console.log(`🎵 [AUDIO-STREAM] Sent ${successfulChunks} chunks, ${Math.round((position / audioBuffer.length) * 100)}% complete`)
+          }
         } catch (error) {
+          console.log(`❌ [AUDIO-STREAM] Error sending chunk ${chunkIndex}: ${error.message}`)
           break
         }
       } else {
+        console.log(`⚠️ [AUDIO-STREAM] WebSocket not ready, stopping stream`)
         break
       }
 
+      // Calculate delay based on audio duration for smooth streaming
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
+        const delayMs = Math.max(chunkDurationMs - 1, 5) // Slight overlap for smoothness
+        
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
@@ -1800,6 +1820,7 @@ class SimplifiedSarvamTTSProcessor {
       chunkIndex++
     }
 
+    console.log(`✅ [AUDIO-STREAM] Stream completed: ${successfulChunks} chunks sent, ${Math.round((position / audioBuffer.length) * 100)}% of audio streamed`)
     this.currentAudioStreaming = null
   }
 
