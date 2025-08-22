@@ -529,7 +529,7 @@ class SipCallSession extends EventEmitter {
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: sarvamLanguage,
+          target_language_code: "hi",
           speaker: voice,
           pitch: 0,
           pace: 1.0,
