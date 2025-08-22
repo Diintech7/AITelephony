@@ -299,7 +299,7 @@ Return only the language code, nothing else.`,
 
     return "en"
   } catch (error) {
-    console.log(`❌ [LLM-LANG-DETECT] ${timer.end()}ms - Error: ${error.message}`)
+    console.log(`❌ [LLM-LANG-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
     return "en"
   }
 }
@@ -1447,18 +1447,24 @@ ${orgName} Team
   }
 }
 
-// Simplified TTS processor
+// Simplified TTS processor using Sarvam WebSocket with fallback to API
 class SimplifiedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
+    // Static settings for WebSocket
+    this.sarvamLanguage = "hi-IN" // Static language
+    this.voice = "pavithra" // Static voice
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
+    this.sarvamWs = null
+    this.sarvamReady = false
+    this.audioQueue = []
+    this.isProcessing = false
+    this.useWebSocket = true // Flag to control WebSocket vs API usage
   }
 
   interrupt() {
@@ -1466,23 +1472,175 @@ class SimplifiedSarvamTTSProcessor {
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true
     }
+    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
+      this.sarvamWs.close()
+    }
   }
 
   reset(newLanguage) {
     this.interrupt()
     if (newLanguage) {
       this.language = newLanguage
-      this.sarvamLanguage = getSarvamLanguage(newLanguage)
     }
     this.isInterrupted = false
     this.totalAudioBytes = 0
+    this.audioQueue = []
+    this.isProcessing = false
   }
 
-  async synthesizeAndStream(text) {
-    if (this.isInterrupted) return
+  // Connect to Sarvam WebSocket
+  async connectToSarvam() {
+    try {
+      // Try different possible WebSocket endpoints
+      const possibleEndpoints = [
+        "wss://api.sarvam.ai/tts/stream",
+        "wss://api.sarvam.ai/stream/tts",
+        "wss://api.sarvam.ai/websocket/tts",
+        "wss://api.sarvam.ai/v1/tts/stream"
+      ]
+      
+      let connected = false
+      
+      for (const endpoint of possibleEndpoints) {
+        try {
+          console.log(`🎤 [SARVAM-WS] Trying endpoint: ${endpoint}`)
+          
+          this.sarvamWs = new WebSocket(endpoint, {
+            headers: {
+              "API-Subscription-Key": API_KEYS.sarvam,
+            }
+          })
 
-    const timer = createTimer("TTS_SYNTHESIS")
+          // Set up event handlers
+          this.sarvamWs.onopen = () => {
+            console.log(`🎤 [SARVAM-WS] WebSocket connected to ${endpoint}`)
+            this.sarvamReady = true
+            
+            // Send configuration message
+            const configMessage = {
+              type: "config",
+              target_language_code: this.sarvamLanguage,
+              speaker: this.voice,
+              pitch: 0,
+              pace: 1.0,
+              loudness: 1.0,
+              speech_sample_rate: 8000,
+              enable_preprocessing: true,
+              model: "bulbul:v1"
+            }
+            
+            this.sarvamWs.send(JSON.stringify(configMessage))
+            console.log("🎤 [SARVAM-WS] Configuration sent")
+            
+            // Process queued audio
+            this.processQueuedAudio()
+            connected = true
+          }
 
+          this.sarvamWs.onmessage = (event) => {
+            try {
+              const data = JSON.parse(event.data)
+              this.handleSarvamMessage(data)
+            } catch (error) {
+              console.log("❌ [SARVAM-WS] Error parsing message:", error.message)
+            }
+          }
+
+          this.sarvamWs.onerror = (error) => {
+            console.log(`❌ [SARVAM-WS] WebSocket error for ${endpoint}:`, error.message)
+            this.sarvamReady = false
+          }
+
+          this.sarvamWs.onclose = () => {
+            console.log(`🔌 [SARVAM-WS] WebSocket closed for ${endpoint}`)
+            this.sarvamReady = false
+          }
+
+          // Wait for connection with timeout
+          await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              if (!this.sarvamReady) {
+                this.sarvamWs.close()
+                reject(new Error(`Connection timeout for ${endpoint}`))
+              }
+            }, 5000)
+
+            this.sarvamWs.onopen = () => {
+              clearTimeout(timeout)
+              resolve()
+            }
+
+            this.sarvamWs.onerror = (error) => {
+              clearTimeout(timeout)
+              reject(error)
+            }
+          })
+
+          if (connected) {
+            console.log(`✅ [SARVAM-WS] Successfully connected to ${endpoint}`)
+            break
+          }
+
+        } catch (error) {
+          console.log(`❌ [SARVAM-WS] Failed to connect to ${endpoint}:`, error.message)
+          if (this.sarvamWs) {
+            this.sarvamWs.close()
+          }
+        }
+      }
+
+      if (!connected) {
+        console.log("⚠️ [SARVAM-WS] All WebSocket endpoints failed, falling back to API")
+        this.useWebSocket = false
+      }
+
+    } catch (error) {
+      console.log("❌ [SARVAM-WS] Connection error:", error.message)
+      this.sarvamReady = false
+      this.useWebSocket = false
+    }
+  }
+
+  // Handle messages from Sarvam WebSocket
+  handleSarvamMessage(data) {
+    if (data.type === "audio") {
+      const audioBase64 = data.audio
+      if (audioBase64 && !this.isInterrupted) {
+        this.streamAudioOptimizedForSIP(audioBase64)
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+        this.totalAudioBytes += audioBuffer.length
+      }
+    } else if (data.type === "error") {
+      console.log("❌ [SARVAM-WS] Sarvam error:", data.message)
+    } else if (data.type === "end") {
+      console.log("✅ [SARVAM-WS] Audio generation completed")
+      this.isProcessing = false
+    }
+  }
+
+  // Process queued audio after connection
+  processQueuedAudio() {
+    if (this.audioQueue.length > 0 && this.sarvamReady) {
+      const text = this.audioQueue.shift()
+      this.sendTextToSarvam(text)
+    }
+  }
+
+  // Send text to Sarvam WebSocket
+  sendTextToSarvam(text) {
+    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
+      const textMessage = {
+        type: "text",
+        text: text
+      }
+      this.sarvamWs.send(JSON.stringify(textMessage))
+      console.log("📤 [SARVAM-WS] Text sent:", text.substring(0, 50) + "...")
+    }
+  }
+
+  // Fallback to API method
+  async synthesizeWithAPI(text) {
+    const timer = createTimer("TTS_API_FALLBACK")
     try {
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -1498,7 +1656,6 @@ class SimplifiedSarvamTTSProcessor {
           pace: 1.0,
           loudness: 1.0,
           speech_sample_rate: 8000,
-          enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
@@ -1506,7 +1663,7 @@ class SimplifiedSarvamTTSProcessor {
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+          console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - Error: ${response.status}`)
           throw new Error(`Sarvam API error: ${response.status}`)
         }
         return
@@ -1517,19 +1674,81 @@ class SimplifiedSarvamTTSProcessor {
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
+          console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - No audio data received`)
           throw new Error("No audio data received from Sarvam API")
         }
         return
       }
 
-      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
+      console.log(`🕒 [TTS-API-FALLBACK] ${timer.end()}ms - Audio generated via API`)
 
       if (!this.isInterrupted) {
         await this.streamAudioOptimizedForSIP(audioBase64)
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
       }
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - Error: ${error.message}`)
+        throw error
+      }
+    }
+  }
+
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
+
+    const timer = createTimer("TTS_SYNTHESIS")
+
+    try {
+      // Try WebSocket first if enabled
+      if (this.useWebSocket) {
+        // Connect to Sarvam WebSocket if not connected
+        if (!this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
+          await this.connectToSarvam()
+          
+          // Wait for connection to be ready
+          let attempts = 0
+          while (!this.sarvamReady && attempts < 10) {
+            await new Promise(resolve => setTimeout(resolve, 100))
+            attempts++
+          }
+          
+          if (!this.sarvamReady) {
+            console.log("⚠️ [TTS-SYNTHESIS] WebSocket failed, falling back to API")
+            this.useWebSocket = false
+          }
+        }
+
+        if (this.sarvamReady) {
+          this.isProcessing = true
+          console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Starting WebSocket synthesis`)
+
+          // Send text to Sarvam
+          this.sendTextToSarvam(text)
+
+          // Wait for processing to complete
+          let waitAttempts = 0
+          while (this.isProcessing && waitAttempts < 100 && !this.isInterrupted) {
+            await new Promise(resolve => setTimeout(resolve, 50))
+            waitAttempts++
+          }
+
+          if (this.isInterrupted) {
+            console.log("⚠️ [TTS-SYNTHESIS] Synthesis interrupted")
+            return
+          }
+
+          console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - WebSocket synthesis completed`)
+          return
+        }
+      }
+
+      // Fallback to API
+      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Using API fallback`)
+      await this.synthesizeWithAPI(text)
+      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - API synthesis completed`)
+
     } catch (error) {
       if (!this.isInterrupted) {
         console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
@@ -1594,6 +1813,9 @@ class SimplifiedSarvamTTSProcessor {
   getStats() {
     return {
       totalAudioBytes: this.totalAudioBytes,
+      sarvamReady: this.sarvamReady,
+      isProcessing: this.isProcessing,
+      useWebSocket: this.useWebSocket
     }
   }
 }
@@ -2111,7 +2333,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 ta: `நன்றி! நான் உங்கள் Gmail ${extractedEmail} க்கு Google Meet இணைப்பை அனுப்பியுள்ளேன். நீங்கள் விரைவில் மின்னஞ்சலைப் பெறுவீர்கள்.`,
                 te: `ధన్యవాదాలు! నేను మీ Gmail ${extractedEmail} కి Google Meet లింక్ పంపాను. మీరు త్వరలో ఇమెయిల్ అందుకుంటారు.`,
                 mr: `धन्यवाद! मी तुमच्या Gmail ${extractedEmail} वर Google Meet लिंक पाठवला आहे. तुम्हाला लवकरच ईमेल मिळेल.`,
-                gu: `આભાર! મેં તમારા Gmail ${extractedEmail} પર Google Meet લિંક મોકલી છે. તમને ટૂંક સમયમાં ઇમેઇલ મળશે.`
+                gu: `આભાર! મેં તમારા Gmail ${extractedEmail} પર Google Meet લિંક મોકલી છે. તમને ટૂંક સમયમાં ઇમેઇલ मળશે.`
               }
               
               const successMessage = successMessages[detectedLanguage] || successMessages.en
