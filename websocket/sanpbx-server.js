@@ -49,7 +49,7 @@ const VALID_SARVAM_VOICES = new Set([
   "abhilash",
   "anushka",
   "meera",
-  "pavithra",
+  "meera",
   "maitreyi",
   "arvind",
   "amol",
@@ -67,12 +67,12 @@ const VALID_SARVAM_VOICES = new Set([
   "hitesh",
 ])
 
-const getValidSarvamVoice = (voiceSelection = "pavithra") => {
+const getValidSarvamVoice = (voiceSelection = "meera") => {
   const normalized = (voiceSelection || "").toString().trim().toLowerCase()
   if (VALID_SARVAM_VOICES.has(normalized)) {
     return normalized
   }
-  return "pavithra" // Default fallback
+  return "meera" // Default fallback
 }
 
 // -------- Base64 helpers --------
@@ -351,7 +351,7 @@ class SanPbxCallSession extends EventEmitter {
   async convertToSpeech(text) {
     try {
       const sarvamLanguage = getSarvamLanguage(this.detectedLanguage)
-      const voice = getValidSarvamVoice("pavithra")
+      const voice = getValidSarvamVoice("meera")
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
