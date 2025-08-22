@@ -197,7 +197,7 @@ class SanPbxCallSession extends EventEmitter {
       const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
       deepgramUrl.searchParams.append("sample_rate", "8000")
       deepgramUrl.searchParams.append("channels", "1")
-      deepgramUrl.searchParams.append("encoding", "mulaw") // Use mulaw like SIP for base64 audio
+      deepgramUrl.searchParams.append("encoding", "linear16")
       deepgramUrl.searchParams.append("model", "nova-2")
       deepgramUrl.searchParams.append("language", deepgramLanguage)
       deepgramUrl.searchParams.append("interim_results", "true")
@@ -448,17 +448,9 @@ class SanPbxCallSession extends EventEmitter {
       const audioMessage = {
         event: "media",
         streamId: this.streamId,
-        channelId: this.channelId,
-        callId: this.callId,
         media: {
           payload: normalizedAudio,
-          format: {
-            encoding: "base64",
-            sampleRate: 8000,
-            channels: 1
-          }
         },
-        timestamp: new Date().toISOString()
       }
 
       this.ws.send(JSON.stringify(audioMessage))
