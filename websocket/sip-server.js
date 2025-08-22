@@ -320,6 +320,9 @@ class SipCallSession extends EventEmitter {
     this.deepgramReady = false
     this.deepgramAudioQueue = []
 
+    // Format logging
+    this.mediaFormatLogged = false
+
     console.log(`📞 [SIP-SESSION] New session created: ${this.callSid}`)
 
     this.connectToDeepgram()
@@ -418,7 +421,24 @@ class SipCallSession extends EventEmitter {
 
   async processAudioChunk(audioData) {
     try {
-      // Convert base64 µ-law to linear16 for Deepgram
+      // Detect/log format once per session (avoid log spam)
+      if (!this.mediaFormatLogged) {
+        const looksBase64 = typeof audioData === "string" && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(audioData)
+        if (looksBase64) {
+          try {
+            const testBuf = Buffer.from(audioData, "base64")
+            console.log(`🔎 [SIP-MEDIA] Payload appears base64. encoded_len=${audioData.length}, decoded_bytes=${testBuf.length}`)
+          } catch (e) {
+            console.log(`🔎 [SIP-MEDIA] Payload looked like base64 but failed to decode: ${e.message}`)
+          }
+        } else {
+          const t = typeof audioData
+          console.log(`🔎 [SIP-MEDIA] Payload not base64. typeof=${t}, preview="${String(audioData).slice(0, 40)}"`)
+        }
+        this.mediaFormatLogged = true
+      }
+
+      // Forward incoming µ-law (base64) to Deepgram
       const audioBuffer = Buffer.from(audioData, "base64")
 
       if (this.deepgramReady && this.deepgramWs) {
