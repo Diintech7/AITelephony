@@ -1382,7 +1382,7 @@ const handleExternalCallDisconnection = async (streamSid, reason = 'external_dis
 }
 
 // WhatsApp Template Module URL
-const WHATSAPP_TEMPLATE_URL = "https://whatsapp-template-module.onrender.com"
+const WHATSAPP_TEMPLATE_URL = "https://whatsapp-template-module.onrender.com/api/whatsapp/send-info"
 
 // Utility function to normalize Indian phone numbers to E.164 format
 const normalizeToE164India = (phoneNumber) => {
