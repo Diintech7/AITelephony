@@ -357,6 +357,8 @@ class SanPbxCallSession extends EventEmitter {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          // Prefer x-api-key; some tenants also accept API-Subscription-Key
+          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
@@ -366,13 +368,16 @@ class SanPbxCallSession extends EventEmitter {
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 44100, // Match SanIPPBX format
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
       })
 
       if (!response.ok) {
+        const errorText = await response.text().catch(() => "")
+        console.log(`❌ [SANPBX-TTS] Sarvam error ${response.status}: ${errorText}`)
         throw new Error(`Sarvam API error: ${response.status}`)
       }
 
