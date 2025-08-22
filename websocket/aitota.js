@@ -1,5 +1,4 @@
 const WebSocket = require("ws")
-const { spawn } = require("child_process")
 require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
@@ -1468,41 +1467,7 @@ class SimplifiedSarvamTTSProcessor {
     this.useWebSocket = true // Flag to control WebSocket vs API usage
   }
 
-  // Transcode MP3 buffer to PCM16 mono 8k using ffmpeg
-  async transcodeMp3ToPcm16(mp3Buffer) {
-    return new Promise((resolve, reject) => {
-      try {
-        const ffmpegArgs = [
-          "-hide_banner", "-loglevel", "error",
-          "-f", "mp3",
-          "-i", "pipe:0",
-          "-ac", "1",
-          "-ar", "8000",
-          "-f", "s16le",
-          "pipe:1",
-        ]
 
-        const ff = spawn("ffmpeg", ffmpegArgs)
-        const chunks = []
-
-        ff.stdout.on("data", (chunk) => chunks.push(chunk))
-        ff.stderr.on("data", () => {})
-        ff.on("error", (err) => reject(err))
-        ff.on("close", (code) => {
-          if (code === 0) {
-            resolve(Buffer.concat(chunks))
-          } else {
-            reject(new Error(`ffmpeg exited with code ${code}`))
-          }
-        })
-
-        ff.stdin.write(mp3Buffer)
-        ff.stdin.end()
-      } catch (e) {
-        reject(e)
-      }
-    })
-  }
 
   interrupt() {
     this.isInterrupted = true
@@ -1546,6 +1511,7 @@ class SimplifiedSarvamTTSProcessor {
           speech_sample_rate: 8000,
           enable_preprocessing: true,
           model: "bulbul:v1",
+          output_audio_codec: "mp3", // Reverted to MP3 for Sarvam API test
         }),
       })
 
@@ -1688,6 +1654,7 @@ class SimplifiedSarvamTTSProcessor {
           speech_sample_rate: 8000,
           enable_preprocessing: true,
           model: "bulbul:v1",
+          output_audio_codec: "mp3", // Reverted to MP3 as per user's request
         }),
       })
 
@@ -1790,33 +1757,26 @@ class SimplifiedSarvamTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
-    const inputMp3Buffer = Buffer.from(audioBase64, "base64")
+    const audioBuffer = Buffer.from(audioBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
-    
-    let pcmBuffer
-    try {
-      pcmBuffer = await this.transcodeMp3ToPcm16(inputMp3Buffer)
-    } catch (err) {
-      // If transcoding fails, stop to avoid sending unsupported MP3 to SIP
-      this.currentAudioStreaming = null
-      return
-    }
 
-    const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    // For MP3, we use a fixed chunk size and delay, as SIP is now expected to handle MP3 chunks
+    const MP3_CHUNK_SIZE = 1600; // A common audio packet size, now for MP3 data
+    const MP3_CHUNK_DELAY_MS = 40; // Simulate 40ms packet interval
+
+    console.log(`🎵 [AUDIO-STREAM] Starting SIP audio stream (MP3): ${audioBuffer.length} bytes`)
 
     let position = 0
     let chunkIndex = 0
     let successfulChunks = 0
 
-    while (position < pcmBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-      const remaining = pcmBuffer.length - position
-      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-      const chunk = pcmBuffer.slice(position, position + chunkSize)
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = audioBuffer.length - position;
+      const chunkSize = Math.min(MP3_CHUNK_SIZE, remaining);
+      const chunk = audioBuffer.slice(position, position + chunkSize)
 
+      // Create SIP media message with MP3 payload
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
@@ -1828,24 +1788,25 @@ class SimplifiedSarvamTTSProcessor {
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
-          successfulChunks++
+          successfulChunks++;
+          console.log(`🎵 [AUDIO-STREAM] Sent MP3 chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / audioBuffer.length) * 100)}% complete`)
         } catch (error) {
+          console.log(`❌ [AUDIO-STREAM] Error sending MP3 chunk ${chunkIndex + 1}: ${error.message}`)
           break
         }
       } else {
+        console.log(`⚠️ [AUDIO-STREAM] WebSocket not ready or interrupted, stopping MP3 stream`)
         break
       }
 
-      if (position + chunkSize < pcmBuffer.length && !this.isInterrupted) {
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+        await new Promise((resolve) => setTimeout(resolve, MP3_CHUNK_DELAY_MS))
       }
 
       position += chunkSize
       chunkIndex++
     }
-
+    console.log(`✅ [AUDIO-STREAM] MP3 stream completed: ${successfulChunks} chunks sent, ${Math.round((position / audioBuffer.length) * 100)}% of audio streamed`)
     this.currentAudioStreaming = null
   }
 
