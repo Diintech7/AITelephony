@@ -196,6 +196,16 @@ class SanPbxCallSession extends EventEmitter {
     this.deepgramReady = false
     this.deepgramAudioQueue = []
 
+    // Audio packet statistics
+    this.audioPacketStats = {
+      totalPackets: 0,
+      totalBytes: 0,
+      averagePacketSize: 0,
+      firstPacketTime: null,
+      lastPacketTime: null,
+      packetSizes: []
+    }
+
     console.log(`📞 [SANPBX-SESSION] New session created: ${this.callId} | Stream: ${this.streamId}`)
     console.log(`📞 [SANPBX-SESSION] Caller: ${this.callerId} | Direction: ${this.callDirection} | DID: ${this.did}`)
   }
@@ -278,11 +288,31 @@ class SanPbxCallSession extends EventEmitter {
         console.log(`   - Data length: ${audioData.length}`)
         console.log(`   - Is base64: ${isProbablyBase64(audioData)}`)
         console.log(`   - Sample data: ${audioData.substring(0, 50)}...`)
+        
+        // Additional detailed analysis
+        if (audioData.length > 0) {
+          console.log(`   - First 10 characters: "${audioData.substring(0, 10)}"`)
+          console.log(`   - Contains special chars: ${/[^A-Za-z0-9+/=]/.test(audioData)}`)
+          console.log(`   - Contains padding: ${audioData.includes('=')}`)
+          console.log(`   - Padding count: ${(audioData.match(/=/g) || []).length}`)
+        }
+        
         this.audioFormatLogged = true
       }
 
       // Ensure audioData is base64
       const normalizedAudioData = normalizeBase64String(audioData)
+      
+      // Log normalization details
+      if (normalizedAudioData !== audioData && !this.normalizationLogged) {
+        console.log(`🔁 [SANPBX-AUDIO] Base64 normalization applied:`)
+        console.log(`   - Original: ${audioData.substring(0, 30)}...`)
+        console.log(`   - Normalized: ${normalizedAudioData.substring(0, 30)}...`)
+        this.normalizationLogged = true
+      }
+      
+      // Update audio packet statistics
+      this.updateAudioPacketStats(audioData)
       
       // SanIPPBX sends LINEAR16 at 44.1kHz, convert to 8kHz for Deepgram
       const audioBuffer = Buffer.from(normalizedAudioData, "base64")
@@ -294,6 +324,10 @@ class SanPbxCallSession extends EventEmitter {
         console.log(`   - Original buffer size: ${audioBuffer.length} bytes`)
         console.log(`   - Resampled buffer size: ${resampledBuffer.length} bytes`)
         console.log(`   - Resampled base64 length: ${resampledBuffer.toString('base64').length}`)
+        console.log(`   - Estimated samples (original): ${Math.floor(audioBuffer.length / 2)}`)
+        console.log(`   - Estimated samples (resampled): ${Math.floor(resampledBuffer.length / 2)}`)
+        console.log(`   - Estimated duration (original): ${(audioBuffer.length / 2 / 44100 * 1000).toFixed(2)}ms`)
+        console.log(`   - Estimated duration (resampled): ${(resampledBuffer.length / 2 / 8000 * 1000).toFixed(2)}ms`)
         this.processedFormatLogged = true
       }
 
@@ -524,8 +558,76 @@ class SanPbxCallSession extends EventEmitter {
     return prompts[language] || prompts["en"]
   }
 
+  updateAudioPacketStats(audioData) {
+    const now = new Date()
+    const packetSize = audioData.length
+    
+    this.audioPacketStats.totalPackets++
+    this.audioPacketStats.totalBytes += packetSize
+    this.audioPacketStats.packetSizes.push(packetSize)
+    
+    if (!this.audioPacketStats.firstPacketTime) {
+      this.audioPacketStats.firstPacketTime = now
+    }
+    this.audioPacketStats.lastPacketTime = now
+    
+    // Keep only last 100 packet sizes for average calculation
+    if (this.audioPacketStats.packetSizes.length > 100) {
+      this.audioPacketStats.packetSizes.shift()
+    }
+    
+    this.audioPacketStats.averagePacketSize = Math.round(
+      this.audioPacketStats.packetSizes.reduce((sum, size) => sum + size, 0) / 
+      this.audioPacketStats.packetSizes.length
+    )
+    
+    // Log statistics every 50 packets
+    if (this.audioPacketStats.totalPackets % 50 === 0) {
+      this.logAudioPacketStats()
+    }
+  }
+
+  logAudioPacketStats() {
+    const duration = this.audioPacketStats.lastPacketTime - this.audioPacketStats.firstPacketTime
+    const durationSeconds = duration / 1000
+    
+    console.log(`📊 [SANPBX-STATS] Audio packet statistics:`)
+    console.log(`   - Total packets: ${this.audioPacketStats.totalPackets}`)
+    console.log(`   - Total bytes: ${this.audioPacketStats.totalBytes}`)
+    console.log(`   - Average packet size: ${this.audioPacketStats.averagePacketSize} bytes`)
+    console.log(`   - Duration: ${durationSeconds.toFixed(2)} seconds`)
+    console.log(`   - Packet rate: ${(this.audioPacketStats.totalPackets / durationSeconds).toFixed(2)} packets/sec`)
+    console.log(`   - Data rate: ${(this.audioPacketStats.totalBytes / durationSeconds).toFixed(2)} bytes/sec`)
+    
+    // Show packet size distribution
+    const sizeRanges = {
+      '0-100': 0,
+      '101-500': 0,
+      '501-1000': 0,
+      '1001-2000': 0,
+      '2000+': 0
+    }
+    
+    this.audioPacketStats.packetSizes.forEach(size => {
+      if (size <= 100) sizeRanges['0-100']++
+      else if (size <= 500) sizeRanges['101-500']++
+      else if (size <= 1000) sizeRanges['501-1000']++
+      else if (size <= 2000) sizeRanges['1001-2000']++
+      else sizeRanges['2000+']++
+    })
+    
+    console.log(`   - Packet size distribution:`, sizeRanges)
+  }
+
   terminate(reason = "normal_termination") {
     console.log(`🛑 [SANPBX-SESSION] Terminating session ${this.callId}: ${reason}`)
+    
+    // Log final audio statistics
+    if (this.audioPacketStats.totalPackets > 0) {
+      console.log(`📊 [SANPBX-STATS] Final audio statistics for session ${this.callId}:`)
+      this.logAudioPacketStats()
+    }
+    
     this.isActive = false
     this.isAnswered = false
 
@@ -693,7 +795,7 @@ async function handleAnswer(ws, data) {
 
   // Send initial greeting with enhanced message
   try {
-    const greetingMessage = "Hello! Welcome to our AI assistant. I'm here to help you with any questions or assistance you need. Please speak clearly and I'll do my best to assist you. How can I help you today?"
+    const greetingMessage = "Hello! Welcome to our AI assistant.?"
     console.log(`🎤 [SANPBX-ANSWER] Sending first message: ${greetingMessage}`)
     await session.convertToSpeech(greetingMessage)
   } catch (error) {
@@ -724,6 +826,22 @@ async function handleMedia(ws, data) {
       console.log(`   - Channels: ${media.format?.channels || 'unknown'}`)
       console.log(`   - Payload type: ${typeof media.payload}`)
       console.log(`   - Payload length: ${media.payload.length}`)
+      
+      // Additional media packet analysis
+      console.log(`   - Full media object keys: ${Object.keys(media).join(', ')}`)
+      console.log(`   - Format object keys: ${media.format ? Object.keys(media.format).join(', ') : 'none'}`)
+      
+      // Check for additional metadata
+      if (media.metadata) {
+        console.log(`   - Metadata: ${JSON.stringify(media.metadata)}`)
+      }
+      if (media.timestamp) {
+        console.log(`   - Timestamp: ${media.timestamp}`)
+      }
+      if (media.sequence) {
+        console.log(`   - Sequence: ${media.sequence}`)
+      }
+      
       session.mediaFormatLogged = true
     }
 
