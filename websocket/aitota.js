@@ -81,12 +81,12 @@ const FRANC_TO_SUPPORTED = {
   por: "en",
 };
 
-const getSarvamLanguage = (detectedLang, def = "hi") => {
+const getSarvamLanguage = (detectedLang, def = "en") => {
   const lang = (detectedLang || def).toLowerCase();
   return LANGUAGE_MAPPING[lang] || "en-IN";
 };
 
-const getDeepgramLanguage = (detectedLang, def = "hi") => {
+const getDeepgramLanguage = (detectedLang, def = "en") => {
   const lang = (detectedLang || def).toLowerCase();
   if (lang === "hi") return "hi";
   if (lang === "en") return "en-IN";
@@ -427,11 +427,10 @@ async function streamOpenAIToSarvam(userMessage, conversationHistory, agentConfi
       try {
         const json = JSON.parse(payload);
         const delta = json.choices?.[0]?.delta?.content;
-        if (delta && delta.trim().length > 0) {
-            fullText += delta
-            ttsProcessor.sendTextChunk(delta)
-          }
-          
+        if (delta) {
+          fullText += delta;
+          await ttsProcessor.sendTextChunk(delta);
+        }
       } catch (e) {
         // ignore parse noise lines
       }
