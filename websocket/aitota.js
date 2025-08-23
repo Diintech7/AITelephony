@@ -343,11 +343,11 @@ class SimplifiedSarvamTTSProcessor {
           // Send simplified config message
           const configMessage = {
             type: "config",
-            data: {
-              target_language_code: this.sarvamLanguage,
-              speaker: this.voice,
-              speech_sample_rate: 8000,
-            },
+            target_language_code: this.sarvamLanguage,
+            speaker: this.voice,
+            speech_sample_rate: 8000,
+            output_audio_codec: "linear16",
+            output_audio_bitrate: "128k"
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
           console.log("Sarvam TTS config sent.");
@@ -436,10 +436,10 @@ class SimplifiedSarvamTTSProcessor {
       // Small delay to ensure WebSocket is ready
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Send text message with correct format
+      // Send text message with correct format for Sarvam
       const textMessage = {
         type: "text",
-        data: text.trim(),
+        text: text.trim()
       };
       this.sarvamWs.send(JSON.stringify(textMessage));
       
