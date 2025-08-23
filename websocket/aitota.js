@@ -209,13 +209,12 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
   }
 }
 
-// OpenAI processing with streaming
-const processWithOpenAIStream = async (
+// OpenAI processing
+const processWithOpenAI = async (
   userMessage,
   conversationHistory,
   detectedLanguage,
   agentConfig,
-  onChunk,
 ) => {
   const timer = createTimer("LLM_PROCESSING")
 
@@ -245,9 +244,8 @@ const processWithOpenAIStream = async (
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 100,
+        max_tokens: 50,
         temperature: 0.3,
-        stream: true, // Enable streaming
       }),
     })
 
@@ -256,41 +254,10 @@ const processWithOpenAIStream = async (
       return null
     }
 
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let fullResponse = ""
-    let buffer = ""
+    const data = await response.json()
+    const fullResponse = data.choices[0]?.message?.content?.trim()
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() // Keep incomplete line in buffer
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6)
-          if (data === '[DONE]') {
-            console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Stream completed`)
-            return fullResponse
-          }
-
-          try {
-            const parsed = JSON.parse(data)
-            const chunk = parsed.choices[0]?.delta?.content
-            if (chunk) {
-              fullResponse += chunk
-              onChunk(chunk) // Send chunk immediately to TTS
-            }
-          } catch (e) {
-            // Ignore parsing errors for incomplete chunks
-          }
-        }
-      }
-    }
-
+    console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
     return fullResponse
   } catch (error) {
     console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
@@ -298,7 +265,7 @@ const processWithOpenAIStream = async (
   }
 }
 
-// Simplified TTS processor using Sarvam WebSocket with reduced latency
+// Simplified TTS processor using Sarvam WebSocket
 class SimplifiedSarvamTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language
@@ -311,7 +278,6 @@ class SimplifiedSarvamTTSProcessor {
     this.audioQueue = [] // Queue for audio buffers received from Sarvam
     this.isStreamingToSIP = false // Flag to prevent multiple streaming loops
     this.totalAudioBytes = 0
-    this.currentText = "" // Current text being processed
   }
 
   async connectSarvamWs() {
@@ -322,42 +288,41 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("SARVAM_WS_CONNECT");
     try {
       const sarvamUrl = new URL("wss://api.sarvam.ai/text-to-speech/ws");
-      sarvamUrl.searchParams.append("model", "bulbul"); // Try without version
+      sarvamUrl.searchParams.append("model", "bulbul:v2"); 
 
-      // Pass API key as subprotocol (this is the correct method for Sarvam)
+      // Pass API key as a subprotocol
       this.sarvamWs = new WebSocket(sarvamUrl.toString(), [`api-subscription-key.${API_KEYS.sarvam}`]);
 
       return new Promise((resolve, reject) => {
-        let connectionTimeout;
-
         this.sarvamWs.onopen = () => {
           this.sarvamWsConnected = true;
-          console.log(`�� [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected.`);
+          console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected.`);
 
-          // Set connection timeout
-          connectionTimeout = setTimeout(() => {
-            console.log("Sarvam WS connection established, proceeding without config ack");
-            resolve(true);
-          }, 1000); // Reduced timeout to 1 second
-
-          // Send simplified config message
+          // Send initial config message
           const configMessage = {
             type: "config",
             data: {
-              target_language_code: "hi-IN",
-              speaker: "anushka"
-            }
+              target_language_code: this.sarvamLanguage,
+              speaker: this.voice,
+              pitch: 0.5,
+              pace: 1.0,
+              loudness: 1.0, 
+              enable_preprocessing: false,
+              output_audio_codec: "linear16", // Crucial for SIP/Twilio
+              output_audio_bitrate: "128k", // For 8000 Hz linear16
+              speech_sample_rate: 8000, // Crucial for SIP/Twilio
+              min_buffer_size: 50, // As per HTML example
+              max_chunk_length: 150, // As per HTML example
+            },
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
           console.log("Sarvam TTS config sent.");
-        
+          resolve(true);
         };
 
         this.sarvamWs.onmessage = async (event) => {
           try {
             const response = JSON.parse(event.data);
-            console.log("Sarvam WS message received:", response.type);
-            
             if (response.type === "audio" && response.data?.audio) {
               const audioBuffer = Buffer.from(response.data.audio, "base64");
               this.audioQueue.push(audioBuffer);
@@ -366,17 +331,7 @@ class SimplifiedSarvamTTSProcessor {
                 this.startStreamingToSIP();
               }
             } else if (response.type === "error") {
-              console.error(`❌ Sarvam TTS WS Error: ${response.data?.message || response.message} (Code: ${response.data?.code || response.code})`);
-              clearTimeout(connectionTimeout);
-              reject(new Error(`Sarvam error: ${response.data?.message || response.message}`));
-            } else if (response.type === "config_ack") {
-              console.log("✅ Sarvam TTS config acknowledged");
-              clearTimeout(connectionTimeout);
-              resolve(true);
-            } else if (response.type === "ready") {
-              console.log("✅ Sarvam TTS ready for text input");
-              clearTimeout(connectionTimeout);
-              resolve(true);
+              console.error(`❌ Sarvam TTS WS Error: ${response.data.message} (Code: ${response.data.code})`);
             }
           } catch (parseError) {
             console.error("Error parsing Sarvam WS message:", parseError);
@@ -385,14 +340,12 @@ class SimplifiedSarvamTTSProcessor {
 
         this.sarvamWs.onerror = (error) => {
           this.sarvamWsConnected = false;
-          clearTimeout(connectionTimeout);
           console.error(`❌ [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket error:`, error.message);
           reject(error);
         };
 
         this.sarvamWs.onclose = () => {
           this.sarvamWsConnected = false;
-          clearTimeout(connectionTimeout);
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket closed.`);
         };
       });
@@ -402,27 +355,9 @@ class SimplifiedSarvamTTSProcessor {
     }
   }
 
-  // Process text chunks as they arrive from LLM
-  async processTextChunk(chunk) {
-    this.currentText += chunk;
-    
-    // Send text to Sarvam when we have enough content or hit punctuation
-    if (this.currentText.length >= 20 || /[.!?।]/.test(chunk)) {
-      await this.synthesizeText(this.currentText);
-      this.currentText = "";
-    }
-  }
-
-  // Finalize any remaining text
-  async finalizeText() {
-    if (this.currentText.trim()) {
-      await this.synthesizeText(this.currentText);
-      this.currentText = "";
-    }
-  }
-
-  async synthesizeText(text) {
-    if (!text.trim()) return;
+  async synthesizeAndStream(text) {
+    this.audioQueue = []; // Clear queue for new synthesis
+    this.isStreamingToSIP = false; // Reset streaming flag
 
     const timer = createTimer("TTS_SYNTHESIS_WS");
 
@@ -433,25 +368,23 @@ class SimplifiedSarvamTTSProcessor {
         return;
       }
 
-      // Small delay to ensure WebSocket is ready
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      // Send text message with correct format for Sarvam
       const textMessage = {
         type: "text",
-        data: text.trim()
+        data: { text: text },
       };
       this.sarvamWs.send(JSON.stringify(textMessage));
       
-      // Send flush message to signal end of text
-      const flushMessage = {
-        type: "flush"
-      };
+      // Send a flush message to signal end of utterance to Sarvam TTS
+      const flushMessage = { type: "flush" };
       this.sarvamWs.send(JSON.stringify(flushMessage));
       
-      console.log(`🕒 [TTS-SYNTHESIS-WS] ${timer.end()}ms - Text and flush sent to Sarvam WS: "${text.trim()}"`);
+      console.log(`🕒 [TTS-SYNTHESIS-WS] ${timer.end()}ms - Text and flush signal sent to Sarvam WS.`);
+
+      // The actual streaming to SIP will be handled by startStreamingToSIP
+      // which is triggered by onmessage from sarvamWs
     } catch (error) {
       console.error(`❌ [TTS-SYNTHESIS-WS] ${timer.end()}ms - Error sending text to Sarvam WS: ${error.message}`);
+      throw error;
     }
   }
 
@@ -465,7 +398,7 @@ class SimplifiedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000;
     const BYTES_PER_SAMPLE = 2; // linear16 is 16-bit, so 2 bytes
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS); // Reduced to 20ms chunks for lower latency
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS); // 40ms chunks for SIP
 
     while (this.audioQueue.length > 0) {
       const audioBuffer = this.audioQueue.shift(); // Get the next audio chunk
@@ -498,10 +431,9 @@ class SimplifiedSarvamTTSProcessor {
           return;
         }
 
-        // Reduced delay for lower latency
         if (position + chunkSize < audioBuffer.length) {
           const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-          const delayMs = Math.max(chunkDurationMs - 1, 5); // Reduced delay
+          const delayMs = Math.max(chunkDurationMs - 2, 10); // Small delay to prevent buffer underrun
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
 
@@ -557,7 +489,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "200") // Reduced for faster response
+        deepgramUrl.searchParams.append("endpointing", "300")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -636,26 +568,20 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         }
 
-        // Use the existing currentTTS instance or create new one
-        if (!currentTTS) {
-          currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid)
-        }
-
-        // Process with streaming LLM and send chunks directly to TTS
-        const response = await processWithOpenAIStream(
+        const response = await processWithOpenAI(
           text,
           conversationHistory,
           detectedLanguage,
           agentConfig,
-          async (chunk) => {
-            // Send each chunk immediately to TTS for lower latency
-            await currentTTS.processTextChunk(chunk)
-          }
         )
 
         if (response) {
-          // Finalize any remaining text
-          await currentTTS.finalizeText()
+          // Use the existing currentTTS instance or create new one
+          if (!currentTTS) {
+            currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid)
+          }
+          
+          await currentTTS.synthesizeAndStream(response)
 
           conversationHistory.push(
             { role: "user", content: text },
@@ -698,7 +624,7 @@ const setupUnifiedVoiceServer = (wss) => {
             const greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
 
             // Synthesize greeting via TTS processor
-            await currentTTS.synthesizeText(greeting)
+            await currentTTS.synthesizeAndStream(greeting)
             break
           }
 
