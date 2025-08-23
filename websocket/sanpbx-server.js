@@ -801,6 +801,7 @@ async function handleAnswer(ws, data) {
 
 async function handleMedia(ws, data) {
   console.log(`🎵 [SANPBX-MEDIA] === MEDIA EVENT RECEIVED ===`)
+  console.log(data)
   
   const { streamId, media } = data
   const callId = data.callId
@@ -811,6 +812,7 @@ async function handleMedia(ws, data) {
     callId,
     mediaKeys: media ? Object.keys(media) : 'no media',
     hasPayload: media && media.payload ? 'yes' : 'no',
+    payload: media && media.payload ? media.payload : 'no payload',
     payloadLength: media && media.payload ? media.payload.length : 0
   })
 
