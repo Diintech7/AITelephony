@@ -39,7 +39,7 @@ const createTimer = (label) => {
 
 // Enhanced language mappings with Indian locales
 const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
+  hi: "en-IN",
   en: "en-IN",
   bn: "bn-IN",
   te: "te-IN",
@@ -83,7 +83,7 @@ const FRANC_TO_SUPPORTED = {
 
 const getSarvamLanguage = (detectedLang, def = "hi") => {
   const lang = (detectedLang || def).toLowerCase();
-  return LANGUAGE_MAPPING[lang] || "hi-IN";
+  return LANGUAGE_MAPPING[lang] || "en-IN";
 };
 
 const getDeepgramLanguage = (detectedLang, def = "hi") => {
