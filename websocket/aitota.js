@@ -427,10 +427,11 @@ async function streamOpenAIToSarvam(userMessage, conversationHistory, agentConfi
       try {
         const json = JSON.parse(payload);
         const delta = json.choices?.[0]?.delta?.content;
-        if (delta) {
-          fullText += delta;
-          await ttsProcessor.sendTextChunk(delta);
-        }
+        if (delta && delta.trim().length > 0) {
+            fullText += delta
+            ttsProcessor.sendTextChunk(delta)
+          }
+          
       } catch (e) {
         // ignore parse noise lines
       }
