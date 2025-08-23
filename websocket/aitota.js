@@ -350,7 +350,7 @@ class SimplifiedSarvamTTSProcessor {
               pace: 1.0,
               loudness: 1.0, 
               enable_preprocessing: false,
-              output_audio_codec: "linear16", // Crucial for SIP/Twilio
+              output_audio_codec: "mp3", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
               min_buffer_size: 50, // As per HTML example
