@@ -19,6 +19,7 @@
     "dotenv": "^17.2.0",
     "events": "^3.3.0",
     "express": "^5.1.0",
+    "ffmpeg": "^0.0.4",
     "franc": "^6.2.0",
     "http": "^0.0.1-security",
     "langdetect": "^0.2.1",
