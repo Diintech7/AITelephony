@@ -322,7 +322,7 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("SARVAM_WS_CONNECT");
     try {
       const sarvamUrl = new URL("wss://api.sarvam.ai/text-to-speech/ws");
-      sarvamUrl.searchParams.append("model", "bulbul:v2"); 
+      sarvamUrl.searchParams.append("model", "bulbul"); // Try without version
 
       // Pass API key as a subprotocol
       this.sarvamWs = new WebSocket(sarvamUrl.toString(), [`api-subscription-key.${API_KEYS.sarvam}`]);
@@ -343,11 +343,19 @@ class SimplifiedSarvamTTSProcessor {
           // Send simplified config message
           const configMessage = {
             type: "config",
-            target_language_code: "hi-IN",
-            speaker: "anushka",
-            speech_sample_rate: 8000,
-            output_audio_codec: "linear16",
-            output_audio_bitrate: "128k"
+            data: {
+                target_language_code: "hi-IN",
+                speaker: "anushka",
+                pitch: 0.5,
+                pace: 1.0,
+                loudness: 1.0, 
+                enable_preprocessing: false,
+                output_audio_codec: "linear16", // Crucial for SIP/Twilio
+                output_audio_bitrate: "128k", // For 8000 Hz linear16
+                speech_sample_rate: 8000, // Crucial for SIP/Twilio
+                min_buffer_size: 50, // As per HTML example
+                max_chunk_length: 150,
+            }
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
           console.log("Sarvam TTS config sent.");
@@ -439,7 +447,7 @@ class SimplifiedSarvamTTSProcessor {
       // Send text message with correct format for Sarvam
       const textMessage = {
         type: "text",
-        text: text.trim()
+        data: text.trim()
       };
       this.sarvamWs.send(JSON.stringify(textMessage));
       
