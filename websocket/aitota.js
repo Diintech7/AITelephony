@@ -1574,19 +1574,20 @@ class EnhancedSarvamTTSProcessor {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          // Prefer x-api-key; some tenants also accept API-Subscription-Key
+          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
           inputs: ["test"],
           target_language_code: "hi-IN",
           speaker: "pavithra",
-          pitch: 0.5,
+          pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
+          speech_sample_rate: 44100,
+          enable_preprocessing: true,
           model: "bulbul:v1",
-          output_audio_codec: "linear16",
         }),
       })
 
@@ -1611,19 +1612,20 @@ class EnhancedSarvamTTSProcessor {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          // Prefer x-api-key; some tenants also accept API-Subscription-Key
+          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
           inputs: [text],
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
-          pitch: 0.5,
+          pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
+          speech_sample_rate: 44100,
+          enable_preprocessing: true,
           model: "bulbul:v1",
-          output_audio_codec: "linear16",
         }),
       })
 
@@ -2280,19 +2282,20 @@ class SimplifiedSarvamTTSProcessor {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          // Prefer x-api-key; some tenants also accept API-Subscription-Key
+          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
           inputs: ["test"],
           target_language_code: "hi-IN",
           speaker: "pavithra",
-          pitch: 0.5,
+          pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
+          speech_sample_rate: 44100,
+          enable_preprocessing: true,
           model: "bulbul:v1",
-          output_audio_codec: "linear16", // Changed to linear16 for SIP compatibility
         }),
       })
 
@@ -2434,19 +2437,20 @@ class SimplifiedSarvamTTSProcessor {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          // Prefer x-api-key; some tenants also accept API-Subscription-Key
+          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
           inputs: [text],
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
-          pitch: 0.5,
+          pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
+          speech_sample_rate: 44100,
+          enable_preprocessing: true,
           model: "bulbul:v1",
-          output_audio_codec: "linear16", // Changed to linear16 for SIP compatibility
         }),
       })
 
