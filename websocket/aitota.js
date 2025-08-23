@@ -1094,19 +1094,18 @@ class EnhancedCallLogger {
 
   getStats() {
     return {
-      duration: this.totalDuration,
-      userMessages: this.transcripts.length,
-      aiResponses: this.responses.length,
-      languages: [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
-      startTime: this.callStartTime,
-      callDirection: this.callDirection,
-      callLogId: this.callLogId,
-      pendingTranscripts: this.pendingTranscripts.length
+      totalAudioBytes: this.totalAudioBytes,
+      sarvamReady: this.sarvamReady,
+      isProcessing: this.isProcessing,
+      useWebSocket: this.useWebSocket,
+      isAudioStreaming: !!this.currentAudioStreaming && !this.currentAudioStreaming.interrupt,
+      textBufferLength: this.textBuffer ? this.textBuffer.length : 0,
+      isStreamingText: !!this.textBuffer && this.textBuffer.length > 0
     }
   }
 }
 
-// Simplified OpenAI processing
+// Simplified OpenAI processing with streaming
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
@@ -1114,6 +1113,7 @@ const processWithOpenAI = async (
   callLogger,
   agentConfig,
   userName = null,
+  onStreamChunk = null, // Callback for streaming chunks
 ) => {
   const timer = createTimer("LLM_PROCESSING")
 
@@ -1131,6 +1131,7 @@ const processWithOpenAI = async (
       "If the information is not present, reply briefly that you don't have that information.",
       "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
       "Keep the entire reply under 100 tokens.",
+      "Stream your response word by word for natural conversation flow.",
     ].join(" ")
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
@@ -1157,6 +1158,7 @@ const processWithOpenAI = async (
         messages,
         max_tokens: 120,
         temperature: 0.3,
+        stream: true, // Enable streaming
       }),
     })
 
@@ -1165,10 +1167,49 @@ const processWithOpenAI = async (
       return null
     }
 
-    const data = await response.json()
-    let fullResponse = data.choices[0]?.message?.content?.trim()
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let fullResponse = ""
+    let isFirstChunk = true
 
-    console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            if (data === '[DONE]') break
+
+            try {
+              const parsed = JSON.parse(data)
+              const content = parsed.choices?.[0]?.delta?.content
+              
+              if (content) {
+                fullResponse += content
+                
+                // Call streaming callback if provided
+                if (onStreamChunk && typeof onStreamChunk === 'function') {
+                  await onStreamChunk(content, isFirstChunk)
+                  isFirstChunk = false
+                }
+              }
+            } catch (parseError) {
+              // Skip malformed JSON chunks
+              continue
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Stream completed, full response: ${fullResponse.length} chars`)
 
     // Ensure a follow-up question is present at the end
     if (fullResponse) {
@@ -1185,6 +1226,11 @@ const processWithOpenAI = async (
         }
         const fu = followUps[detectedLanguage] || followUps.en
         fullResponse = `${fullResponse} ${fu}`.trim()
+        
+        // Send the follow-up question as a final chunk
+        if (onStreamChunk && typeof onStreamChunk === 'function') {
+          await onStreamChunk(` ${fu}`, false)
+        }
       }
     }
 
@@ -1559,6 +1605,7 @@ class SimplifiedSarvamTTSProcessor {
     this.totalAudioBytes = 0
     this.audioQueue = []
     this.isProcessing = false
+    this.textBuffer = "" // Reset text buffer for streaming
   }
 
   // Test API key with REST API first
@@ -1714,6 +1761,166 @@ class SimplifiedSarvamTTSProcessor {
       this.sarvamWs.send(JSON.stringify(textMessage))
       console.log("📤 [SARVAM-WS] Text sent:", text.substring(0, 50) + "...")
     }
+  }
+
+  // Stream text chunks directly to Sarvam WebSocket for real-time TTS
+  async streamTextChunkToSarvam(textChunk, isFirstChunk = false) {
+    if (this.isInterrupted) return false
+    
+    try {
+      // Connect to Sarvam if not already connected
+      if (!this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
+        await this.connectToSarvam()
+        
+        // Wait for connection to be ready
+        let attempts = 0
+        while (!this.sarvamReady && attempts < 10) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+          attempts++
+        }
+        
+        if (!this.sarvamReady) {
+          console.log("⚠️ [TTS-STREAM-CHUNK] WebSocket failed, falling back to API")
+          this.useWebSocket = false
+          return false
+        }
+      }
+
+      if (this.sarvamReady && !this.isInterrupted) {
+        // Send text chunk immediately
+        this.sendTextToSarvam(textChunk)
+        
+        // For first chunk, start processing
+        if (isFirstChunk) {
+          this.isProcessing = true
+          console.log("🎤 [TTS-STREAM-CHUNK] Started streaming TTS for first chunk")
+        }
+        
+        return true
+      }
+      
+      return false
+    } catch (error) {
+      console.log(`❌ [TTS-STREAM-CHUNK] Error streaming chunk: ${error.message}`)
+      return false
+    }
+  }
+
+  // Stream text with sentence boundary optimization for better TTS quality
+  async streamTextWithSentenceOptimization(text, isFirstChunk = false) {
+    if (this.isInterrupted) return false
+    
+    try {
+      // Connect to Sarvam if not already connected
+      if (!this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
+        await this.connectToSarvam()
+        
+        // Wait for connection to be ready
+        let attempts = 0
+        while (!this.sarvamReady && attempts < 10) {
+          await new Promise(resolve => setTimeout(resolve, 100))
+          attempts++
+        }
+        
+        if (!this.sarvamReady) {
+          console.log("⚠️ [TTS-STREAM-OPTIMIZED] WebSocket failed, falling back to API")
+          this.useWebSocket = false
+          return false
+        }
+      }
+
+      if (this.sarvamReady && !this.isInterrupted) {
+        // Initialize text buffer if not exists
+        if (!this.textBuffer) {
+          this.textBuffer = ""
+        }
+        
+        // Add new text to buffer
+        this.textBuffer += text
+        
+        // Check if we have complete sentences
+        const sentenceEndings = /[.!?]\s+/
+        const sentences = this.textBuffer.split(sentenceEndings)
+        
+        if (sentences.length > 1) {
+          // We have complete sentences, send them
+          for (let i = 0; i < sentences.length - 1; i++) {
+            if (this.isInterrupted) break
+            
+            const sentence = sentences[i].trim()
+            if (sentence) {
+              this.sendTextToSarvam(sentence + (sentence.match(/[.!?]$/) ? '' : '.'))
+              
+              // Small delay between sentences for natural flow
+              if (i < sentences.length - 2) {
+                await new Promise(resolve => setTimeout(resolve, 50))
+              }
+            }
+          }
+          
+          // Keep the last incomplete sentence in buffer
+          this.textBuffer = sentences[sentences.length - 1]
+        } else if (this.textBuffer.length > 100) {
+          // If buffer gets too long without sentence endings, send as is
+          this.sendTextToSarvam(this.textBuffer)
+          this.textBuffer = ""
+        }
+        
+        // For first chunk, start processing
+        if (isFirstChunk) {
+          this.isProcessing = true
+          console.log("🎤 [TTS-STREAM-OPTIMIZED] Started streaming TTS with sentence optimization")
+        }
+        
+        return true
+      }
+      
+      return false
+    } catch (error) {
+      console.log(`❌ [TTS-STREAM-OPTIMIZED] Error streaming text: ${error.message}`)
+      return false
+    }
+  }
+
+  // Complete the streaming TTS by sending flush signal
+  async completeStreamingTTS() {
+    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
+      try {
+        // Flush any remaining text in buffer
+        if (this.textBuffer && this.textBuffer.trim()) {
+          console.log("📤 [TTS-STREAM-OPTIMIZED] Flushing remaining text buffer:", this.textBuffer.trim())
+          this.sendTextToSarvam(this.textBuffer.trim())
+          this.textBuffer = ""
+          
+          // Small delay to ensure text is processed
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        
+        // Send a flush message to signal end of utterance to Sarvam TTS
+        const flushMessage = { type: "flush" }
+        this.sarvamWs.send(JSON.stringify(flushMessage))
+        console.log("📤 [SARVAM-WS] Flush signal sent to complete streaming TTS")
+        
+        // Wait for processing to complete
+        let waitAttempts = 0
+        while (this.isProcessing && waitAttempts < 100 && !this.isInterrupted) {
+          await new Promise(resolve => setTimeout(resolve, 50))
+          waitAttempts++
+        }
+        
+        if (this.isInterrupted) {
+          console.log("⚠️ [TTS-STREAM-CHUNK] Streaming TTS was interrupted")
+          return false
+        }
+        
+        console.log("✅ [TTS-STREAM-CHUNK] Streaming TTS completed successfully")
+        return true
+      } catch (error) {
+        console.log(`❌ [TTS-STREAM-CHUNK] Error completing streaming TTS: ${error.message}`)
+        return false
+      }
+    }
+    return false
   }
 
   // Fallback to API method
@@ -2091,7 +2298,9 @@ class SimplifiedSarvamTTSProcessor {
       sarvamReady: this.sarvamReady,
       isProcessing: this.isProcessing,
       useWebSocket: this.useWebSocket,
-      isAudioStreaming: !!this.currentAudioStreaming && !this.currentAudioStreaming.interrupt
+      isAudioStreaming: !!this.currentAudioStreaming && !this.currentAudioStreaming.interrupt,
+      textBufferLength: this.textBuffer ? this.textBuffer.length : 0,
+      isStreamingText: !!this.textBuffer && this.textBuffer.length > 0
     }
   }
 
@@ -2541,13 +2750,30 @@ const setupUnifiedVoiceServer = (wss) => {
         const googleMeetCheckPromise = detectGoogleMeetRequest(text, conversationHistory, detectedLanguage)
         
         // Continue with other processing while checking
-        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
+        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI streaming...")
+        
+        // Create TTS processor for streaming
+        currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+        
+        // Stream OpenAI response directly to Sarvam TTS
         const openaiPromise = processWithOpenAI(
           text,
           conversationHistory,
           detectedLanguage,
           callLogger,
           agentConfig,
+          userName,
+          // Streaming callback - send each chunk directly to Sarvam with sentence optimization
+          async (textChunk, isFirstChunk) => {
+            if (currentTTS && !currentTTS.isInterrupted) {
+              try {
+                // Use sentence-optimized streaming for better TTS quality
+                await currentTTS.streamTextWithSentenceOptimization(textChunk, isFirstChunk)
+              } catch (error) {
+                console.log(`⚠️ [USER-UTTERANCE] TTS streaming error: ${error.message}`)
+              }
+            }
+          }
         )
         
         // Wait for all operations to complete
@@ -2597,8 +2823,9 @@ const setupUnifiedVoiceServer = (wss) => {
             callLogger.logAIResponse(emailRequest, detectedLanguage)
           }
           
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(emailRequest)
+          // Use streaming TTS for Google Meet response
+          await currentTTS.streamTextWithSentenceOptimization(emailRequest, true)
+          await currentTTS.completeStreamingTTS()
           
           conversationHistory.push(
             { role: "user", content: text },
@@ -2633,7 +2860,7 @@ const setupUnifiedVoiceServer = (wss) => {
               const successMessages = {
                 hi: `धन्यवाद! मैंने आपके Gmail ${extractedEmail} पर Google Meet लिंक भेज दिया है। आपको अभी ईमेल मिल जाएगा।`,
                 en: `Thank you! I've sent the Google Meet link to your Gmail ${extractedEmail}. You should receive the email shortly.`,
-                bn: `ধন্যবাদ! আমি আপনার Gmail ${extractedEmail} এ Google Meet লিংক পাঠিয়েছি। আপনি শীঘ্রই ইমেল পাবেন।`,
+                bn: `ধন্যবাদ! আমি আপনার Gmail ${extractedEmail} এ Google Meet লিংক पाठিয়েছি। আপনি শীঘ্রই ইমেল পাবেন।`,
                 ta: `நன்றி! நான் உங்கள் Gmail ${extractedEmail} க்கு Google Meet இணைப்பை அனுப்பியுள்ளேன். நீங்கள் விரைவில் மின்னஞ்சலைப் பெறுவீர்கள்.`,
                 te: `ధన్యవాదాలు! నేను మీ Gmail ${extractedEmail} కి Google Meet లింక్ పంపాను. మీరు త్వరలో ఇమెయిల్ అందుకుంటారు.`,
                 mr: `धन्यवाद! मी तुमच्या Gmail ${extractedEmail} वर Google Meet लिंक पाठवला आहे. तुम्हाला लवकरच ईमेल मिळेल.`,
@@ -2646,8 +2873,9 @@ const setupUnifiedVoiceServer = (wss) => {
                 callLogger.logAIResponse(successMessage, detectedLanguage)
               }
               
-              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-              await currentTTS.synthesizeAndStream(successMessage)
+              // Use streaming TTS for success message
+              await currentTTS.streamTextWithSentenceOptimization(successMessage, true)
+              await currentTTS.completeStreamingTTS()
               
               conversationHistory.push(
                 { role: "user", content: text },
@@ -2673,8 +2901,9 @@ const setupUnifiedVoiceServer = (wss) => {
                 callLogger.logAIResponse(errorMessage, detectedLanguage)
               }
               
-              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-              await currentTTS.synthesizeAndStream(errorMessage)
+              // Use streaming TTS for error message
+              await currentTTS.streamTextWithSentenceOptimization(errorMessage, true)
+              await currentTTS.completeStreamingTTS()
               
               conversationHistory.push(
                 { role: "user", content: text },
@@ -2692,7 +2921,7 @@ const setupUnifiedVoiceServer = (wss) => {
               ta: "தயவுசெய்து சரியான Gmail முகவரியை வழங்கவும். எடுத்துக்காட்டு: user@gmail.com",
               te: "దయచేసి చెల్లుబాటు అయ్యే Gmail చిరునామాను అందించండి. ఉదాహరణ: user@gmail.com",
               mr: "कृपया वैध Gmail पत्ता द्या. उदाहरण: user@gmail.com",
-              gu: "કૃપા કરીને માન્ય Gmail સરનામું આપો. ઉદાહરણ: user@gmail.com"
+              gu: "કૃપા કરીને માન્ય Gmail સરનામું આપો. ઉદాહరણ: user@gmail.com"
             }
             
             const invalidEmailMessage = invalidEmailMessages[detectedLanguage] || invalidEmailMessages.en
@@ -2701,8 +2930,9 @@ const setupUnifiedVoiceServer = (wss) => {
               callLogger.logAIResponse(invalidEmailMessage, detectedLanguage)
             }
             
-            currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-            await currentTTS.synthesizeAndStream(invalidEmailMessage)
+            // Use streaming TTS for invalid email message
+            await currentTTS.streamTextWithSentenceOptimization(invalidEmailMessage, true)
+            await currentTTS.completeStreamingTTS()
             
             conversationHistory.push(
               { role: "user", content: text },
@@ -2714,11 +2944,11 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         if (processingRequestId === currentRequestId && aiResponse) {
-          console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+          console.log("🤖 [USER-UTTERANCE] AI Response streaming completed")
+          console.log("🎤 [USER-UTTERANCE] Completing streaming TTS...")
           
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(aiResponse)
+          // Complete the streaming TTS
+          await currentTTS.completeStreamingTTS()
 
           conversationHistory.push(
             { role: "user", content: text },
@@ -2966,7 +3196,8 @@ const setupUnifiedVoiceServer = (wss) => {
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
             const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-            await tts.synthesizeAndStream(greeting)
+            await tts.streamTextWithSentenceOptimization(greeting, true)
+            await tts.completeStreamingTTS()
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
           }
