@@ -328,35 +328,39 @@ class SimplifiedSarvamTTSProcessor {
       this.sarvamWs = new WebSocket(sarvamUrl.toString(), [`api-subscription-key.${API_KEYS.sarvam}`]);
 
       return new Promise((resolve, reject) => {
+        let configAcknowledged = false;
+        let connectionTimeout;
+
         this.sarvamWs.onopen = () => {
           this.sarvamWsConnected = true;
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected.`);
 
-          // Send initial config message
+          // Set connection timeout
+          connectionTimeout = setTimeout(() => {
+            if (!configAcknowledged) {
+              console.error("Sarvam WS config timeout");
+              reject(new Error("Config acknowledgment timeout"));
+            }
+          }, 5000);
+
+          // Send simplified config message
           const configMessage = {
             type: "config",
             data: {
               target_language_code: this.sarvamLanguage,
               speaker: this.voice,
-              pitch: 0.5,
-              pace: 1.0,
-              loudness: 1.0, 
-              enable_preprocessing: false,
-              output_audio_codec: "linear16", // Crucial for SIP/Twilio
-              output_audio_bitrate: "128k", // For 8000 Hz linear16
-              speech_sample_rate: 8000, // Crucial for SIP/Twilio
-              min_buffer_size: 20, // Reduced for lower latency
-              max_chunk_length: 100, // Reduced for lower latency
+              speech_sample_rate: 8000,
             },
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
           console.log("Sarvam TTS config sent.");
-          resolve(true);
         };
 
         this.sarvamWs.onmessage = async (event) => {
           try {
             const response = JSON.parse(event.data);
+            console.log("Sarvam WS message received:", response.type);
+            
             if (response.type === "audio" && response.data?.audio) {
               const audioBuffer = Buffer.from(response.data.audio, "base64");
               this.audioQueue.push(audioBuffer);
@@ -365,7 +369,21 @@ class SimplifiedSarvamTTSProcessor {
                 this.startStreamingToSIP();
               }
             } else if (response.type === "error") {
-              console.error(`❌ Sarvam TTS WS Error: ${response.data.message} (Code: ${response.data.code})`);
+              console.error(`❌ Sarvam TTS WS Error: ${response.data?.message || response.message} (Code: ${response.data?.code || response.code})`);
+              clearTimeout(connectionTimeout);
+              reject(new Error(`Sarvam error: ${response.data?.message || response.message}`));
+            } else if (response.type === "config_ack") {
+              console.log("✅ Sarvam TTS config acknowledged");
+              configAcknowledged = true;
+              clearTimeout(connectionTimeout);
+              resolve(true);
+            } else if (response.type === "ready") {
+              console.log("✅ Sarvam TTS ready for text input");
+              if (!configAcknowledged) {
+                configAcknowledged = true;
+                clearTimeout(connectionTimeout);
+                resolve(true);
+              }
             }
           } catch (parseError) {
             console.error("Error parsing Sarvam WS message:", parseError);
@@ -374,12 +392,14 @@ class SimplifiedSarvamTTSProcessor {
 
         this.sarvamWs.onerror = (error) => {
           this.sarvamWsConnected = false;
+          clearTimeout(connectionTimeout);
           console.error(`❌ [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket error:`, error.message);
           reject(error);
         };
 
         this.sarvamWs.onclose = () => {
           this.sarvamWsConnected = false;
+          clearTimeout(connectionTimeout);
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket closed.`);
         };
       });
@@ -420,13 +440,20 @@ class SimplifiedSarvamTTSProcessor {
         return;
       }
 
+      // Send text message with correct format
       const textMessage = {
         type: "text",
-        data: { text: text.trim() },
+        data: text.trim(),
       };
       this.sarvamWs.send(JSON.stringify(textMessage));
       
-      console.log(`🕒 [TTS-SYNTHESIS-WS] ${timer.end()}ms - Text sent to Sarvam WS: "${text.trim()}"`);
+      // Send flush message to signal end of text
+      const flushMessage = {
+        type: "flush"
+      };
+      this.sarvamWs.send(JSON.stringify(flushMessage));
+      
+      console.log(`🕒 [TTS-SYNTHESIS-WS] ${timer.end()}ms - Text and flush sent to Sarvam WS: "${text.trim()}"`);
     } catch (error) {
       console.error(`❌ [TTS-SYNTHESIS-WS] ${timer.end()}ms - Error sending text to Sarvam WS: ${error.message}`);
     }
