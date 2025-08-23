@@ -322,9 +322,9 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("SARVAM_WS_CONNECT");
     try {
       const sarvamUrl = new URL("wss://api.sarvam.ai/text-to-speech/ws");
-      sarvamUrl.searchParams.append("model", "bulbul:v2"); // Try without version
+      sarvamUrl.searchParams.append("model", "bulbul"); // Try without version
 
-      // Pass API key as a subprotocol
+      // Pass API key as subprotocol (this is the correct method for Sarvam)
       this.sarvamWs = new WebSocket(sarvamUrl.toString(), [`api-subscription-key.${API_KEYS.sarvam}`]);
 
       return new Promise((resolve, reject) => {
@@ -332,7 +332,7 @@ class SimplifiedSarvamTTSProcessor {
 
         this.sarvamWs.onopen = () => {
           this.sarvamWsConnected = true;
-          console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected.`);
+          console.log(`�� [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected.`);
 
           // Set connection timeout
           connectionTimeout = setTimeout(() => {
@@ -350,6 +350,7 @@ class SimplifiedSarvamTTSProcessor {
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
           console.log("Sarvam TTS config sent.");
+        
         };
 
         this.sarvamWs.onmessage = async (event) => {
