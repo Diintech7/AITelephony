@@ -343,10 +343,10 @@ class SimplifiedSarvamTTSProcessor {
           // Send simplified config message
           const configMessage = {
             type: "config",
-            target_language_code: this.sarvamLanguage,
+            target_language_code: "hi-IN",
             speaker: this.voice,
             speech_sample_rate: 8000,
-            output_audio_codec: "mp3",
+            output_audio_codec: "linear16",
             output_audio_bitrate: "128k"
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
