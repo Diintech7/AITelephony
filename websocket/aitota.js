@@ -62,6 +62,16 @@ const API_KEYS = {
   openai: process.env.OPENAI_API_KEY,
 }
 
+// TTS Interruption Configuration
+const TTS_CONFIG = {
+  ALLOW_COMPLETION_FOR_SHORT_SPEECH: true,        // Allow TTS to complete for speech < 20 chars
+  SHORT_SPEECH_THRESHOLD: 20,                     // Character threshold for "short" speech
+  COMPLETION_WAIT_TIME: 1000,                     // Wait time when TTS is near completion (ms)
+  INTERIM_SPEECH_WAIT_TIME: 500,                  // Wait time for interim speech detection (ms)
+  MIN_AUDIO_BYTES_FOR_COMPLETION: 50000,          // Minimum audio bytes to consider TTS near completion
+  ENABLE_SMART_INTERRUPTION: true,                // Enable/disable smart interruption logic
+}
+
 if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables")
   process.exit(1)
@@ -1237,10 +1247,30 @@ class SimplifiedSarvamTTSProcessor {
           this.sarvamWs.send(JSON.stringify(flushMessage))
           console.log("📤 [SARVAM-WS] Flush signal sent")
 
+          // Wait for audio generation to complete with better completion detection
           let waitAttempts = 0
-          while (this.isProcessing && waitAttempts < 50 && !this.isInterrupted) {
-            await new Promise((resolve) => setTimeout(resolve, 25))
+          let lastAudioBytes = 0
+          let stableAudioCount = 0
+          
+          console.log(`🔄 [TTS-SYNTHESIS] Starting completion detection loop...`)
+          
+          while (this.isProcessing && waitAttempts < 100 && !this.isInterrupted) {
+            await new Promise((resolve) => setTimeout(resolve, 50))
             waitAttempts++
+            
+            // Check if audio generation has stabilized (no new audio for 3 consecutive checks)
+            const currentAudioBytes = this.totalAudioBytes
+            if (currentAudioBytes === lastAudioBytes) {
+              stableAudioCount++
+              if (stableAudioCount >= 3) {
+                console.log(`🔄 [TTS-SYNTHESIS] Audio generation appears stable after ${stableAudioCount} checks, marking as complete`)
+                break
+              }
+            } else {
+              stableAudioCount = 0
+              lastAudioBytes = currentAudioBytes
+              console.log(`🔄 [TTS-SYNTHESIS] Audio still being generated: ${currentAudioBytes} bytes (attempt ${waitAttempts})`)
+            }
           }
 
           if (this.isInterrupted) {
@@ -1248,7 +1278,11 @@ class SimplifiedSarvamTTSProcessor {
             return
           }
 
-          console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - WebSocket synthesis completed`)
+          // Wait a bit more to ensure all audio chunks are processed
+          console.log(`🔄 [TTS-SYNTHESIS] Waiting additional 200ms for audio processing...`)
+          await new Promise((resolve) => setTimeout(resolve, 200))
+          
+          console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - WebSocket synthesis completed (${this.totalAudioBytes} bytes generated)`)
           return
         }
       }
@@ -1360,6 +1394,46 @@ class SimplifiedSarvamTTSProcessor {
       chunkIndex++
     }
 
+    // Ensure all chunks are sent before marking as complete
+    if (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      console.log(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] Audio stream incomplete, sending remaining chunks...`)
+      
+      // Send remaining chunks without delay
+      while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+        const remaining = audioBuffer.length - position
+        const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+        const chunk = audioBuffer.slice(position, position + chunkSize)
+
+        const mediaMessage = {
+          event: "media",
+          streamSid: this.streamSid,
+          media: {
+            payload: chunk.toString("base64"),
+          },
+        }
+
+        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted && !streamingSession.interrupt) {
+          try {
+            this.ws.send(JSON.stringify(mediaMessage))
+            successfulChunks++
+            console.log(
+              `🎵 [AUDIO-STREAM] [${streamingSession.streamId}] Sent remaining chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / audioBuffer.length) * 100)}% complete`,
+            )
+          } catch (error) {
+            console.log(
+              `❌ [AUDIO-STREAM] [${streamingSession.streamId}] Error sending remaining chunk ${chunkIndex + 1}: ${error.message}`,
+            )
+            break
+          }
+        } else {
+          break
+        }
+
+        position += chunkSize
+        chunkIndex++
+      }
+    }
+
     if (this.currentAudioStreaming === streamingSession) {
       console.log(
         `✅ [AUDIO-STREAM] [${streamingSession.streamId}] Linear16 stream completed: ${successfulChunks} chunks sent, ${Math.round((position / audioBuffer.length) * 100)}% of audio streamed`,
@@ -1377,7 +1451,27 @@ class SimplifiedSarvamTTSProcessor {
       isProcessing: this.isProcessing,
       useWebSocket: this.useWebSocket,
       isAudioStreaming: !!this.currentAudioStreaming && !this.currentAudioStreaming.interrupt,
+      audioStreamProgress: this.currentAudioStreaming ? this.getAudioStreamProgress() : 0,
+      isNearCompletion: this.isNearCompletion(),
     }
+  }
+
+  getAudioStreamProgress() {
+    if (!this.currentAudioStreaming) return 0
+    // This is a rough estimate - in a real implementation you'd track actual progress
+    return 0.5 // Placeholder - would need to track actual chunk progress
+  }
+
+  isNearCompletion() {
+    // Check if TTS is likely near completion based on various factors
+    if (!this.isProcessing) return true
+    
+    // If we've received substantial audio and processing has been going for a while
+    if (this.totalAudioBytes > TTS_CONFIG.MIN_AUDIO_BYTES_FOR_COMPLETION && this.isProcessing) {
+      return true
+    }
+    
+    return false
   }
 
   isAudioCurrentlyStreaming() {
@@ -1777,8 +1871,40 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
       console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
 
-      if (currentTTS) {
+      // Smart TTS interruption: only interrupt if TTS is still in early stages or if user speech is substantial
+      if (currentTTS && TTS_CONFIG.ENABLE_SMART_INTERRUPTION) {
+        const ttsStats = currentTTS.getStats()
+        const isAudioStreaming = ttsStats.isAudioStreaming
+        const isNearCompletion = ttsStats.isNearCompletion
+        const userSpeechLength = text.trim().length
+        
+        // Don't interrupt if TTS is near completion
+        if (isNearCompletion) {
+          console.log("🔄 [USER-UTTERANCE] TTS is near completion, allowing it to finish")
+          // Wait for TTS to complete
+          await new Promise(resolve => setTimeout(resolve, TTS_CONFIG.COMPLETION_WAIT_TIME))
+          return
+        }
+        
+        // Allow TTS to complete if it's already streaming and user speech is short/interim
+        if (isAudioStreaming && userSpeechLength < TTS_CONFIG.SHORT_SPEECH_THRESHOLD) {
+          console.log("🔄 [USER-UTTERANCE] TTS is streaming, allowing completion for short interim speech")
+          // Wait a bit to see if this is just interim speech
+          await new Promise(resolve => setTimeout(resolve, TTS_CONFIG.INTERIM_SPEECH_WAIT_TIME))
+          
+          // If TTS is still streaming after delay, don't interrupt for short speech
+          const updatedStats = currentTTS.getStats()
+          if (updatedStats.isAudioStreaming && userSpeechLength < TTS_CONFIG.SHORT_SPEECH_THRESHOLD) {
+            console.log("🔄 [USER-UTTERANCE] Skipping TTS interruption for interim speech, allowing completion")
+            return
+          }
+        }
+        
         console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
+        currentTTS.interrupt()
+      } else if (currentTTS) {
+        // Fallback to immediate interruption if smart interruption is disabled
+        console.log("🛑 [USER-UTTERANCE] Interrupting current TTS (smart interruption disabled)...")
         currentTTS.interrupt()
       }
 
