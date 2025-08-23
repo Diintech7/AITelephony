@@ -21,6 +21,7 @@
     "express": "^5.1.0",
     "ffmpeg": "^0.0.4",
     "franc": "^6.2.0",
+    "fs": "^0.0.1-security",
     "http": "^0.0.1-security",
     "langdetect": "^0.2.1",
     "mongoose": "^8.16.4",

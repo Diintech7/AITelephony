@@ -3,6 +3,8 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
+const fs = require("fs")
+const path = require("path")
 // const { spawn } = require("child_process") // Removed - no longer using FFmpeg
 
 // NOTE: FFmpeg dependency removed due to ENOENT error
@@ -10,6 +12,52 @@ const CallLog = require("../models/CallLog")
 // 1. Installing FFmpeg: https://ffmpeg.org/download.html
 // 2. Using Node.js audio libraries: 'lamejs', 'node-lame', 'audio-converter'
 // 3. Using cloud-based audio processing services
+//
+// CURRENT APPROACH: Using MP3 buffers directly with base64 conversion for SIP transmission
+// This ensures compatibility with SIP protocols while avoiding external dependencies
+
+// Base64 audio conversion utilities
+const convertBufferToBase64 = (buffer) => {
+  return buffer.toString('base64')
+}
+
+const convertBase64ToBuffer = (base64String) => {
+  return Buffer.from(base64String, 'base64')
+}
+
+const validateBase64 = (base64String) => {
+  try {
+    const buffer = Buffer.from(base64String, 'base64')
+    return buffer.length > 0
+  } catch (error) {
+    return false
+  }
+}
+
+// Utility to save MP3 buffer to file for debugging (optional)
+const saveMp3ToFile = (buffer, filename = null) => {
+  try {
+    if (!filename) {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+      filename = `debug_audio_${timestamp}.mp3`
+    }
+    
+    const filepath = path.join(__dirname, '..', 'temp', filename)
+    
+    // Ensure temp directory exists
+    const tempDir = path.dirname(filepath)
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true })
+    }
+    
+    fs.writeFileSync(filepath, buffer)
+    console.log(`💾 [DEBUG] MP3 saved to: ${filepath}`)
+    return filepath
+  } catch (error) {
+    console.error(`❌ [DEBUG] Failed to save MP3: ${error.message}`)
+    return null
+  }
+}
 
 // Import franc with fallback for different versions
 let franc;
@@ -1768,11 +1816,27 @@ class SimplifiedSarvamTTSProcessor {
       // but will allow the system to function without external dependencies
       
       console.log(`🔄 [TRANSCODE] FFmpeg not available, using MP3 buffer directly: ${mp3Buffer.length} bytes`)
-      console.log(`🔄 [TRANSCODE] Note: For optimal audio quality, install FFmpeg or use a Node.js audio library`)
+      console.log(`🔄 [TRANSCODE] Converting MP3 to base64 format for SIP transmission`)
       
-      // For now, return the original MP3 buffer
-      // In a production environment, you should install FFmpeg or use a Node.js audio library
-      // Alternative: Use libraries like 'lamejs', 'node-lame', or 'audio-converter'
+      // Validate the buffer
+      if (!mp3Buffer || mp3Buffer.length === 0) {
+        console.warn(`⚠️ [TRANSCODE] Empty or invalid MP3 buffer received`)
+        return mp3Buffer
+      }
+      
+      // Convert to base64 for validation
+      const base64String = convertBufferToBase64(mp3Buffer)
+      if (!validateBase64(base64String)) {
+        console.warn(`⚠️ [TRANSCODE] Invalid base64 conversion, using original buffer`)
+        return mp3Buffer
+      }
+      
+      console.log(`✅ [TRANSCODE] MP3 buffer successfully converted to base64: ${mp3Buffer.length} bytes → ${base64String.length} base64 chars`)
+      
+      // Optional: Save MP3 for debugging (uncomment if needed)
+      // saveMp3ToFile(mp3Buffer, `transcode_${Date.now()}.mp3`)
+      
+      // Return the original MP3 buffer (it will be converted to base64 in the streaming method)
       return mp3Buffer
       
     } catch (error) {
@@ -1797,6 +1861,13 @@ class SimplifiedSarvamTTSProcessor {
       processedBuffer = await this.transcodeMp3ToPcm16(audioBuffer)
       // Check if we got PCM16 or fallback MP3
       isPCM16 = processedBuffer !== audioBuffer
+      
+      // Validate the processed buffer
+      if (!processedBuffer || processedBuffer.length === 0) {
+        console.warn(`⚠️ [TRANSCODE] Invalid processed buffer, using original audio buffer`)
+        processedBuffer = audioBuffer
+        isPCM16 = false
+      }
     } catch (error) {
       console.error(`❌ [TRANSCODE] Failed to transcode MP3 to PCM16: ${error.message}`)
       // Fallback to original MP3 if transcoding fails
@@ -1828,11 +1899,19 @@ class SimplifiedSarvamTTSProcessor {
       const chunk = processedBuffer.slice(position, position + currentChunkSize)
 
       // Create SIP media message with audio payload
+      const chunkBase64 = chunk.toString("base64")
+      
+      // Validate base64 conversion
+      if (!validateBase64(chunkBase64)) {
+        console.warn(`⚠️ [AUDIO-STREAM] Invalid base64 conversion for chunk ${chunkIndex + 1}, skipping...`)
+        continue
+      }
+      
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
         media: {
-          payload: chunk.toString("base64"),
+          payload: chunkBase64,
         },
       }
 
