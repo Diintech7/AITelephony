@@ -342,6 +342,8 @@ class SimplifiedSarvamTTSProcessor {
 
           // Send simplified config message
           const configMessage = {
+            type: "config",
+            data: {
               target_language_code: "hi-IN",
               speaker: "anushka",
               pitch: 0.5,
@@ -353,7 +355,7 @@ class SimplifiedSarvamTTSProcessor {
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
               min_buffer_size: 50, // As per HTML example
               max_chunk_length: 150, // As per HTML example
-            
+            },
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
           console.log("Sarvam TTS config sent.");
