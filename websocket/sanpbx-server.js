@@ -836,18 +836,7 @@ async function handleMedia(ws, data) {
     consoloe.log(media)
     // Log the incoming media format for debugging
     if (!session.mediaFormatLogged) {
-      console.log(`🎵 [SANPBX-MEDIA] Incoming media format:`)
-      console.log(`   - Media encoding: ${media.format?.encoding || 'unknown'}`)
-      console.log(`   - Sample rate: ${media.format?.sampleRate || 'unknown'}`)
-      console.log(`   - Channels: ${media.format?.channels || 'unknown'}`)
-      console.log(`   - Payload type: ${typeof media.payload}`)
-      console.log(`   - Payload length: ${media.payload.length}`)
-      
-      // Additional media packet analysis
-      console.log(`   - Full media object keys: ${Object.keys(media).join(', ')}`)
-      console.log(`   - Format object keys: ${media.format ? Object.keys(media.format).join(', ') : 'none'}`)
-      
-      // Check for additional metadata
+     
       if (media.metadata) {
         console.log(`   - Metadata: ${JSON.stringify(media.metadata)}`)
       }
