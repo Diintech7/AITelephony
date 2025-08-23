@@ -344,7 +344,7 @@ class SimplifiedSarvamTTSProcessor {
           const configMessage = {
             type: "config",
             target_language_code: "hi-IN",
-            speaker: this.voice,
+            speaker: "anushka",
             speech_sample_rate: 8000,
             output_audio_codec: "linear16",
             output_audio_bitrate: "128k"
