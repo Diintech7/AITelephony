@@ -328,7 +328,6 @@ class SimplifiedSarvamTTSProcessor {
       this.sarvamWs = new WebSocket(sarvamUrl.toString(), [`api-subscription-key.${API_KEYS.sarvam}`]);
 
       return new Promise((resolve, reject) => {
-        let configAcknowledged = false;
         let connectionTimeout;
 
         this.sarvamWs.onopen = () => {
@@ -337,11 +336,9 @@ class SimplifiedSarvamTTSProcessor {
 
           // Set connection timeout
           connectionTimeout = setTimeout(() => {
-            if (!configAcknowledged) {
-              console.error("Sarvam WS config timeout");
-              reject(new Error("Config acknowledgment timeout"));
-            }
-          }, 5000);
+            console.log("Sarvam WS connection established, proceeding without config ack");
+            resolve(true);
+          }, 1000); // Reduced timeout to 1 second
 
           // Send simplified config message
           const configMessage = {
@@ -374,16 +371,12 @@ class SimplifiedSarvamTTSProcessor {
               reject(new Error(`Sarvam error: ${response.data?.message || response.message}`));
             } else if (response.type === "config_ack") {
               console.log("✅ Sarvam TTS config acknowledged");
-              configAcknowledged = true;
               clearTimeout(connectionTimeout);
               resolve(true);
             } else if (response.type === "ready") {
               console.log("✅ Sarvam TTS ready for text input");
-              if (!configAcknowledged) {
-                configAcknowledged = true;
-                clearTimeout(connectionTimeout);
-                resolve(true);
-              }
+              clearTimeout(connectionTimeout);
+              resolve(true);
             }
           } catch (parseError) {
             console.error("Error parsing Sarvam WS message:", parseError);
@@ -439,6 +432,9 @@ class SimplifiedSarvamTTSProcessor {
         console.log("Sarvam WS not connected, aborting synthesis.");
         return;
       }
+
+      // Small delay to ensure WebSocket is ready
+      await new Promise(resolve => setTimeout(resolve, 100));
 
       // Send text message with correct format
       const textMessage = {
