@@ -1566,7 +1566,7 @@ class EnhancedSarvamTTSProcessor {
   async synthesizeWithAPI(text) {
     const timer = createTimer("TTS_API_FALLBACK")
     try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speec", {
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2347,7 +2347,7 @@ class SimplifiedSarvamTTSProcessor {
   async synthesizeWithAPI(text) {
     const timer = createTimer("TTS_API_FALLBACK")
     try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speec", {
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
