@@ -16,6 +16,12 @@ const path = require("path")
 // CURRENT APPROACH: Using linear16 audio format directly from Sarvam WebSocket to SIP
 // This follows the working pattern from sarvam tts.js and ensures optimal SIP compatibility
 // No transcoding needed - audio flows directly from Sarvam to SIP in the correct format
+//
+// AUDIO SYNCHRONIZATION: Prevents overlapping audio streams that cause chunk ordering issues
+// - Each new TTS request waits for existing audio stream to complete
+// - Unique stream IDs track each audio stream for debugging
+// - Automatic interruption of old streams when new ones start
+// - Ensures audio chunks are sent in correct sequential order
 
 // Base64 audio conversion utilities
 const convertBufferToBase64 = (buffer) => {
@@ -1528,9 +1534,18 @@ class SimplifiedSarvamTTSProcessor {
   interrupt() {
     this.isInterrupted = true
     if (this.currentAudioStreaming) {
+      console.log(`🛑 [TTS-INTERRUPT] Interrupting current audio stream...`)
       this.currentAudioStreaming.interrupt = true
+      // Wait a bit for the stream to clean up
+      setTimeout(() => {
+        if (this.currentAudioStreaming) {
+          this.currentAudioStreaming = null
+          console.log(`🛑 [TTS-INTERRUPT] Audio stream cleanup completed`)
+        }
+      }, 100)
     }
     if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
+      console.log(`🛑 [TTS-INTERRUPT] Closing Sarvam WebSocket connection...`)
       this.sarvamWs.close()
     }
   }
@@ -1607,16 +1622,16 @@ class SimplifiedSarvamTTSProcessor {
       console.log(`🎤 [SARVAM-WS] Connecting to ${wsUrl} with subprotocol`)
       this.sarvamWs = new WebSocket(wsUrl, [`api-subscription-key.${API_KEYS.sarvam}`])
 
-      this.sarvamWs.onopen = () => {
-        this.sarvamReady = true
-        const configMessage = {
+              this.sarvamWs.onopen = () => {
+                this.sarvamReady = true
+                const configMessage = {
           type: 'config',
           data: {
-            target_language_code: this.sarvamLanguage,
-            speaker: this.voice,
+                  target_language_code: this.sarvamLanguage,
+                  speaker: this.voice,
             pitch: 0.5,
-            pace: 1.0,
-            loudness: 1.0,
+                  pace: 1.0,
+                  loudness: 1.0,
             enable_preprocessing: false,
             output_audio_codec: 'linear16', // Changed to linear16 for SIP compatibility
             output_audio_bitrate: '128k', // For 8000 Hz linear16
@@ -1625,33 +1640,33 @@ class SimplifiedSarvamTTSProcessor {
             max_chunk_length: 150, // As per working example
           },
         }
-        this.sarvamWs.send(JSON.stringify(configMessage))
+                this.sarvamWs.send(JSON.stringify(configMessage))
         console.log("✅ [SARVAM-WS] Config sent successfully")
-        this.processQueuedAudio()
-      }
+                this.processQueuedAudio()
+              }
 
-      this.sarvamWs.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          this.handleSarvamMessage(data)
+              this.sarvamWs.onmessage = (event) => {
+                try {
+                  const data = JSON.parse(event.data)
+                  this.handleSarvamMessage(data)
         } catch (error) {
           console.error("❌ [SARVAM-WS] Error parsing message:", error.message)
         }
-      }
+              }
 
       this.sarvamWs.onerror = (error) => {
-        this.sarvamReady = false
+                this.sarvamReady = false
         console.error("❌ [SARVAM-WS] WebSocket error:", error.message)
-      }
+              }
 
       this.sarvamWs.onclose = () => {
-        this.sarvamReady = false
+                this.sarvamReady = false
         console.log("🔌 [SARVAM-WS] WebSocket closed")
-      }
+              }
 
       // Wait for connection to be established
       await new Promise((resolve) => setTimeout(resolve, 500))
-      if (!this.sarvamReady) {
+                  if (!this.sarvamReady) {
         this.useWebSocket = false
         console.log("⚠️ [SARVAM-WS] Connection timeout, falling back to API")
       }
@@ -1747,6 +1762,9 @@ class SimplifiedSarvamTTSProcessor {
       console.log(`🕒 [TTS-API-FALLBACK] ${timer.end()}ms - Audio generated via API`)
 
       if (!this.isInterrupted) {
+        // Wait for any existing audio stream to complete before starting new one
+        await this.waitForAudioStreamToComplete()
+        
         // Use linear16 streaming for API fallback as well
         await this.streamLinear16AudioToSIP(audioBase64)
         const audioBuffer = Buffer.from(audioBase64, "base64")
@@ -1788,6 +1806,9 @@ class SimplifiedSarvamTTSProcessor {
         if (this.sarvamReady) {
           this.isProcessing = true
           console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Starting WebSocket synthesis`)
+
+          // Wait for any existing audio stream to complete before starting new synthesis
+          await this.waitForAudioStreamToComplete()
 
           // Send text to Sarvam
           this.sendTextToSarvam(text)
@@ -1867,8 +1888,23 @@ class SimplifiedSarvamTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
+    // Wait for any existing audio stream to complete before starting new one
+    if (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt) {
+      console.log(`⏳ [AUDIO-STREAM] Waiting for existing audio stream to complete...`)
+      let waitAttempts = 0
+      while (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt && waitAttempts < 100) {
+        await new Promise(resolve => setTimeout(resolve, 50))
+        waitAttempts++
+      }
+      if (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt) {
+        console.log(`⚠️ [AUDIO-STREAM] Force interrupting existing stream to prevent overlap`)
+        this.currentAudioStreaming.interrupt = true
+        await new Promise(resolve => setTimeout(resolve, 100)) // Small delay to ensure cleanup
+      }
+    }
+
     const audioBuffer = Buffer.from(audioBase64, "base64")
-    const streamingSession = { interrupt: false }
+    const streamingSession = { interrupt: false, streamId: Date.now() }
     this.currentAudioStreaming = streamingSession
 
     // Try to transcode MP3 to PCM16 mono 8kHz for SIP compatibility
@@ -1896,15 +1932,15 @@ class SimplifiedSarvamTTSProcessor {
     // Adjust chunk size and delay based on audio format
     let chunkSize, chunkDelayMs
     if (isPCM16) {
-      // For PCM16, we use a fixed chunk size and delay optimized for SIP
+    // For PCM16, we use a fixed chunk size and delay optimized for SIP
       chunkSize = 1600; // 800 bytes of PCM16 = 400 samples at 8kHz = 50ms of audio
       chunkDelayMs = 50; // 50ms packet interval for smooth streaming
-      console.log(`🎵 [AUDIO-STREAM] Starting SIP audio stream (PCM16): ${processedBuffer.length} bytes`)
+      console.log(`🎵 [AUDIO-STREAM] [${streamingSession.streamId}] Starting SIP audio stream (PCM16): ${processedBuffer.length} bytes`)
     } else {
       // For MP3, use larger chunks and longer delays since MP3 is compressed
       chunkSize = 3200; // Larger chunks for MP3
       chunkDelayMs = 100; // 100ms packet interval for MP3
-      console.log(`🎵 [AUDIO-STREAM] Starting SIP audio stream (MP3 fallback): ${processedBuffer.length} bytes`)
+      console.log(`🎵 [AUDIO-STREAM] [${streamingSession.streamId}] Starting SIP audio stream (MP3 fallback): ${processedBuffer.length} bytes`)
     }
 
     let position = 0
@@ -1921,7 +1957,7 @@ class SimplifiedSarvamTTSProcessor {
       
       // Validate base64 conversion
       if (!validateBase64(chunkBase64)) {
-        console.warn(`⚠️ [AUDIO-STREAM] Invalid base64 conversion for chunk ${chunkIndex + 1}, skipping...`)
+        console.warn(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] Invalid base64 conversion for chunk ${chunkIndex + 1}, skipping...`)
         continue
       }
       
@@ -1933,22 +1969,22 @@ class SimplifiedSarvamTTSProcessor {
         },
       }
 
-      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted && !streamingSession.interrupt) {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++;
           const format = isPCM16 ? "PCM16" : "MP3"
-          console.log(`🎵 [AUDIO-STREAM] Sent ${format} chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / processedBuffer.length) * 100)}% complete`)
+          console.log(`🎵 [AUDIO-STREAM] [${streamingSession.streamId}] Sent ${format} chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / processedBuffer.length) * 100)}% complete`)
         } catch (error) {
-          console.log(`❌ [AUDIO-STREAM] Error sending ${isPCM16 ? 'PCM16' : 'MP3'} chunk ${chunkIndex + 1}: ${error.message}`)
+          console.log(`❌ [AUDIO-STREAM] [${streamingSession.streamId}] Error sending ${isPCM16 ? 'PCM16' : 'MP3'} chunk ${chunkIndex + 1}: ${error.message}`)
           break
         }
       } else {
-        console.log(`⚠️ [AUDIO-STREAM] WebSocket not ready or interrupted, stopping audio stream`)
+        console.log(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] WebSocket not ready or interrupted, stopping audio stream`)
         break
       }
 
-      if (position + currentChunkSize < processedBuffer.length && !this.isInterrupted) {
+      if (position + currentChunkSize < processedBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
         await new Promise((resolve) => setTimeout(resolve, chunkDelayMs))
       }
 
@@ -1956,20 +1992,41 @@ class SimplifiedSarvamTTSProcessor {
       chunkIndex++
     }
     
-    const format = isPCM16 ? "PCM16" : "MP3"
-    console.log(`✅ [AUDIO-STREAM] ${format} stream completed: ${successfulChunks} chunks sent, ${Math.round((position / processedBuffer.length) * 100)}% of audio streamed`)
-    this.currentAudioStreaming = null
+    // Only log completion if this is still the current stream
+    if (this.currentAudioStreaming === streamingSession) {
+      const format = isPCM16 ? "PCM16" : "MP3"
+      console.log(`✅ [AUDIO-STREAM] [${streamingSession.streamId}] ${format} stream completed: ${successfulChunks} chunks sent, ${Math.round((position / processedBuffer.length) * 100)}% of audio streamed`)
+      this.currentAudioStreaming = null
+    } else {
+      const format = isPCM16 ? "PCM16" : "MP3"
+      console.log(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] ${format} stream was interrupted by newer stream`)
+    }
   }
 
   // Stream linear16 audio directly to SIP (following working pattern from sarvam tts.js)
   async streamLinear16AudioToSIP(audioBase64) {
     if (this.isInterrupted) return
 
+    // Wait for any existing audio stream to complete before starting new one
+    if (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt) {
+      console.log(`⏳ [AUDIO-STREAM] Waiting for existing audio stream to complete...`)
+      let waitAttempts = 0
+      while (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt && waitAttempts < 100) {
+        await new Promise(resolve => setTimeout(resolve, 50))
+        waitAttempts++
+      }
+      if (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt) {
+        console.log(`⚠️ [AUDIO-STREAM] Force interrupting existing stream to prevent overlap`)
+        this.currentAudioStreaming.interrupt = true
+        await new Promise(resolve => setTimeout(resolve, 100)) // Small delay to ensure cleanup
+      }
+    }
+
     const audioBuffer = Buffer.from(audioBase64, "base64")
-    const streamingSession = { interrupt: false }
+    const streamingSession = { interrupt: false, streamId: Date.now() }
     this.currentAudioStreaming = streamingSession
 
-    console.log(`🎵 [AUDIO-STREAM] Starting linear16 audio stream: ${audioBuffer.length} bytes`)
+    console.log(`🎵 [AUDIO-STREAM] Starting linear16 audio stream: ${audioBuffer.length} bytes (Stream ID: ${streamingSession.streamId})`)
 
     // Use the same chunking logic as the working sarvam tts.js
     const SAMPLE_RATE = 8000
@@ -1995,21 +2052,21 @@ class SimplifiedSarvamTTSProcessor {
         },
       }
 
-      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted && !streamingSession.interrupt) {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
-          console.log(`🎵 [AUDIO-STREAM] Sent linear16 chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / audioBuffer.length) * 100)}% complete`)
+          console.log(`🎵 [AUDIO-STREAM] [${streamingSession.streamId}] Sent linear16 chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / audioBuffer.length) * 100)}% complete`)
         } catch (error) {
-          console.log(`❌ [AUDIO-STREAM] Error sending linear16 chunk ${chunkIndex + 1}: ${error.message}`)
+          console.log(`❌ [AUDIO-STREAM] [${streamingSession.streamId}] Error sending linear16 chunk ${chunkIndex + 1}: ${error.message}`)
           break
         }
       } else {
-        console.log(`⚠️ [AUDIO-STREAM] WebSocket not ready or interrupted, stopping audio stream`)
+        console.log(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] WebSocket not ready or interrupted, stopping audio stream`)
         break
       }
 
-      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
         const delayMs = Math.max(chunkDurationMs - 2, 10) // Small delay to prevent buffer underrun
         await new Promise((resolve) => setTimeout(resolve, delayMs))
@@ -2019,8 +2076,13 @@ class SimplifiedSarvamTTSProcessor {
       chunkIndex++
     }
 
-    console.log(`✅ [AUDIO-STREAM] Linear16 stream completed: ${successfulChunks} chunks sent, ${Math.round((position / audioBuffer.length) * 100)}% of audio streamed`)
-    this.currentAudioStreaming = null
+    // Only log completion if this is still the current stream
+    if (this.currentAudioStreaming === streamingSession) {
+      console.log(`✅ [AUDIO-STREAM] [${streamingSession.streamId}] Linear16 stream completed: ${successfulChunks} chunks sent, ${Math.round((position / audioBuffer.length) * 100)}% of audio streamed`)
+      this.currentAudioStreaming = null
+    } else {
+      console.log(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] Stream was interrupted by newer stream`)
+    }
   }
 
   getStats() {
@@ -2028,8 +2090,37 @@ class SimplifiedSarvamTTSProcessor {
       totalAudioBytes: this.totalAudioBytes,
       sarvamReady: this.sarvamReady,
       isProcessing: this.isProcessing,
-      useWebSocket: this.useWebSocket
+      useWebSocket: this.useWebSocket,
+      isAudioStreaming: !!this.currentAudioStreaming && !this.currentAudioStreaming.interrupt
     }
+  }
+
+  // Check if audio is currently streaming
+  isAudioCurrentlyStreaming() {
+    return !!(this.currentAudioStreaming && !this.currentAudioStreaming.interrupt)
+  }
+
+  // Wait for current audio stream to complete
+  async waitForAudioStreamToComplete(timeoutMs = 5000) {
+    if (!this.isAudioCurrentlyStreaming()) {
+      return true
+    }
+
+    console.log(`⏳ [AUDIO-SYNC] Waiting for current audio stream to complete...`)
+    const startTime = Date.now()
+    
+    while (this.isAudioCurrentlyStreaming() && (Date.now() - startTime) < timeoutMs) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    
+    if (this.isAudioCurrentlyStreaming()) {
+      console.log(`⚠️ [AUDIO-SYNC] Timeout waiting for audio stream, forcing interruption`)
+      this.interrupt()
+      return false
+    }
+    
+    console.log(`✅ [AUDIO-SYNC] Audio stream completed, ready for new audio`)
+    return true
   }
 }
 
