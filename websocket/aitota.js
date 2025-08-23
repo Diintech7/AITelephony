@@ -1649,13 +1649,6 @@ class SimplifiedSarvamTTSProcessor {
   // Connect to Sarvam WebSocket using subprotocol auth and official URL
   async connectToSarvam() {
     try {
-      const apiKeyValid = await this.testApiKey()
-      if (!apiKeyValid) {
-        console.log("⚠️ [SARVAM-WS] API key validation failed, skipping WebSocket attempts")
-        this.useWebSocket = false
-        return
-      }
-
       const lang = (this.language || 'en').toLowerCase()
       if (lang.startsWith('en')) {
         this.sarvamLanguage = 'en-IN'
