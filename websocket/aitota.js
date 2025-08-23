@@ -346,7 +346,7 @@ class SimplifiedSarvamTTSProcessor {
             target_language_code: this.sarvamLanguage,
             speaker: this.voice,
             speech_sample_rate: 8000,
-            output_audio_codec: "linear16",
+            output_audio_codec: "mp3",
             output_audio_bitrate: "128k"
           };
           this.sarvamWs.send(JSON.stringify(configMessage));
