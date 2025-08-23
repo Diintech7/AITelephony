@@ -322,7 +322,7 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("SARVAM_WS_CONNECT");
     try {
       const sarvamUrl = new URL("wss://api.sarvam.ai/text-to-speech/ws");
-      sarvamUrl.searchParams.append("model", "bulbul"); // Try without version
+      sarvamUrl.searchParams.append("model", "bulbul:v2"); // Try without version
 
       // Pass API key as a subprotocol
       this.sarvamWs = new WebSocket(sarvamUrl.toString(), [`api-subscription-key.${API_KEYS.sarvam}`]);
