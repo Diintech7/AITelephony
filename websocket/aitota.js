@@ -299,7 +299,7 @@ Return only the language code, nothing else.`,
 
     return "en"
   } catch (error) {
-    console.log(`❌ [LLM-LANG-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    console.log(`❌ [LLM-LANG-DETECT] ${timer.end()}ms - Error: ${error.message}`)
     return "en"
   }
 }
@@ -366,15 +366,6 @@ class EnhancedCallLogger {
     this.callSid = null
     this.accountSid = null
     this.ws = null // Store WebSocket reference for disconnection
-    
-    // Google Meet state management
-    this.googleMeetState = {
-      isRequested: false,
-      emailProvided: false,
-      email: null,
-      meetingDetails: null,
-      emailSent: false
-    }
   }
 
   // Create initial call log entry immediately when call starts
@@ -885,7 +876,7 @@ class EnhancedCallLogger {
   }
 
   // Final save with complete call data
-  async saveToDatabase(leadStatusInput = 'maybe', agentConfig = null) {
+  async saveToDatabase(leadStatusInput = 'maybe') {
     const timer = createTimer("FINAL_CALL_LOG_SAVE")
     try {
       const callEndTime = new Date()
@@ -925,34 +916,6 @@ class EnhancedCallLogger {
         )
 
         console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Updated: ${updatedLog._id}`)
-        
-        // Send WhatsApp message after call ends (non-blocking)
-        if (agentConfig && this.mobile) {
-          console.log(`📱 [FINAL-CALL-LOG-SAVE] Triggering WhatsApp message after call...`)
-          setImmediate(async () => {
-            try {
-              await sendWhatsAppAfterCall(this, agentConfig)
-            } catch (error) {
-              console.log(`⚠️ [FINAL-CALL-LOG-SAVE] WhatsApp error: ${error.message}`)
-            }
-          })
-        }
-        
-        // Update call log with Google Meet data if applicable
-        if (this.googleMeetState.isRequested) {
-          console.log(`📹 [FINAL-CALL-LOG-SAVE] Updating call log with Google Meet data...`)
-          const googleMeetUpdate = {
-            'metadata.googleMeetRequested': true,
-            'metadata.googleMeetEmail': this.googleMeetState.email || null,
-            'metadata.googleMeetDetails': this.googleMeetState.meetingDetails || null,
-            'metadata.googleMeetEmailSent': this.googleMeetState.emailSent || false,
-            'metadata.googleMeetEmailSentAt': this.googleMeetState.emailSent ? new Date() : null
-          }
-          
-          await CallLog.findByIdAndUpdate(this.callLogId, googleMeetUpdate)
-            .catch(err => console.log(`⚠️ [FINAL-CALL-LOG-SAVE] Google Meet update error: ${err.message}`))
-        }
-        
         return updatedLog
       } else {
         // Fallback: create new call log if initial creation failed
@@ -980,34 +943,6 @@ class EnhancedCallLogger {
         const callLog = new CallLog(callLogData)
         const savedLog = await callLog.save()
         console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Created: ${savedLog._id}`)
-        
-        // Send WhatsApp message after call ends (non-blocking)
-        if (agentConfig && this.mobile) {
-          console.log(`📱 [FINAL-CALL-LOG-SAVE] Triggering WhatsApp message after call...`)
-          setImmediate(async () => {
-            try {
-              await sendWhatsAppAfterCall(this, agentConfig)
-            } catch (error) {
-              console.log(`⚠️ [FINAL-CALL-LOG-SAVE] WhatsApp error: ${error.message}`)
-            }
-          })
-        }
-        
-        // Update call log with Google Meet data if applicable
-        if (this.googleMeetState.isRequested) {
-          console.log(`📹 [FINAL-CALL-LOG-SAVE] Updating call log with Google Meet data...`)
-          const googleMeetUpdate = {
-            'metadata.googleMeetRequested': true,
-            'metadata.googleMeetEmail': this.googleMeetState.email || null,
-            'metadata.googleMeetDetails': this.googleMeetState.meetingDetails || null,
-            'metadata.googleMeetEmailSent': this.googleMeetState.emailSent || false,
-            'metadata.googleMeetEmailSentAt': this.googleMeetState.emailSent ? new Date() : null
-          }
-          
-          await CallLog.findByIdAndUpdate(savedLog._id, googleMeetUpdate)
-            .catch(err => console.log(`⚠️ [FINAL-CALL-LOG-SAVE] Google Meet update error: ${err.message}`))
-        }
-        
         return savedLog
       }
     } catch (error) {
@@ -1188,283 +1123,18 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
   }
 }
 
-// Google Meet request detection using OpenAI
-const detectGoogleMeetRequest = async (userMessage, conversationHistory, detectedLanguage) => {
-  const timer = createTimer("GOOGLE_MEET_DETECTION")
-  try {
-    const meetRequestPrompt = `Analyze if the user wants to schedule a Google Meet or video call. Look for:
-- "google meet", "meet", "video call", "video meeting", "online meeting"
-- "schedule a meeting", "book a meeting", "set up a call"
-- "zoom", "teams", "skype", "video conference"
-- "meet online", "virtual meeting", "screen share"
-- Any request for a video/online meeting
-
-User message: "${userMessage}"
-
-Return ONLY: "GOOGLE_MEET" if they want a video meeting, or "CONTINUE" if they want to continue normally.`
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: meetRequestPrompt },
-        ],
-        max_tokens: 10,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      console.log(`❌ [GOOGLE-MEET-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
-      return "CONTINUE" // Default to continue on error
-    }
-
-    const data = await response.json()
-    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
-
-    if (result === "GOOGLE_MEET") {
-      console.log(`🕒 [GOOGLE-MEET-DETECTION] ${timer.end()}ms - User wants Google Meet`)
-      return "GOOGLE_MEET"
-    } else {
-      console.log(`🕒 [GOOGLE-MEET-DETECTION] ${timer.end()}ms - No Google Meet request`)
-      return "CONTINUE"
-    }
-  } catch (error) {
-    console.log(`❌ [GOOGLE-MEET-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
-    return "CONTINUE" // Default to continue on error
-  }
-}
-
-// Email validation function
-const validateEmail = (email) => {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-  return emailRegex.test(email)
-}
-
-// Normalize spoken/transliterated email phrases (English/Hindi) to a valid email string
-const normalizeSpokenEmail = (rawText) => {
-  if (!rawText) return null
-  let text = String(rawText)
-    .toLowerCase()
-    .replace(/\s+/g, ' ') // collapse spaces
-    .trim()
-
-  // Convert Devanagari digits to ASCII
-  const devanagariDigits = {
-    '०': '0','१': '1','२': '2','३': '3','४': '4','५': '5','६': '6','७': '7','८': '8','९': '9'
-  }
-  text = text.replace(/[०१२३४५६७८९]/g, (m) => devanagariDigits[m] || m)
-
-  // Map Hindi number words to digits
-  const numWords = {
-    'शून्य': '0','zero': '0',
-    'एक': '1','ek': '1','one': '1',
-    'दो': '2','do': '2','two': '2',
-    'तीन': '3','teen': '3','three': '3',
-    'चार': '4','char': '4','four': '4',
-    'पांच': '5','पाँच': '5','paanch': '5','panch': '5','five': '5',
-    'छह': '6','cheh': '6','six': '6',
-    'सात': '7','saat': '7','seven': '7',
-    'आठ': '8','aath': '8','eight': '8',
-    'नौ': '9','nau': '9','nine': '9'
-  }
-  const wordBoundary = new RegExp(`\\b(${Object.keys(numWords).join('|')})\\b`, 'g')
-  text = text.replace(wordBoundary, (m) => numWords[m])
-
-  // Common connectors and noise words to remove
-  text = text
-    .replace(/\b(at\s*the\s*rate\s*of)\b/g, '@')
-    .replace(/\b(at\s*the\s*rate)\b/g, '@')
-    .replace(/\battherate\b/g, '@')
-    .replace(/\bat\s*rate\b/g, '@')
-    .replace(/\bरेट\b/g, '@')
-    .replace(/\bएट\s*द?\s*रेट\b/g, '@')
-    .replace(/\bat\b/g, '@') // often spoken as just 'at'
-    .replace(/\bडॉट\b/g, '.')
-    .replace(/\bडाट\b/g, '.')
-    .replace(/\bdot\b/g, '.')
-    .replace(/\bडॉ?ट\b/g, '.')
-    .replace(/\bडाट\b/g, '.')
-    .replace(/\bडॉट\s*कॉम\b/g, '.com')
-    .replace(/\bdot\s*com\b/g, '.com')
-    .replace(/\bडॉट\s*जीमेल\b/g, '.gmail')
-    .replace(/\bजीमेल\b/g, 'gmail')
-    .replace(/\bजी\s*मेल\b/g, 'gmail')
-    .replace(/\bg\s*mail\b/g, 'gmail')
-    .replace(/\bहाइ[\u095c\u095e]?फन\b/g, '-') // hyphen (Hindi)
-    .replace(/\bhyphen\b|\bdash\b|\bminus\b/g, '-')
-    .replace(/\bअंडरस्कोर\b/g, '_')
-    .replace(/\bunderscore\b/g, '_')
-    .replace(/\bप्लस\b|\bplus\b/g, '+')
-    .replace(/\bspace\b|\bस्पेस\b/g, '')
-    .replace(/\bof\b|\bthe\b|\btak\b/g, '')
-
-  // Remove quotes and trailing punctuation commonly added by STT
-  text = text.replace(/["'“”‘’]/g, '')
-  text = text.replace(/\s*\.$/, '')
-
-  // Remove spaces around @ and .
-  text = text.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.')
-
-  // If it looks like user said "gmail dot com" without username, keep as is for further AI handling
-
-  // Finally, try to pick the first email-like substring
-  const emailLikeMatch = text.match(/[a-z0-9._+\-]+@[a-z0-9.-]+\.[a-z]{2,}/i)
-  return emailLikeMatch ? emailLikeMatch[0] : null
-}
-
-// Extract email from text using AI
-const extractEmailFromText = async (text) => {
-  const timer = createTimer("EMAIL_EXTRACTION")
-  try {
-    // 1) Try local normalization first (fast path)
-    const normalizedLocal = normalizeSpokenEmail(text)
-    if (normalizedLocal && validateEmail(normalizedLocal)) {
-      console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - Local normalized: ${normalizedLocal}`)
-      return normalizedLocal
-    }
-
-    const emailPrompt = `Extract email address from the given text. Look for:
-- Standard email formats (user@domain.com)
-- Gmail addresses (user@gmail.com)
-- Any valid email pattern
-
-Text: "${text}"
-
-Return ONLY the email address if found, or "NO_EMAIL" if no valid email is found.`
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: emailPrompt },
-        ],
-        max_tokens: 50,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`Email extraction failed: ${response.status}`)
-    }
-
-    const data = await response.json()
-    const extractedRaw = data.choices[0]?.message?.content?.trim()
-
-    // 2) Normalize AI output as well
-    const normalizedAI = normalizeSpokenEmail(extractedRaw)
-    if (normalizedAI && validateEmail(normalizedAI)) {
-      console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - AI normalized: ${normalizedAI}`)
-      return normalizedAI
-    }
-
-    console.log(`🕒 [EMAIL-EXTRACTION] ${timer.end()}ms - No valid email found`)
-    return null
-  } catch (error) {
-    console.log(`❌ [EMAIL-EXTRACTION] ${timer.end()}ms - Error: ${error.message}`)
-    return null
-  }
-}
-
-// Generate Google Meet link (format: xxx-yyyy-zzz)
-const generateGoogleMeetLink = () => {
-  // Google Meet codes typically look like xxx-yyyy-zzz (letters only)
-  const letters = 'abcdefghijklmnopqrstuvwxyz'
-  const segment = (len) => Array.from({ length: len }, () => letters[Math.floor(Math.random() * letters.length)]).join('')
-  const meetingId = `${segment(3)}-${segment(4)}-${segment(3)}`
-
-  // Create Google Meet link
-  const meetLink = `https://meet.google.com/${meetingId}`
-
-  // Generate meeting details
-  const meetingDetails = {
-    link: meetLink,
-    meetingId: meetingId,
-    createdAt: new Date(),
-    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours from now
-    status: 'active'
-  }
-
-  return meetingDetails
-}
-
-// Send Google Meet link via email (placeholder for email service integration)
-const sendGoogleMeetEmail = async (email, meetingDetails, agentConfig) => {
-  const timer = createTimer("GOOGLE_MEET_EMAIL")
-  try {
-    console.log(`📧 [GOOGLE-MEET-EMAIL] Sending meeting link to: ${email}`)
-    
-    // Extract organization name from agent description
-    const { orgName } = await extractOrgAndCourseFromDescription(agentConfig.description)
-    
-    // Email content
-    const emailContent = {
-      to: email,
-      subject: `Google Meet Invitation - ${orgName}`,
-      body: `
-Dear User,
-
-Thank you for your interest in scheduling a meeting with ${orgName}.
-
-Your Google Meet link: ${meetingDetails.link}
-Meeting ID: ${meetingDetails.meetingId}
-
-This link will be active for 24 hours.
-
-Best regards,
-${orgName} Team
-      `.trim()
-    }
-    
-    // TODO: Integrate with your email service (SendGrid, AWS SES, etc.)
-    // For now, we'll just log the email content
-    console.log(`📧 [GOOGLE-MEET-EMAIL] Email content:`, JSON.stringify(emailContent, null, 2))
-    
-    // Update call log with meeting details
-    return {
-      success: true,
-      email: email,
-      meetingDetails: meetingDetails,
-      emailContent: emailContent
-    }
-    
-  } catch (error) {
-    console.log(`❌ [GOOGLE-MEET-EMAIL] ${timer.end()}ms - Error: ${error.message}`)
-    return {
-      success: false,
-      error: error.message
-    }
-  }
-}
-
-// Simplified TTS processor using Sarvam WebSocket with fallback to API
+// Simplified TTS processor
 class SimplifiedSarvamTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    // Static settings for WebSocket
-    this.sarvamLanguage = "hi-IN" // Static language
-    this.voice = "pavithra" // Static voice
+    this.sarvamLanguage = getSarvamLanguage(language)
+    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
-    this.sarvamWs = null
-    this.sarvamReady = false
-    this.audioQueue = []
-    this.isProcessing = false
-    this.useWebSocket = true // Flag to control WebSocket vs API usage
   }
 
   interrupt() {
@@ -1472,175 +1142,23 @@ class SimplifiedSarvamTTSProcessor {
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true
     }
-    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
-      this.sarvamWs.close()
-    }
   }
 
   reset(newLanguage) {
     this.interrupt()
     if (newLanguage) {
       this.language = newLanguage
+      this.sarvamLanguage = getSarvamLanguage(newLanguage)
     }
     this.isInterrupted = false
     this.totalAudioBytes = 0
-    this.audioQueue = []
-    this.isProcessing = false
   }
 
-  // Connect to Sarvam WebSocket
-  async connectToSarvam() {
-    try {
-      // Try different possible WebSocket endpoints
-      const possibleEndpoints = [
-        "wss://api.sarvam.ai/tts/stream",
-        "wss://api.sarvam.ai/stream/tts",
-        "wss://api.sarvam.ai/websocket/tts",
-        "wss://api.sarvam.ai/v1/tts/stream"
-      ]
-      
-      let connected = false
-      
-      for (const endpoint of possibleEndpoints) {
-        try {
-          console.log(`🎤 [SARVAM-WS] Trying endpoint: ${endpoint}`)
-          
-          this.sarvamWs = new WebSocket(endpoint, {
-            headers: {
-              "API-Subscription-Key": API_KEYS.sarvam,
-            }
-          })
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
 
-          // Set up event handlers
-          this.sarvamWs.onopen = () => {
-            console.log(`🎤 [SARVAM-WS] WebSocket connected to ${endpoint}`)
-            this.sarvamReady = true
-            
-            // Send configuration message
-            const configMessage = {
-              type: "config",
-              target_language_code: this.sarvamLanguage,
-              speaker: this.voice,
-              pitch: 0,
-              pace: 1.0,
-              loudness: 1.0,
-              speech_sample_rate: 8000,
-              enable_preprocessing: true,
-              model: "bulbul:v1"
-            }
-            
-            this.sarvamWs.send(JSON.stringify(configMessage))
-            console.log("🎤 [SARVAM-WS] Configuration sent")
-            
-            // Process queued audio
-            this.processQueuedAudio()
-            connected = true
-          }
+    const timer = createTimer("TTS_SYNTHESIS")
 
-          this.sarvamWs.onmessage = (event) => {
-            try {
-              const data = JSON.parse(event.data)
-              this.handleSarvamMessage(data)
-            } catch (error) {
-              console.log("❌ [SARVAM-WS] Error parsing message:", error.message)
-            }
-          }
-
-          this.sarvamWs.onerror = (error) => {
-            console.log(`❌ [SARVAM-WS] WebSocket error for ${endpoint}:`, error.message)
-            this.sarvamReady = false
-          }
-
-          this.sarvamWs.onclose = () => {
-            console.log(`🔌 [SARVAM-WS] WebSocket closed for ${endpoint}`)
-            this.sarvamReady = false
-          }
-
-          // Wait for connection with timeout
-          await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              if (!this.sarvamReady) {
-                this.sarvamWs.close()
-                reject(new Error(`Connection timeout for ${endpoint}`))
-              }
-            }, 5000)
-
-            this.sarvamWs.onopen = () => {
-              clearTimeout(timeout)
-              resolve()
-            }
-
-            this.sarvamWs.onerror = (error) => {
-              clearTimeout(timeout)
-              reject(error)
-            }
-          })
-
-          if (connected) {
-            console.log(`✅ [SARVAM-WS] Successfully connected to ${endpoint}`)
-            break
-          }
-
-        } catch (error) {
-          console.log(`❌ [SARVAM-WS] Failed to connect to ${endpoint}:`, error.message)
-          if (this.sarvamWs) {
-            this.sarvamWs.close()
-          }
-        }
-      }
-
-      if (!connected) {
-        console.log("⚠️ [SARVAM-WS] All WebSocket endpoints failed, falling back to API")
-        this.useWebSocket = false
-      }
-
-    } catch (error) {
-      console.log("❌ [SARVAM-WS] Connection error:", error.message)
-      this.sarvamReady = false
-      this.useWebSocket = false
-    }
-  }
-
-  // Handle messages from Sarvam WebSocket
-  handleSarvamMessage(data) {
-    if (data.type === "audio") {
-      const audioBase64 = data.audio
-      if (audioBase64 && !this.isInterrupted) {
-        this.streamAudioOptimizedForSIP(audioBase64)
-        const audioBuffer = Buffer.from(audioBase64, "base64")
-        this.totalAudioBytes += audioBuffer.length
-      }
-    } else if (data.type === "error") {
-      console.log("❌ [SARVAM-WS] Sarvam error:", data.message)
-    } else if (data.type === "end") {
-      console.log("✅ [SARVAM-WS] Audio generation completed")
-      this.isProcessing = false
-    }
-  }
-
-  // Process queued audio after connection
-  processQueuedAudio() {
-    if (this.audioQueue.length > 0 && this.sarvamReady) {
-      const text = this.audioQueue.shift()
-      this.sendTextToSarvam(text)
-    }
-  }
-
-  // Send text to Sarvam WebSocket
-  sendTextToSarvam(text) {
-    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
-      const textMessage = {
-        type: "text",
-        text: text
-      }
-      this.sarvamWs.send(JSON.stringify(textMessage))
-      console.log("📤 [SARVAM-WS] Text sent:", text.substring(0, 50) + "...")
-    }
-  }
-
-  // Fallback to API method
-  async synthesizeWithAPI(text) {
-    const timer = createTimer("TTS_API_FALLBACK")
     try {
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -1656,6 +1174,7 @@ class SimplifiedSarvamTTSProcessor {
           pace: 1.0,
           loudness: 1.0,
           speech_sample_rate: 8000,
+          enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
@@ -1663,7 +1182,7 @@ class SimplifiedSarvamTTSProcessor {
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
-          console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - Error: ${response.status}`)
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
           throw new Error(`Sarvam API error: ${response.status}`)
         }
         return
@@ -1674,81 +1193,19 @@ class SimplifiedSarvamTTSProcessor {
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
-          console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - No audio data received`)
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
           throw new Error("No audio data received from Sarvam API")
         }
         return
       }
 
-      console.log(`🕒 [TTS-API-FALLBACK] ${timer.end()}ms - Audio generated via API`)
+      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
         await this.streamAudioOptimizedForSIP(audioBase64)
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
       }
-    } catch (error) {
-      if (!this.isInterrupted) {
-        console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - Error: ${error.message}`)
-        throw error
-      }
-    }
-  }
-
-  async synthesizeAndStream(text) {
-    if (this.isInterrupted) return
-
-    const timer = createTimer("TTS_SYNTHESIS")
-
-    try {
-      // Try WebSocket first if enabled
-      if (this.useWebSocket) {
-        // Connect to Sarvam WebSocket if not connected
-        if (!this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
-          await this.connectToSarvam()
-          
-          // Wait for connection to be ready
-          let attempts = 0
-          while (!this.sarvamReady && attempts < 10) {
-            await new Promise(resolve => setTimeout(resolve, 100))
-            attempts++
-          }
-          
-          if (!this.sarvamReady) {
-            console.log("⚠️ [TTS-SYNTHESIS] WebSocket failed, falling back to API")
-            this.useWebSocket = false
-          }
-        }
-
-        if (this.sarvamReady) {
-          this.isProcessing = true
-          console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Starting WebSocket synthesis`)
-
-          // Send text to Sarvam
-          this.sendTextToSarvam(text)
-
-          // Wait for processing to complete
-          let waitAttempts = 0
-          while (this.isProcessing && waitAttempts < 100 && !this.isInterrupted) {
-            await new Promise(resolve => setTimeout(resolve, 50))
-            waitAttempts++
-          }
-
-          if (this.isInterrupted) {
-            console.log("⚠️ [TTS-SYNTHESIS] Synthesis interrupted")
-            return
-          }
-
-          console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - WebSocket synthesis completed`)
-          return
-        }
-      }
-
-      // Fallback to API
-      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Using API fallback`)
-      await this.synthesizeWithAPI(text)
-      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - API synthesis completed`)
-
     } catch (error) {
       if (!this.isInterrupted) {
         console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
@@ -1813,9 +1270,6 @@ class SimplifiedSarvamTTSProcessor {
   getStats() {
     return {
       totalAudioBytes: this.totalAudioBytes,
-      sarvamReady: this.sarvamReady,
-      isProcessing: this.isProcessing,
-      useWebSocket: this.useWebSocket
     }
   }
 }
@@ -1897,186 +1351,6 @@ const handleExternalCallDisconnection = async (streamSid, reason = 'external_dis
     }
   } catch (error) {
     console.log(`❌ [EXTERNAL-DISCONNECT] Error handling external disconnection: ${error.message}`)
-    return false
-  }
-}
-
-// WhatsApp Template Module URL
-const WHATSAPP_TEMPLATE_URL = "https://whatsapp-template-module.onrender.com/api/whatsapp/send-info"
-
-// Utility function to normalize Indian phone numbers to E.164 format
-const normalizeToE164India = (phoneNumber) => {
-  const digits = String(phoneNumber || "").replace(/\D+/g, "");
-  if (!digits) {
-    throw new Error('Invalid phone number');
-  }
-  // Always take last 10 as local mobile and prefix +91
-  const last10 = digits.slice(-10);
-  if (last10.length !== 10) {
-    throw new Error('Invalid Indian mobile number');
-  }
-  return `+91${last10}`;
-};
-
-// Function to extract organization name and course name from agent description using AI
-const extractOrgAndCourseFromDescription = async (description) => {
-  const timer = createTimer("AI_DESCRIPTION_EXTRACTION")
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `Extract organization name and course name from the given description. Return ONLY a JSON object with two fields:
-- "orgName": The organization/institution name
-- "courseName": The course name or program name
-
-If you can't find either, use "Unknown" as the value.
-
-Example output:
-{"orgName": "EG Classes", "courseName": "UPSE Online Course"}
-
-Return only the JSON, nothing else.`
-          },
-          {
-            role: "user",
-            content: description || "No description available"
-          }
-        ],
-        max_tokens: 100,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`AI extraction failed: ${response.status}`)
-    }
-
-    const data = await response.json()
-    const extractedText = data.choices[0]?.message?.content?.trim()
-    
-    if (extractedText) {
-      try {
-        const parsed = JSON.parse(extractedText)
-        console.log(`🕒 [AI-DESCRIPTION-EXTRACTION] ${timer.end()}ms - Extracted:`, parsed)
-        return {
-          orgName: parsed.orgName || "Unknown",
-          courseName: parsed.courseName || "Unknown"
-        }
-      } catch (parseError) {
-        console.log(`⚠️ [AI-DESCRIPTION-EXTRACTION] JSON parse error: ${parseError.message}`)
-        return { orgName: "Unknown", courseName: "Unknown" }
-      }
-    }
-
-    return { orgName: "Unknown", courseName: "Unknown" }
-  } catch (error) {
-    console.log(`❌ [AI-DESCRIPTION-EXTRACTION] ${timer.end()}ms - Error: ${error.message}`)
-    return { orgName: "Unknown", courseName: "Unknown" }
-  }
-}
-
-// Function to send WhatsApp message after call ends
-const sendWhatsAppAfterCall = async (callLogger, agentConfig) => {
-  const timer = createTimer("WHATSAPP_AFTER_CALL")
-  try {
-    // Get phone number from call logger
-    const phoneNumber = callLogger.mobile
-    if (!phoneNumber) {
-      console.log(`⚠️ [WHATSAPP-AFTER-CALL] No phone number available for WhatsApp message`)
-      return false
-    }
-
-    // Normalize phone number
-    const normalizedPhone = normalizeToE164India(phoneNumber)
-    console.log(`📱 [WHATSAPP-AFTER-CALL] Sending WhatsApp to: ${normalizedPhone}`)
-
-    // Extract org name and course name from agent description
-    const { orgName, courseName } = await extractOrgAndCourseFromDescription(agentConfig.description)
-    console.log(`📱 [WHATSAPP-AFTER-CALL] Extracted - Org: ${orgName}, Course: ${courseName}`)
-
-    // Prepare request body
-    const requestBody = {
-      to: normalizedPhone,
-      orgName: orgName,
-      courseName: courseName
-    }
-
-    console.log(`📱 [WHATSAPP-AFTER-CALL] Request body:`, JSON.stringify(requestBody, null, 2))
-
-    // Send request to WhatsApp template module
-    const response = await fetch(WHATSAPP_TEMPLATE_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "Unknown error")
-      throw new Error(`WhatsApp API error: ${response.status} - ${errorText}`)
-    }
-
-    const result = await response.json()
-    console.log(`✅ [WHATSAPP-AFTER-CALL] ${timer.end()}ms - WhatsApp sent successfully:`, result)
-    
-    // Update call log with WhatsApp status
-    if (callLogger.callLogId) {
-      await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-        'metadata.whatsappSent': true,
-        'metadata.whatsappSentAt': new Date(),
-        'metadata.whatsappData': {
-          phoneNumber: normalizedPhone,
-          orgName: orgName,
-          courseName: courseName,
-          response: result
-        }
-      }).catch(err => console.log(`⚠️ [WHATSAPP-AFTER-CALL] Call log update error: ${err.message}`))
-    }
-
-    return true
-  } catch (error) {
-    console.log(`❌ [WHATSAPP-AFTER-CALL] ${timer.end()}ms - Error: ${error.message}`)
-    
-    // Update call log with WhatsApp failure
-    if (callLogger.callLogId) {
-      await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-        'metadata.whatsappSent': false,
-        'metadata.whatsappError': error.message,
-        'metadata.whatsappAttemptedAt': new Date()
-      }).catch(err => console.log(`⚠️ [WHATSAPP-AFTER-CALL] Call log update error: ${err.message}`))
-    }
-    
-    return false
-  }
-}
-
-// Test function to manually trigger WhatsApp sending (for testing purposes)
-const testWhatsAppSending = async (phoneNumber, agentDescription) => {
-  console.log("🧪 [TEST-WHATSAPP] Testing WhatsApp integration...")
-  
-  const mockCallLogger = {
-    mobile: phoneNumber,
-    callLogId: null
-  }
-  
-  const mockAgentConfig = {
-    description: agentDescription || "EG Classes offers UPSE Online Course for competitive exam preparation"
-  }
-  
-  try {
-    const result = await sendWhatsAppAfterCall(mockCallLogger, mockAgentConfig)
-    console.log("🧪 [TEST-WHATSAPP] Test result:", result)
-    return result
-  } catch (error) {
-    console.log("🧪 [TEST-WHATSAPP] Test error:", error.message)
     return false
   }
 }
@@ -2229,14 +1503,10 @@ const setupUnifiedVoiceServer = (wss) => {
         // Check if user wants to disconnect (fast detection to minimize latency)
         console.log("🔍 [USER-UTTERANCE] Checking disconnection intent...")
         
-        // Check for Google Meet request
-        console.log("🔍 [USER-UTTERANCE] Checking Google Meet request...")
-        
-        // Start all detection processes in parallel
+        // Start disconnection detection in parallel with other processing
         const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
-        const googleMeetCheckPromise = detectGoogleMeetRequest(text, conversationHistory, detectedLanguage)
         
-        // Continue with other processing while checking
+        // Continue with other processing while checking disconnection
         console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
         const openaiPromise = processWithOpenAI(
           text,
@@ -2246,10 +1516,9 @@ const setupUnifiedVoiceServer = (wss) => {
           agentConfig,
         )
         
-        // Wait for all operations to complete
-        const [disconnectionIntent, googleMeetIntent, aiResponse] = await Promise.all([
+        // Wait for both operations to complete
+        const [disconnectionIntent, aiResponse] = await Promise.all([
           disconnectionCheckPromise,
-          googleMeetCheckPromise,
           openaiPromise
         ])
         
@@ -2269,144 +1538,6 @@ const setupUnifiedVoiceServer = (wss) => {
           }, 2000)
           
           return
-        }
-
-        // Handle Google Meet request
-        if (googleMeetIntent === "GOOGLE_MEET" && !callLogger.googleMeetState.isRequested) {
-          console.log("📹 [USER-UTTERANCE] Google Meet requested - asking for email")
-          callLogger.googleMeetState.isRequested = true
-          
-          // Ask for email in the appropriate language
-          const emailRequestMessages = {
-            hi: "बहुत अच्छा! मैं आपके लिए Google Meet शेड्यूल कर सकता हूं। कृपया अपना Gmail ID बताएं।",
-            en: "Great! I can schedule a Google Meet for you. Please provide your Gmail address.",
-            bn: "দারুণ! আমি আপনার জন্য Google Meet শিডিউল করতে পারি। অনুগ্রহ করে আপনার Gmail ঠিকানা দিন।",
-            ta: "நல்லது! நான் உங்களுக்கு Google Meet ஷெட்யூல் செய்யலாம். தயவுசெய்து உங்கள் Gmail முகவரியை வழங்கவும்.",
-            te: "బాగుంది! నేను మీ కోసం Google Meet షెడ్యూల్ చేయగలను. దయచేసి మీ Gmail చిరునామాను అందించండి.",
-            mr: "छान! मी तुमच्यासाठी Google Meet शेड्यूल करू शकतो. कृपया तुमचा Gmail पत्ता द्या.",
-            gu: "બહુ સરસ! હું તમારા માટે Google Meet શેડ્યૂલ કરી શકું છું. કૃપા કરીને તમારું Gmail સરનામું આપો."
-          }
-          
-          const emailRequest = emailRequestMessages[detectedLanguage] || emailRequestMessages.en
-          
-          if (callLogger) {
-            callLogger.logAIResponse(emailRequest, detectedLanguage)
-          }
-          
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(emailRequest)
-          
-          conversationHistory.push(
-            { role: "user", content: text },
-            { role: "assistant", content: emailRequest }
-          )
-          
-          return
-        }
-
-        // Handle email collection for Google Meet
-        if (callLogger.googleMeetState.isRequested && !callLogger.googleMeetState.emailProvided) {
-          console.log("📧 [USER-UTTERANCE] Extracting email for Google Meet...")
-          
-          const extractedEmail = await extractEmailFromText(text)
-          
-          if (extractedEmail) {
-            console.log(`📧 [USER-UTTERANCE] Email extracted: ${extractedEmail}`)
-            callLogger.googleMeetState.emailProvided = true
-            callLogger.googleMeetState.email = extractedEmail
-            
-            // Generate Google Meet link
-            const meetingDetails = generateGoogleMeetLink()
-            callLogger.googleMeetState.meetingDetails = meetingDetails
-            
-            // Send email with meeting link
-            const emailResult = await sendGoogleMeetEmail(extractedEmail, meetingDetails, agentConfig)
-            
-            if (emailResult.success) {
-              callLogger.googleMeetState.emailSent = true
-              
-              // Success message in appropriate language
-              const successMessages = {
-                hi: `धन्यवाद! मैंने आपके Gmail ${extractedEmail} पर Google Meet लिंक भेज दिया है। आपको अभी ईमेल मिल जाएगा।`,
-                en: `Thank you! I've sent the Google Meet link to your Gmail ${extractedEmail}. You should receive the email shortly.`,
-                bn: `ধন্যবাদ! আমি আপনার Gmail ${extractedEmail} এ Google Meet লিংক পাঠিয়েছি। আপনি শীঘ্রই ইমেল পাবেন।`,
-                ta: `நன்றி! நான் உங்கள் Gmail ${extractedEmail} க்கு Google Meet இணைப்பை அனுப்பியுள்ளேன். நீங்கள் விரைவில் மின்னஞ்சலைப் பெறுவீர்கள்.`,
-                te: `ధన్యవాదాలు! నేను మీ Gmail ${extractedEmail} కి Google Meet లింక్ పంపాను. మీరు త్వరలో ఇమెయిల్ అందుకుంటారు.`,
-                mr: `धन्यवाद! मी तुमच्या Gmail ${extractedEmail} वर Google Meet लिंक पाठवला आहे. तुम्हाला लवकरच ईमेल मिळेल.`,
-                gu: `આભાર! મેં તમારા Gmail ${extractedEmail} પર Google Meet લિંક મોકલી છે. તમને ટૂંક સમયમાં ઇમેઇલ मળશે.`
-              }
-              
-              const successMessage = successMessages[detectedLanguage] || successMessages.en
-              
-              if (callLogger) {
-                callLogger.logAIResponse(successMessage, detectedLanguage)
-              }
-              
-              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-              await currentTTS.synthesizeAndStream(successMessage)
-              
-              conversationHistory.push(
-                { role: "user", content: text },
-                { role: "assistant", content: successMessage }
-              )
-              
-              return
-            } else {
-              // Error message
-              const errorMessages = {
-                hi: "माफ़ करें, ईमेल भेजने में समस्या आई। कृपया बाद में पुनः प्रयास करें।",
-                en: "Sorry, there was an issue sending the email. Please try again later.",
-                bn: "দুঃখিত, ইমেল পাঠাতে সমস্যা হয়েছে। অনুগ্রহ করে পরে আবার চেষ্টা করুন।",
-                ta: "மன்னிக்கவும், மின்னஞ்சலை அனுப்புவதில் சிக்கல் ஏற்பட்டது. தயவுசெய்து பின்னர் மீண்டும் முயற்சிக்கவும்.",
-                te: "క్షమించండి, ఇమెయిల్ పంపడంలో సమస్య ఉంది. దయచేసి తర్వాత మళ్లీ ప్రయత్నించండి.",
-                mr: "माफ करा, ईमेल पाठवण्यात समस्या आली. कृपया नंतर पुन्हा प्रयत्न करा.",
-                gu: "માફ કરશો, ઇમેઇલ મોકલવામાં સમસ્યા આવી. કૃપા કરીને પછીથી ફરીથી પ્રયાસ કરો."
-              }
-              
-              const errorMessage = errorMessages[detectedLanguage] || errorMessages.en
-              
-              if (callLogger) {
-                callLogger.logAIResponse(errorMessage, detectedLanguage)
-              }
-              
-              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-              await currentTTS.synthesizeAndStream(errorMessage)
-              
-              conversationHistory.push(
-                { role: "user", content: text },
-                { role: "assistant", content: errorMessage }
-              )
-              
-              return
-            }
-          } else {
-            // Invalid email message
-            const invalidEmailMessages = {
-              hi: "कृपया एक वैध Gmail पता प्रदान करें। उदाहरण: user@gmail.com",
-              en: "Please provide a valid Gmail address. Example: user@gmail.com",
-              bn: "অনুগ্রহ করে একটি বৈধ Gmail ঠিকানা দিন। উদাহরণ: user@gmail.com",
-              ta: "தயவுசெய்து சரியான Gmail முகவரியை வழங்கவும். எடுத்துக்காட்டு: user@gmail.com",
-              te: "దయచేసి చెల్లుబాటు అయ్యే Gmail చిరునామాను అందించండి. ఉదాహరణ: user@gmail.com",
-              mr: "कृपया वैध Gmail पत्ता द्या. उदाहरण: user@gmail.com",
-              gu: "કૃપા કરીને માન્ય Gmail સરનામું આપો. ઉદાહરણ: user@gmail.com"
-            }
-            
-            const invalidEmailMessage = invalidEmailMessages[detectedLanguage] || invalidEmailMessages.en
-            
-            if (callLogger) {
-              callLogger.logAIResponse(invalidEmailMessage, detectedLanguage)
-            }
-            
-            currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-            await currentTTS.synthesizeAndStream(invalidEmailMessage)
-            
-            conversationHistory.push(
-              { role: "user", content: text },
-              { role: "assistant", content: invalidEmailMessage }
-            )
-            
-            return
-          }
         }
 
         if (processingRequestId === currentRequestId && aiResponse) {
@@ -2707,7 +1838,7 @@ const setupUnifiedVoiceServer = (wss) => {
               
               try {
                 console.log("💾 [SIP-STOP] Saving final call log to database...")
-                const savedLog = await callLogger.saveToDatabase("maybe", agentConfig)
+                const savedLog = await callLogger.saveToDatabase("maybe")
                 console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
               } catch (error) {
                 console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
@@ -2743,7 +1874,7 @@ const setupUnifiedVoiceServer = (wss) => {
         
         try {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
-          const savedLog = await callLogger.saveToDatabase("maybe", agentConfig)
+          const savedLog = await callLogger.saveToDatabase("maybe")
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
@@ -2890,20 +2021,5 @@ module.exports = {
     graceful: (callLogger, message, language) => callLogger?.gracefulCallEnd(message, language),
     fast: (callLogger, reason) => callLogger?.fastTerminateCall(reason),
     ultraFast: (callLogger, message, language, reason) => callLogger?.ultraFastTerminateWithMessage(message, language, reason)
-  },
-  // Export WhatsApp methods for external use
-  whatsappMethods: {
-    sendWhatsAppAfterCall,
-    extractOrgAndCourseFromDescription,
-    normalizeToE164India,
-    testWhatsAppSending
-  },
-  // Export Google Meet methods for external use
-  googleMeetMethods: {
-    detectGoogleMeetRequest,
-    extractEmailFromText,
-    validateEmail,
-    generateGoogleMeetLink,
-    sendGoogleMeetEmail
   }
 }
