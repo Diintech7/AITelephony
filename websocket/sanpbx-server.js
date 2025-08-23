@@ -830,8 +830,10 @@ async function handleMedia(ws, data) {
     console.log(`🔍 [SANPBX-MEDIA] Available sessions:`, Array.from(activeSessions.keys()))
     return
   }
+  
 
   if (media && media.payload) {
+    consoloe.log(media)
     // Log the incoming media format for debugging
     if (!session.mediaFormatLogged) {
       console.log(`🎵 [SANPBX-MEDIA] Incoming media format:`)
