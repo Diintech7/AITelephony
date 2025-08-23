@@ -2738,10 +2738,6 @@ const setupUnifiedVoiceServer = (wss) => {
         // Check for Google Meet request
         console.log("🔍 [USER-UTTERANCE] Checking Google Meet request...")
         
-        // Start all detection processes in parallel
-        const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
-        const googleMeetCheckPromise = detectGoogleMeetRequest(text, conversationHistory, detectedLanguage)
-        
         // Continue with other processing while checking
         console.log("🤖 [USER-UTTERANCE] Processing with OpenAI streaming...")
         
