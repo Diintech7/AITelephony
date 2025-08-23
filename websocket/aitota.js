@@ -1104,6 +1104,677 @@ class EnhancedCallLogger {
   }
 }
 
+// Simplified OpenAI processing with streaming
+const processWithOpenAIStreaming = async (
+  userMessage,
+  conversationHistory,
+  detectedLanguage,
+  callLogger,
+  agentConfig,
+  userName = null,
+  ttsProcessor = null
+) => {
+  const timer = createTimer("LLM_STREAMING_PROCESSING")
+
+  try {
+    // Build a stricter system prompt that embeds firstMessage and sets answering policy
+    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    const firstMessage = (agentConfig.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage
+      ? `FirstGreeting: "${firstMessage}"\n`
+      : ""
+
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
+      "If the information is not present, reply briefly that you don't have that information.",
+      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
+      "Keep the entire reply under 100 tokens.",
+      "Stream your response word by word for real-time processing.",
+    ].join(" ")
+
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
+      : null
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
+      ...conversationHistory.slice(-6),
+      { role: "user", content: userMessage },
+    ]
+
+    // Use streaming API for real-time response
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        max_tokens: 120,
+        temperature: 0.3,
+        stream: true, // Enable streaming
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${response.status}`)
+      return null
+    }
+
+    if (!response.body) {
+      console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - No response body`)
+      return null
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let fullResponse = ""
+    let currentChunk = ""
+    let isFirstChunk = true
+
+    console.log(`🔄 [LLM-STREAMING] ${timer.end()}ms - Starting streaming response`)
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        
+        if (done) break
+
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n')
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            
+            if (data === '[DONE]') {
+              console.log(`✅ [LLM-STREAMING] ${timer.end()}ms - Streaming completed`)
+              break
+            }
+            
+            try {
+              const parsed = JSON.parse(data)
+              const content = parsed.choices?.[0]?.delta?.content
+              
+              if (content) {
+                fullResponse += content
+                currentChunk += content
+                
+                // Stream to TTS in real-time if available
+                if (ttsProcessor && ttsProcessor.sarvamReady && ttsProcessor.sarvamWs) {
+                  // Send text chunk to Sarvam for immediate TTS processing
+                  ttsProcessor.sendTextChunk(content)
+                }
+                
+                // Log progress for debugging
+                if (isFirstChunk) {
+                  console.log(`🔄 [LLM-STREAMING] First chunk received: "${content}"`)
+                  isFirstChunk = false
+                }
+              }
+            } catch (parseError) {
+              // Skip malformed JSON chunks
+              continue
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    // Ensure a follow-up question is present at the end
+    if (fullResponse) {
+      const needsFollowUp = !/[?]\s*$/.test(fullResponse)
+      if (needsFollowUp) {
+        const followUps = {
+          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
+          en: "Is there anything else I can help you with?",
+          bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
+          ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
+          te: "ఇంకేమైనా సహాయం కావాలా?",
+          mr: "आणखी काही मदत हवी आहे का?",
+          gu: "શું બીજી કોઈ મદદ કરી શકું?",
+        }
+        const fu = followUps[detectedLanguage] || followUps.en
+        fullResponse = `${fullResponse} ${fu}`.trim()
+        
+        // Send follow-up question to TTS if available
+        if (ttsProcessor && ttsProcessor.sarvamReady && ttsProcessor.sarvamWs) {
+          ttsProcessor.sendTextChunk(fu)
+        }
+      }
+    }
+
+    if (callLogger && fullResponse) {
+      callLogger.logAIResponse(fullResponse, detectedLanguage)
+    }
+
+    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Full response: "${fullResponse}"`)
+    return fullResponse
+
+  } catch (error) {
+    console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${error.message}`)
+    return null
+  }
+}
+
+// Enhanced Sarvam TTS processor with real-time streaming support
+class EnhancedSarvamTTSProcessor {
+  constructor(language, ws, streamSid, callLogger = null) {
+    this.language = language
+    this.ws = ws
+    this.streamSid = streamSid
+    this.callLogger = callLogger
+    this.sarvamLanguage = "en-IN"
+    this.voice = "manisha"
+    this.isInterrupted = false
+    this.currentAudioStreaming = null
+    this.totalAudioBytes = 0
+    this.sarvamWs = null
+    this.sarvamReady = false
+    this.textBuffer = ""
+    this.isProcessing = false
+    this.useWebSocket = true
+    this.streamingMode = false
+    this.textChunkQueue = []
+    this.isStreamingText = false
+  }
+
+  // Connect to Sarvam WebSocket with streaming configuration
+  async connectToSarvam() {
+    try {
+  
+
+      const lang = (this.language || 'en').toLowerCase()
+      if (lang.startsWith('en')) {
+        this.sarvamLanguage = 'en-IN'
+        this.voice = 'manisha'
+      } else if (lang.startsWith('hi')) {
+        this.sarvamLanguage = 'hi-IN'
+        this.voice = 'pavithra'
+      }
+
+      const wsUrl = 'wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v2'
+      console.log(`🎤 [SARVAM-WS] Connecting to ${wsUrl} with streaming support`)
+      this.sarvamWs = new WebSocket(wsUrl, [`api-subscription-key.${API_KEYS.sarvam}`])
+
+      this.sarvamWs.onopen = () => {
+        this.sarvamReady = true
+        const configMessage = {
+          type: 'config',
+          data: {
+            target_language_code: this.sarvamLanguage,
+            speaker: this.voice,
+            pitch: 0.5,
+            pace: 1.0,
+            loudness: 1.0,
+            enable_preprocessing: false,
+            output_audio_codec: 'linear16',
+            output_audio_bitrate: '128k',
+            speech_sample_rate: 8000,
+            min_buffer_size: 20, // Reduced for streaming
+            max_chunk_length: 100, // Reduced for streaming
+            streaming_mode: true, // Enable streaming mode
+          },
+        }
+        this.sarvamWs.send(JSON.stringify(configMessage))
+        console.log("✅ [SARVAM-WS] Streaming config sent successfully")
+        this.streamingMode = true
+        this.processTextChunkQueue()
+      }
+
+      this.sarvamWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          this.handleSarvamMessage(data)
+        } catch (error) {
+          console.error("❌ [SARVAM-WS] Error parsing message:", error.message)
+        }
+      }
+
+      this.sarvamWs.onerror = (error) => {
+        this.sarvamReady = false
+        console.error("❌ [SARVAM-WS] WebSocket error:", error.message)
+      }
+
+      this.sarvamWs.onclose = () => {
+        this.sarvamReady = false
+        this.streamingMode = false
+        console.log("🔌 [SARVAM-WS] WebSocket closed")
+      }
+
+      // Wait for connection to be established
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      if (!this.sarvamReady) {
+        this.useWebSocket = false
+        console.log("⚠️ [SARVAM-WS] Connection timeout, falling back to API")
+      }
+    } catch (error) {
+      this.sarvamReady = false
+      this.useWebSocket = false
+      console.error("❌ [SARVAM-WS] Connection error:", error.message)
+    }
+  }
+
+  // Send text chunk for real-time TTS processing
+  sendTextChunk(textChunk) {
+    if (!this.sarvamReady || !this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
+      // Queue text chunk if WebSocket not ready
+      this.textChunkQueue.push(textChunk)
+      return
+    }
+
+    if (this.isStreamingText) {
+      // Add to buffer for continuous streaming
+      this.textBuffer += textChunk
+      
+      // Send text chunk immediately for real-time processing
+      const textMessage = {
+        type: 'text_chunk',
+        data: { 
+          text: textChunk,
+          is_partial: true,
+          buffer_id: Date.now()
+        }
+      }
+      
+      try {
+        this.sarvamWs.send(JSON.stringify(textMessage))
+        console.log(`📤 [SARVAM-STREAM] Text chunk sent: "${textChunk}"`)
+      } catch (error) {
+        console.error(`❌ [SARVAM-STREAM] Error sending text chunk: ${error.message}`)
+      }
+    } else {
+      // Start new streaming session
+      this.startTextStreaming(textChunk)
+    }
+  }
+
+  // Start text streaming session
+  startTextStreaming(initialText = "") {
+    if (!this.sarvamReady || !this.sarvamWs) return
+
+    this.isStreamingText = true
+    this.textBuffer = initialText || ""
+    
+    // Send start streaming signal
+    const startMessage = {
+      type: 'start_streaming',
+      data: {
+        language: this.sarvamLanguage,
+        voice: this.voice,
+        buffer_id: Date.now()
+      }
+    }
+    
+    try {
+      this.sarvamWs.send(JSON.stringify(startMessage))
+      console.log("🎬 [SARVAM-STREAM] Started text streaming session")
+      
+      // Send initial text if provided
+      if (initialText) {
+        this.sendTextChunk(initialText)
+      }
+    } catch (error) {
+      console.error(`❌ [SARVAM-STREAM] Error starting streaming: ${error.message}`)
+      this.isStreamingText = false
+    }
+  }
+
+  // End text streaming session
+  endTextStreaming() {
+    if (!this.sarvamReady || !this.sarvamWs) return
+
+    this.isStreamingText = false
+    
+    // Send end streaming signal
+    const endMessage = {
+      type: 'end_streaming',
+      data: {
+        buffer_id: Date.now(),
+        final_text: this.textBuffer
+      }
+    }
+    
+    try {
+      this.sarvamWs.send(JSON.stringify(endMessage))
+      console.log("🏁 [SARVAM-STREAM] Ended text streaming session")
+      
+      // Clear buffer
+      this.textBuffer = ""
+    } catch (error) {
+      console.error(`❌ [SARVAM-STREAM] Error ending streaming: ${error.message}`)
+    }
+  }
+
+  // Process queued text chunks
+  processTextChunkQueue() {
+    if (this.textChunkQueue.length > 0 && this.sarvamReady) {
+      console.log(`📋 [SARVAM-STREAM] Processing ${this.textChunkQueue.length} queued text chunks`)
+      
+      while (this.textChunkQueue.length > 0) {
+        const chunk = this.textChunkQueue.shift()
+        this.sendTextChunk(chunk)
+      }
+    }
+  }
+
+  // Handle messages from Sarvam WebSocket
+  handleSarvamMessage(data) {
+    if (data.type === "audio") {
+      const audioBase64 = (data && data.data && data.data.audio) || data.audio
+      if (audioBase64 && !this.isInterrupted) {
+        // Stream audio directly to SIP in real-time
+        this.streamLinear16AudioToSIP(audioBase64)
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+        this.totalAudioBytes += audioBuffer.length
+      }
+    } else if (data.type === "streaming_ready") {
+      console.log("✅ [SARVAM-STREAM] Streaming mode activated")
+      this.streamingMode = true
+    } else if (data.type === "error") {
+      const errMsg = (data && data.data && data.data.message) || data.message || 'unknown'
+      console.log("❌ [SARVAM-WS] Sarvam error:", errMsg)
+    } else if (data.type === "end") {
+      console.log("✅ [SARVAM-WS] Audio generation completed")
+      this.isProcessing = false
+    }
+  }
+
+  // Enhanced streaming synthesis with real-time processing
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
+
+    const timer = createTimer("TTS_STREAMING_SYNTHESIS")
+
+    try {
+      // Try WebSocket streaming first if enabled
+      if (this.useWebSocket && this.streamingMode) {
+        if (!this.sarvamWs || this.sarvamWs.readyState !== WebSocket.OPEN) {
+          await this.connectToSarvam()
+          
+          let attempts = 0
+          while (!this.sarvamReady && attempts < 10) {
+            await new Promise(resolve => setTimeout(resolve, 100))
+            attempts++
+          }
+          
+          if (!this.sarvamReady) {
+            console.log("⚠️ [TTS-STREAMING] WebSocket failed, falling back to API")
+            this.useWebSocket = false
+          }
+        }
+
+        if (this.sarvamReady) {
+          this.isProcessing = true
+          console.log(`🔄 [TTS-STREAMING] ${timer.end()}ms - Starting real-time streaming synthesis`)
+
+          // Wait for any existing audio stream to complete
+          await this.waitForAudioStreamToComplete()
+
+          // Start streaming the text
+          this.startTextStreaming(text)
+          
+          // Send flush message to signal end of text
+          const flushMessage = { type: "flush" }
+          this.sarvamWs.send(JSON.stringify(flushMessage))
+          console.log("📤 [SARVAM-STREAM] Flush signal sent")
+
+          // Wait for processing to complete
+          let waitAttempts = 0
+          while (this.isProcessing && waitAttempts < 100 && !this.isInterrupted) {
+            await new Promise(resolve => setTimeout(resolve, 50))
+            waitAttempts++
+          }
+
+          if (this.isInterrupted) {
+            console.log("⚠️ [TTS-STREAMING] Synthesis interrupted")
+            return
+          }
+
+          // End streaming session
+          this.endTextStreaming()
+
+          console.log(`✅ [TTS-STREAMING] ${timer.end()}ms - Streaming synthesis completed`)
+          return
+        }
+      }
+
+      // Fallback to API method
+      console.log(`🔄 [TTS-STREAMING] ${timer.end()}ms - Using API fallback`)
+      await this.synthesizeWithAPI(text)
+      console.log(`✅ [TTS-STREAMING] ${timer.end()}ms - API synthesis completed`)
+
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.log(`❌ [TTS-STREAMING] ${timer.end()}ms - Error: ${error.message}`)
+        throw error
+      }
+    }
+  }
+
+  
+
+  // Fallback to API method
+  async synthesizeWithAPI(text) {
+    const timer = createTimer("TTS_API_FALLBACK")
+    try {
+      const response = await fetch("https://api.sarvam.ai/text-to-speec", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": API_KEYS.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: this.sarvamLanguage,
+          speaker: this.voice,
+          pitch: 0.5,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
+          model: "bulbul:v1",
+          output_audio_codec: "linear16",
+        }),
+      })
+
+      if (!response.ok || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - Error: ${response.status}`)
+          throw new Error(`Sarvam API error: ${response.status}`)
+        }
+        return
+      }
+
+      const responseData = await response.json()
+      const audioBase64 = responseData.audios?.[0]
+
+      if (!audioBase64 || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - No audio data received`)
+          throw new Error("No audio data received from Sarvam API")
+        }
+        return
+      }
+
+      console.log(`🕒 [TTS-API-FALLBACK] ${timer.end()}ms - Audio generated via API`)
+
+      if (!this.isInterrupted) {
+        await this.waitForAudioStreamToComplete()
+        await this.streamLinear16AudioToSIP(audioBase64)
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+        this.totalAudioBytes += audioBuffer.length
+      }
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.log(`❌ [TTS-API-FALLBACK] ${timer.end()}ms - Error: ${error.message}`)
+        throw error
+      }
+    }
+  }
+
+  // Stream linear16 audio directly to SIP
+  async streamLinear16AudioToSIP(audioBase64) {
+    if (this.isInterrupted) return
+
+    if (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt) {
+      console.log(`⏳ [AUDIO-STREAM] Waiting for existing audio stream to complete...`)
+      let waitAttempts = 0
+      while (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt && waitAttempts < 100) {
+        await new Promise(resolve => setTimeout(resolve, 50))
+        waitAttempts++
+      }
+      if (this.currentAudioStreaming && !this.currentAudioStreaming.interrupt) {
+        console.log(`⚠️ [AUDIO-STREAM] Force interrupting existing stream to prevent overlap`)
+        this.currentAudioStreaming.interrupt = true
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+
+    const audioBuffer = Buffer.from(audioBase64, "base64")
+    const streamingSession = { interrupt: false, streamId: Date.now() }
+    this.currentAudioStreaming = streamingSession
+
+    console.log(`🎵 [AUDIO-STREAM] Starting linear16 audio stream: ${audioBuffer.length} bytes (Stream ID: ${streamingSession.streamId})`)
+
+    const SAMPLE_RATE = 8000
+    const BYTES_PER_SAMPLE = 2
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+
+    let position = 0
+    let chunkIndex = 0
+    let successfulChunks = 0
+
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = audioBuffer.length - position
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+      const chunk = audioBuffer.slice(position, position + chunkSize)
+
+      const mediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: {
+          payload: chunk.toString("base64"),
+        },
+      }
+
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted && !streamingSession.interrupt) {
+        try {
+          this.ws.send(JSON.stringify(mediaMessage))
+          successfulChunks++
+          console.log(`🎵 [AUDIO-STREAM] [${streamingSession.streamId}] Sent linear16 chunk ${chunkIndex + 1} (${chunk.length} bytes), ${Math.round((position / audioBuffer.length) * 100)}% complete`)
+        } catch (error) {
+          console.log(`❌ [AUDIO-STREAM] [${streamingSession.streamId}] Error sending linear16 chunk ${chunkIndex + 1}: ${error.message}`)
+          break
+        }
+      } else {
+        console.log(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] WebSocket not ready or interrupted, stopping audio stream`)
+        break
+      }
+
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
+        const delayMs = Math.max(chunkDurationMs - 2, 10)
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
+
+      position += chunkSize
+      chunkIndex++
+    }
+
+    if (this.currentAudioStreaming === streamingSession) {
+      console.log(`✅ [AUDIO-STREAM] [${streamingSession.streamId}] Linear16 stream completed: ${successfulChunks} chunks sent, ${Math.round((position / audioBuffer.length) * 100)}% of audio streamed`)
+      this.currentAudioStreaming = null
+    } else {
+      console.log(`⚠️ [AUDIO-STREAM] [${streamingSession.streamId}] Stream was interrupted by newer stream`)
+    }
+  }
+
+  // Wait for current audio stream to complete
+  async waitForAudioStreamToComplete(timeoutMs = 5000) {
+    if (!this.isAudioCurrentlyStreaming()) {
+      return true
+    }
+
+    console.log(`⏳ [AUDIO-SYNC] Waiting for current audio stream to complete...`)
+    const startTime = Date.now()
+    
+    while (this.isAudioCurrentlyStreaming() && (Date.now() - startTime) < timeoutMs) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    
+    if (this.isAudioCurrentlyStreaming()) {
+      console.log(`⚠️ [AUDIO-SYNC] Timeout waiting for audio stream, forcing interruption`)
+      this.interrupt()
+      return false
+    }
+    
+    console.log(`✅ [AUDIO-SYNC] Audio stream completed, ready for new audio`)
+    return true
+  }
+
+  // Check if audio is currently streaming
+  isAudioCurrentlyStreaming() {
+    return !!(this.currentAudioStreaming && !this.currentAudioStreaming.interrupt)
+  }
+
+  // Interrupt current processing
+  interrupt() {
+    this.isInterrupted = true
+    if (this.currentAudioStreaming) {
+      console.log(`🛑 [TTS-INTERRUPT] Interrupting current audio stream...`)
+      this.currentAudioStreaming.interrupt = true
+      setTimeout(() => {
+        if (this.currentAudioStreaming) {
+          this.currentAudioStreaming = null
+          console.log(`🛑 [TTS-INTERRUPT] Audio stream cleanup completed`)
+        }
+      }, 100)
+    }
+    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
+      console.log(`🛑 [TTS-INTERRUPT] Closing Sarvam WebSocket connection...`)
+      this.sarvamWs.close()
+    }
+  }
+
+  // Reset processor state
+  reset(newLanguage) {
+    this.interrupt()
+    if (newLanguage) {
+      this.language = newLanguage
+    }
+    this.isInterrupted = false
+    this.totalAudioBytes = 0
+    this.textBuffer = ""
+    this.textChunkQueue = []
+    this.isStreamingText = false
+    this.isProcessing = false
+  }
+
+  // Get processor statistics
+  getStats() {
+    return {
+      totalAudioBytes: this.totalAudioBytes,
+      sarvamReady: this.sarvamReady,
+      isProcessing: this.isProcessing,
+      useWebSocket: this.useWebSocket,
+      streamingMode: this.streamingMode,
+      isAudioStreaming: !!this.currentAudioStreaming && !this.currentAudioStreaming.interrupt,
+      textBufferLength: this.textBuffer.length,
+      queuedChunks: this.textChunkQueue.length
+    }
+  }
+}
+
 // Simplified OpenAI processing
 const processWithOpenAI = async (
   userMessage,
@@ -1559,54 +2230,12 @@ class SimplifiedSarvamTTSProcessor {
     this.isProcessing = false
   }
 
-  // Test API key with REST API first
-  async testApiKey() {
-    try {
-      console.log("🧪 [SARVAM-TEST] Testing API key with REST API...")
-      
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
-        },
-        body: JSON.stringify({
-          inputs: ["test"],
-          target_language_code: "hi-IN",
-          speaker: "pavithra",
-          pitch: 0.5,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
-          model: "bulbul:v1",
-          output_audio_codec: "linear16", // Changed to linear16 for SIP compatibility
-        }),
-      })
-
-      if (response.ok) {
-        console.log("✅ [SARVAM-TEST] API key is valid - REST API works")
-        return true
-      } else {
-        console.log(`❌ [SARVAM-TEST] API key test failed: ${response.status} ${response.statusText}`)
-        return false
-      }
-    } catch (error) {
-      console.log(`❌ [SARVAM-TEST] API key test error: ${error.message}`)
-      return false
-    }
-  }
+  
 
   // Connect to Sarvam WebSocket using subprotocol auth and official URL
   async connectToSarvam() {
     try {
-      const apiKeyValid = await this.testApiKey()
-      if (!apiKeyValid) {
-        console.log("⚠️ [SARVAM-WS] API key validation failed, skipping WebSocket attempts")
-        this.useWebSocket = false
-        return
-      }
-
+   
       const lang = (this.language || 'en').toLowerCase()
       if (lang.startsWith('en')) {
         this.sarvamLanguage = 'en-IN'
@@ -1718,7 +2347,7 @@ class SimplifiedSarvamTTSProcessor {
   async synthesizeWithAPI(text) {
     const timer = createTimer("TTS_API_FALLBACK")
     try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+      const response = await fetch("https://api.sarvam.ai/text-to-speec", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2537,14 +3166,19 @@ const setupUnifiedVoiceServer = (wss) => {
         const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
         const googleMeetCheckPromise = detectGoogleMeetRequest(text, conversationHistory, detectedLanguage)
         
+        // Create enhanced TTS processor for streaming
+        const enhancedTTS = new EnhancedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+        
         // Continue with other processing while checking
-        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
-        const openaiPromise = processWithOpenAI(
+        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI streaming...")
+        const openaiPromise = processWithOpenAIStreaming(
           text,
           conversationHistory,
           detectedLanguage,
           callLogger,
           agentConfig,
+          userName,
+          enhancedTTS // Pass TTS processor for real-time streaming
         )
         
         // Wait for all operations to complete
@@ -2594,7 +3228,7 @@ const setupUnifiedVoiceServer = (wss) => {
             callLogger.logAIResponse(emailRequest, detectedLanguage)
           }
           
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          currentTTS = new EnhancedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
           await currentTTS.synthesizeAndStream(emailRequest)
           
           conversationHistory.push(
@@ -2643,8 +3277,8 @@ const setupUnifiedVoiceServer = (wss) => {
                 callLogger.logAIResponse(successMessage, detectedLanguage)
               }
               
-              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-              await currentTTS.synthesizeAndStream(successMessage)
+                        currentTTS = new EnhancedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          await currentTTS.synthesizeAndStream(successMessage)
               
               conversationHistory.push(
                 { role: "user", content: text },
@@ -2670,8 +3304,8 @@ const setupUnifiedVoiceServer = (wss) => {
                 callLogger.logAIResponse(errorMessage, detectedLanguage)
               }
               
-              currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-              await currentTTS.synthesizeAndStream(errorMessage)
+                        currentTTS = new EnhancedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          await currentTTS.synthesizeAndStream(errorMessage)
               
               conversationHistory.push(
                 { role: "user", content: text },
@@ -2698,8 +3332,8 @@ const setupUnifiedVoiceServer = (wss) => {
               callLogger.logAIResponse(invalidEmailMessage, detectedLanguage)
             }
             
-            currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-            await currentTTS.synthesizeAndStream(invalidEmailMessage)
+                      currentTTS = new EnhancedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          await currentTTS.synthesizeAndStream(invalidEmailMessage)
             
             conversationHistory.push(
               { role: "user", content: text },
@@ -2712,10 +3346,10 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (processingRequestId === currentRequestId && aiResponse) {
           console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+          console.log("🎤 [USER-UTTERANCE] TTS already streaming from OpenAI...")
           
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(aiResponse)
+          // TTS is already streaming from OpenAI, just update conversation history
+          currentTTS = enhancedTTS
 
           conversationHistory.push(
             { role: "user", content: text },
@@ -2726,7 +3360,7 @@ const setupUnifiedVoiceServer = (wss) => {
             conversationHistory = conversationHistory.slice(-10)
           }
           
-          console.log("✅ [USER-UTTERANCE] Processing completed")
+          console.log("✅ [USER-UTTERANCE] Processing completed with streaming TTS")
         } else {
           console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
         }
@@ -2962,8 +3596,8 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-            await tts.synthesizeAndStream(greeting)
+            const greetingTTS = new EnhancedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            await greetingTTS.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
           }
@@ -3185,6 +3819,11 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
 module.exports = { 
   setupUnifiedVoiceServer, 
   terminateCallByStreamSid,
+  // Export streaming functions for external use
+  streamingFunctions: {
+    processWithOpenAIStreaming,
+    EnhancedSarvamTTSProcessor
+  },
   // Export termination methods for external use
   terminationMethods: {
     graceful: (callLogger, message, language) => callLogger?.gracefulCallEnd(message, language),
