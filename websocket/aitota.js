@@ -1290,7 +1290,12 @@ class EnhancedSarvamTTSProcessor {
   // Connect to Sarvam WebSocket with streaming configuration
   async connectToSarvam() {
     try {
-  
+      const apiKeyValid = await this.testApiKey()
+      if (!apiKeyValid) {
+        console.log("⚠️ [SARVAM-WS] API key validation failed, skipping WebSocket attempts")
+        this.useWebSocket = false
+        return
+      }
 
       const lang = (this.language || 'en').toLowerCase()
       if (lang.startsWith('en')) {
@@ -1560,7 +1565,43 @@ class EnhancedSarvamTTSProcessor {
     }
   }
 
-  
+  // Test API key with REST API first
+  async testApiKey() {
+    try {
+      console.log("🧪 [SARVAM-TEST] Testing API key with REST API...")
+      
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": API_KEYS.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: ["test"],
+          target_language_code: "hi-IN",
+          speaker: "pavithra",
+          pitch: 0.5,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
+          model: "bulbul:v1",
+          output_audio_codec: "linear16",
+        }),
+      })
+
+      if (response.ok) {
+        console.log("✅ [SARVAM-TEST] API key is valid - REST API works")
+        return true
+      } else {
+        console.log(`❌ [SARVAM-TEST] API key test failed: ${response.status} ${response.statusText}`)
+        return false
+      }
+    } catch (error) {
+      console.log(`❌ [SARVAM-TEST] API key test error: ${error.message}`)
+      return false
+    }
+  }
 
   // Fallback to API method
   async synthesizeWithAPI(text) {
@@ -2230,12 +2271,54 @@ class SimplifiedSarvamTTSProcessor {
     this.isProcessing = false
   }
 
-  
+  // Test API key with REST API first
+  async testApiKey() {
+    try {
+      console.log("🧪 [SARVAM-TEST] Testing API key with REST API...")
+      
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": API_KEYS.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: ["test"],
+          target_language_code: "hi-IN",
+          speaker: "pavithra",
+          pitch: 0.5,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
+          model: "bulbul:v1",
+          output_audio_codec: "linear16", // Changed to linear16 for SIP compatibility
+        }),
+      })
+
+      if (response.ok) {
+        console.log("✅ [SARVAM-TEST] API key is valid - REST API works")
+        return true
+      } else {
+        console.log(`❌ [SARVAM-TEST] API key test failed: ${response.status} ${response.statusText}`)
+        return false
+      }
+    } catch (error) {
+      console.log(`❌ [SARVAM-TEST] API key test error: ${error.message}`)
+      return false
+    }
+  }
 
   // Connect to Sarvam WebSocket using subprotocol auth and official URL
   async connectToSarvam() {
     try {
-   
+      const apiKeyValid = await this.testApiKey()
+      if (!apiKeyValid) {
+        console.log("⚠️ [SARVAM-WS] API key validation failed, skipping WebSocket attempts")
+        this.useWebSocket = false
+        return
+      }
+
       const lang = (this.language || 'en').toLowerCase()
       if (lang.startsWith('en')) {
         this.sarvamLanguage = 'en-IN'
