@@ -184,8 +184,14 @@ const setupUnifiedVoiceServer = (ws) => {
       // Add a small delay before streaming to ensure call is ready
       await new Promise(resolve => setTimeout(resolve, 100));
       
-      // Stream audio with optimized buffering
+      // Try primary streaming method
       await streamAudioToCall(audioBase64);
+      
+      // If that didn't work, try alternative after a delay
+      setTimeout(async () => {
+        console.log('[TTS] Trying alternative streaming method in case primary failed');
+        await streamAudioAlternative(audioBase64);
+      }, 500);
       
     } catch (error) {
       console.error('[TTS] Error:', error.message);
@@ -197,67 +203,76 @@ const setupUnifiedVoiceServer = (ws) => {
   };
 
   /**
-   * Optimized audio streaming with proper buffering for C-Zentrix
+   * Optimized audio streaming with proper format for C-Zentrix
    */
   const streamAudioToCall = async (audioBase64) => {
     const audioBuffer = Buffer.from(audioBase64, 'base64');
     
-    // C-Zentrix expects 160-byte chunks but we should send them faster to build buffer
-    const CHUNK_SIZE = 160; // 160 bytes = 10ms of 8kHz 16-bit mono
-    const BATCH_SIZE = 10; // Send 10 chunks at once (100ms of audio)
-    const BATCH_DELAY = 50; // 50ms delay between batches (faster buffering)
+    // C-Zentrix expects specific audio format
+    // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
+    const CHUNK_SIZE = 160; // 10ms chunks for 8kHz 16-bit mono
+    const CHUNK_DURATION_MS = 10; // Real-time streaming
     
     let position = 0;
     const streamStart = Date.now();
-    const totalChunks = Math.ceil(audioBuffer.length / CHUNK_SIZE);
     
-    console.log(`[STREAM] Starting audio stream: ${audioBuffer.length} bytes in ${totalChunks} chunks`);
+    console.log(`[STREAM] Starting audio stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`);
     console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`);
     
+    // Send a test message first to verify WebSocket is working
+    const testMessage = {
+      event: 'test',
+      streamSid: streamSid,
+      timestamp: Date.now()
+    };
+    
+    try {
+      ws.send(JSON.stringify(testMessage));
+      console.log('[STREAM] Test message sent successfully');
+    } catch (error) {
+      console.error('[STREAM] Failed to send test message:', error.message);
+      return;
+    }
+    
     let chunksSuccessfullySent = 0;
-    let batchCount = 0;
     
     while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
-      // Send a batch of chunks quickly
-      for (let i = 0; i < BATCH_SIZE && position < audioBuffer.length; i++) {
-        const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
-        
-        // Pad smaller chunks with silence if needed
-        const paddedChunk = chunk.length < CHUNK_SIZE ? 
-          Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk;
-        
-        const mediaMessage = {
-          event: 'media',
-          streamSid: streamSid,
-          media: {
-            payload: paddedChunk.toString('base64')
-          }
-        };
-
-        try {
-          ws.send(JSON.stringify(mediaMessage));
-          chunksSuccessfullySent++;
-          position += CHUNK_SIZE;
-        } catch (error) {
-          console.error(`[STREAM] Failed to send chunk ${chunksSuccessfullySent}:`, error.message);
-          return;
+      const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
+      
+      // Pad smaller chunks with silence if needed
+      const paddedChunk = chunk.length < CHUNK_SIZE ? 
+        Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk;
+      
+      const mediaMessage = {
+        event: 'media',
+        streamSid: streamSid,
+        media: {
+          payload: paddedChunk.toString('base64')
         }
+      };
+
+      try {
+        ws.send(JSON.stringify(mediaMessage));
+        chunksSuccessfullySent++;
+        
+        // Log every 50th chunk to monitor progress
+        if (chunksSuccessfullySent % 50 === 0) {
+          console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`);
+        }
+      } catch (error) {
+        console.error(`[STREAM] Failed to send chunk ${chunksSuccessfullySent}:`, error.message);
+        break;
       }
+
+      position += CHUNK_SIZE;
       
-      batchCount++;
-      
-      // Log progress every 20 batches (2 seconds of audio)
-      if (batchCount % 20 === 0) {
-        console.log(`[STREAM] Sent ${chunksSuccessfullySent}/${totalChunks} chunks (${batchCount} batches)`);
-      }
-      
-      // Short delay between batches to allow buffering
+      // Maintain real-time streaming pace
       if (position < audioBuffer.length) {
-        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
+        await new Promise(resolve => setTimeout(resolve, CHUNK_DURATION_MS));
       }
     }
     
-    // Add end silence
+    // Add a small silence buffer at the end
     try {
       const silenceChunk = Buffer.alloc(CHUNK_SIZE);
       const silenceMessage = {
@@ -274,9 +289,7 @@ const setupUnifiedVoiceServer = (ws) => {
     }
     
     const streamDuration = Date.now() - streamStart;
-    const expectedAudioDuration = (totalChunks * 10); // 10ms per chunk
-    console.log(`[STREAM] Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks`);
-    console.log(`[STREAM] Expected audio duration: ${expectedAudioDuration}ms, Stream efficiency: ${(expectedAudioDuration/streamDuration*100).toFixed(1)}%`);
+    console.log(`[STREAM] Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`);
   };
 
   /**
