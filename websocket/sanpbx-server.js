@@ -130,7 +130,11 @@ class OptimizedSanIPPBXSession extends EventEmitter {
     });
 
     connection.on('open', () => {
-      console.log(`🎤 [DEEPGRAM] Connected for session: ${this.callId}`);
+      console.log(`🎤 [DEEPGRAM] WebSocket OPEN for session: ${this.callId}`);
+    });
+
+    connection.on('close', () => {
+      console.log(`🎤 [DEEPGRAM] WebSocket CLOSED for session: ${this.callId}`);
     });
 
     connection.on('Results', async (data) => {
@@ -158,6 +162,7 @@ class OptimizedSanIPPBXSession extends EventEmitter {
     });
 
     this.deepgram = connection;
+    this.deepgramOpen = true;
   }
 
   initializeOpenAI() {
@@ -210,12 +215,14 @@ class OptimizedSanIPPBXSession extends EventEmitter {
     this.lastActivityTime = Date.now();
     
     try {
-      // Process audio with optimized pipeline
+      // Always ensure base64 PCM is sent to Deepgram
       const processedAudio = this.audioProcessor.processIncomingAudio(base64Audio);
       
       if (processedAudio && this.deepgram && !this.isSpeaking) {
-        // Send to Deepgram only if we have valid audio and aren't speaking
-        this.deepgram.send(processedAudio);
+        // Send as base64 PCM
+        const base64Pcm = processedAudio.toString('base64');
+        this.deepgram.send(Buffer.from(base64Pcm, 'base64'));
+        console.log(`🎤 [DEEPGRAM] Sent base64 PCM audio for session: ${this.callId}`);
         this.metrics.packetsProcessed++;
         
         // Record audio processing latency
@@ -504,6 +511,8 @@ class OptimizedSanIPPBXSession extends EventEmitter {
   cleanup() {
     if (this.cleanedUp) return;
     this.cleanedUp = true;
+    // Remove all event listeners first to prevent recursion
+    this.removeAllListeners();
     try {
       console.log(`🧹 [CLEANUP] Session cleanup for: ${this.callId}`);
       
@@ -511,10 +520,12 @@ class OptimizedSanIPPBXSession extends EventEmitter {
       const finalStats = this.getSessionStats();
       console.log(`📊 [SESSION-STATS] Final stats for ${this.callId}:`, finalStats);
       
-      // Close Deepgram connection
-      if (this.deepgram) {
+      // Close Deepgram connection only at the end
+      if (this.deepgram && this.deepgramOpen) {
         try {
           this.deepgram.finish();
+          this.deepgramOpen = false;
+          console.log(`🎤 [DEEPGRAM] WebSocket FINISH called for session: ${this.callId}`);
         } catch (error) {
           console.warn(`⚠️ [CLEANUP] Deepgram cleanup error:`, error.message);
         }
@@ -528,12 +539,9 @@ class OptimizedSanIPPBXSession extends EventEmitter {
       // Store session stats for analytics
       sessionStats.set(this.callId, finalStats);
       
-      // Remove from active sessions
+      // Remove from activeSessions map, but do NOT call cleanup again
       activeSessions.delete(this.callId);
       activeSessions.delete(this.streamId);
-      
-      // Clean up event listeners
-      this.removeAllListeners();
       
       console.log(`✅ [CLEANUP] Session ${this.callId} cleaned up successfully`);
       
@@ -639,195 +647,64 @@ function setupEnhancedSanPbxWebSocketServer(wss) {
             }
             break;
             
-          case 'answer':
-            if (currentSession) {
-              console.log(`📞 [ANSWER] Call answered: ${message.callId}`);
-            }
-            break;
-            
           case 'media':
-            if (currentSession && message.media?.payload) {
-              // High-frequency event - minimal logging
-              currentSession.processIncomingAudio(message.media.payload);
+            if (currentSession) {
+              const base64Audio = message.media.payload;
+              currentSession.processIncomingAudio(base64Audio);
             }
             break;
             
           case 'dtmf':
             if (currentSession) {
-              currentSession.handleDTMF(message.digit, parseInt(message.dtmfDurationMs) || 0);
+              const digit = message.dtmf.digit;
+              const duration = message.dtmf.duration;
+              currentSession.handleDTMF(digit, duration);
             }
             break;
             
           case 'transfer-call':
             if (currentSession) {
-              currentSession.handleTransferCall(message.transferTo);
+              const transferTo = message.transferTo;
+              currentSession.handleTransferCall(transferTo);
             }
             break;
             
-          case 'hangup-call':
+          case 'hangup':
             if (currentSession) {
               currentSession.hangup();
             }
             break;
             
-          case 'stop':
-            console.log(`🛑 [STOP] Call ended: ${message.callId} | Reason: ${message.disconnectedBy}`);
-            if (currentSession) {
-              const stats = currentSession.getSessionStats();
-              console.log(`📊 [STOP] Final call stats:`, stats);
-              currentSession.cleanup();
-              currentSession = null;
-            }
-            break;
-            
-          case 'ping':
-            // Handle ping for connection keep-alive
-            ws.send(JSON.stringify({
-              event: 'pong',
-              timestamp: new Date().toISOString()
-            }));
-            break;
-            
           default:
-            console.log(`❓ [SANPBX-WS] Unknown event: ${message.event}`);
+            console.log(`👉 [SANPBX-WS] Unhandled event: ${message.event} (${message.callId || 'unknown'})`);
+            break;
         }
         
       } catch (error) {
-        console.error('❌ [SANPBX-WS] Message processing error:', error.message);
-        console.error('📝 [SANPBX-WS] Raw message:', data.toString().substring(0, 500));
-        
-        // Send error response
-        try {
-          ws.send(JSON.stringify({
-            event: 'error',
-            message: 'Message processing failed',
-            timestamp: new Date().toISOString()
-          }));
-        } catch (sendError) {
-          console.error('❌ [SANPBX-WS] Failed to send error response:', sendError.message);
+        console.error(`❌ [SANPBX-WS] Error processing message:`, error.message);
+        if (currentSession) {
+          currentSession.metrics.errors++;
+          currentSession.emit('error', error);
         }
       }
     });
     
-    ws.on('close', (code, reason) => {
-      const connectionDuration = Date.now() - connectionStartTime;
-      console.log(`🔗 [SANPBX-WS] Connection closed: ${code} ${reason} (duration: ${connectionDuration}ms)`);
-      
+    ws.on('close', () => {
+      console.log(`🔗 [SANPBX-WS] Enhanced connection closed for: ${req.socket.remoteAddress}`);
       if (currentSession) {
         currentSession.cleanup();
-        currentSession = null;
       }
     });
     
     ws.on('error', (error) => {
-      console.error('❌ [SANPBX-WS] WebSocket error:', error.message);
-      
+      console.error(`❌ [SANPBX-WS] Enhanced connection error:`, error.message);
       if (currentSession) {
-        currentSession.cleanup();
-        currentSession = null;
+        currentSession.emit('error', error);
       }
-    });
-    
-    // Connection health monitoring
-    const healthCheckInterval = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.ping();
-      } else {
-        clearInterval(healthCheckInterval);
-      }
-    }, 30000); // Ping every 30 seconds
-    
-    ws.on('pong', () => {
-      // Connection is healthy
     });
   });
-  
-  // Periodic cleanup of stale sessions and statistics
-  setInterval(() => {
-    const now = Date.now();
-    const staleThreshold = 5 * 60 * 1000; // 5 minutes
-    let cleanedCount = 0;
-    
-    for (const [key, session] of activeSessions.entries()) {
-      if (now - session.lastActivityTime > staleThreshold) {
-        console.log(`🧹 [CLEANUP] Removing stale session: ${key}`);
-        session.cleanup();
-        cleanedCount++;
-      }
-    }
-    
-    if (cleanedCount > 0) {
-      console.log(`🧹 [CLEANUP] Cleaned up ${cleanedCount} stale sessions`);
-    }
-    
-    // Log server health
-    if (activeSessions.size > 0) {
-      console.log(`📊 [SERVER-HEALTH] Active sessions: ${activeSessions.size}, Total processed: ${sessionStats.size}`);
-    }
-    
-  }, 60000); // Check every minute
-  
-  // Graceful shutdown handler
-  const gracefulShutdown = () => {
-    console.log('🛑 [SANPBX-WS] Shutting down gracefully...');
-    
-    // Close all active sessions
-    for (const [key, session] of activeSessions.entries()) {
-      try {
-        session.cleanup();
-      } catch (error) {
-        console.error(`❌ [SHUTDOWN] Session cleanup error for ${key}:`, error.message);
-      }
-    }
-    
-    // Stop performance monitoring
-    performanceMonitor.stop();
-    latencyOptimizer.stop();
-    
-    console.log('✅ [SANPBX-WS] Graceful shutdown complete');
-  };
-  
-  process.on('SIGINT', gracefulShutdown);
-  process.on('SIGTERM', gracefulShutdown);
-  
-  console.log('✅ [SANPBX-WS] Enhanced SanIPPBX WebSocket server setup complete');
-  console.log('📊 [SANPBX-WS] Performance monitoring and optimization enabled');
-  console.log('🤖 [SANPBX-WS] AI services: Deepgram + OpenAI + Sarvam ready');
-}
-
-/**
- * Get comprehensive server statistics
- */
-function getServerStatistics() {
-  const stats = {
-    server: {
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-      timestamp: new Date().toISOString()
-    },
-    sessions: {
-      active: activeSessions.size,
-      total: sessionStats.size,
-      activeSessions: Array.from(activeSessions.entries()).map(([key, session]) => ({
-        id: key,
-        callId: session.callId,
-        duration: Date.now() - session.sessionStartTime,
-        metrics: session.getSessionStats()
-      }))
-    },
-    performance: performanceMonitor.getPerformanceReport(),
-    optimizations: latencyOptimizer.getOptimizationHistory(5)
-  };
-  
-  return stats;
 }
 
 module.exports = {
-  setupEnhancedSanPbxWebSocketServer: setupEnhancedSanPbxWebSocketServer,
-  OptimizedSanIPPBXSession,
-  activeSessions,
-  sessionStats,
-  getServerStatistics,
-  performanceMonitor,
-  latencyOptimizer
+  setupEnhancedSanPbxWebSocketServer
 };
