@@ -12,6 +12,30 @@ if (!DEEPGRAM_API_KEY || !SARVAM_API_KEY || !OPENAI_API_KEY) {
   process.exit(1);
 }
 
+// Test Deepgram API key on startup
+const testDeepgramConnection = async () => {
+  try {
+    const response = await fetch('https://api.deepgram.com/v1/projects', {
+      headers: {
+        'Authorization': `Token ${DEEPGRAM_API_KEY}`
+      }
+    });
+    
+    if (response.ok) {
+      console.log('✅ Deepgram API key is valid');
+    } else {
+      console.error(`❌ Deepgram API key test failed: ${response.status}`);
+      const errorText = await response.text();
+      console.error('Error details:', errorText);
+    }
+  } catch (error) {
+    console.error('❌ Deepgram API key test error:', error.message);
+  }
+};
+
+// Run test on startup
+testDeepgramConnection();
+
 const fetch = globalThis.fetch || require('node-fetch');
 
 // Precompiled responses for common queries (instant responses)
@@ -44,6 +68,7 @@ const setupUnifiedVoiceServer = (ws) => {
   let silenceTimer = null;
   let audioQueue = [];
   let isStreaming = false;
+  let sttFailed = false; // Track STT failure state
 
   /**
    * Check for quick responses first (0ms latency)
@@ -146,31 +171,47 @@ const setupUnifiedVoiceServer = (ws) => {
   /**
    * Connect to Deepgram with optimized settings and fallback
    */
-  const connectToDeepgram = () => {
-    console.log('[STT] Connecting to Deepgram');
+  const connectToDeepgram = (attemptCount = 0) => {
+    console.log(`[STT] Connecting to Deepgram (attempt ${attemptCount + 1})`);
 
-    // Try primary connection first
-    const primaryParams = {
-      'sample_rate': '8000',
-      'channels': '1', 
+    // Start with minimal parameters that always work
+    let params = {
       'encoding': 'linear16',
-      'model': 'nova-2',
-      'language': 'en',
-      'interim_results': 'true',
-      'smart_format': 'true',
-      'endpointing': '200',
-      'vad_turnoff': '250',
-      'punctuate': 'true'
+      'sample_rate': '8000',
+      'channels': '1'
     };
 
-    const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(primaryParams).toString()}`;
+    // Add additional parameters based on attempt
+    if (attemptCount === 0) {
+      // First attempt: Full feature set
+      params = {
+        ...params,
+        'model': 'nova-2',
+        'language': 'en',
+        'interim_results': 'true',
+        'smart_format': 'true',
+        'endpointing': '300',
+        'punctuate': 'true'
+      };
+    } else if (attemptCount === 1) {
+      // Second attempt: Basic features
+      params = {
+        ...params,
+        'model': 'base',
+        'language': 'en',
+        'interim_results': 'true'
+      };
+    }
+    // Third attempt uses minimal params only
+
+    const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`;
     
-    console.log('[STT] Connecting to URL:', deepgramUrl);
+    console.log(`[STT] Connecting to URL: ${deepgramUrl}`);
+    console.log(`[STT] Using API key: ${DEEPGRAM_API_KEY ? `${DEEPGRAM_API_KEY.substring(0, 8)}...` : 'MISSING'}`);
 
     deepgramWs = new WebSocket(deepgramUrl, {
       headers: {
-        'Authorization': `Token ${DEEPGRAM_API_KEY}`,
-        'User-Agent': 'CZentrix-VoiceBot/1.0'
+        'Authorization': `Token ${DEEPGRAM_API_KEY}`
       }
     });
 
@@ -221,21 +262,27 @@ const setupUnifiedVoiceServer = (ws) => {
       }
     });
 
-    deepgramWs.on('error', (error) => {
-      console.error('[STT] Deepgram error:', error.message);
-      console.error('[STT] Full error details:', error);
+    deepgramWs.on('error', async (error) => {
+      console.error(`[STT] Deepgram error (attempt ${attemptCount + 1}):`, error.message);
       
-      // Attempt to reconnect after a brief delay
-      setTimeout(() => {
-        if (!deepgramWs || deepgramWs.readyState === WebSocket.CLOSED) {
-          console.log('[STT] Attempting to reconnect to Deepgram...');
-          connectToDeepgram();
-        }
-      }, 2000);
+      // Try different connection approaches
+      if (attemptCount < 3) {
+        console.log(`[STT] Retrying with different parameters...`);
+        setTimeout(() => {
+          connectToDeepgram(attemptCount + 1);
+        }, 1000 * (attemptCount + 1)); // Increasing delay
+      } else {
+        console.error('[STT] All Deepgram connection attempts failed. Check API key and permissions.');
+        sttFailed = true;
+        
+        // Provide feedback to user about STT failure
+        const fallbackMessage = "I'm having trouble with speech recognition right now, but I can still help you. Please use the keypad to navigate options.";
+        await synthesizeAndStreamAudio(fallbackMessage);
+      }
     });
 
-    deepgramWs.on('close', () => {
-      console.log('[STT] Deepgram connection closed');
+    deepgramWs.on('close', (code, reason) => {
+      console.log(`[STT] Deepgram connection closed: ${code} - ${reason}`);
     });
   };
 
@@ -387,8 +434,8 @@ const setupUnifiedVoiceServer = (ws) => {
           
           console.log('[CZ] StreamSID:', streamSid);
           
-          // Connect to Deepgram immediately
-          connectToDeepgram();
+          // Connect to Deepgram for speech recognition
+          connectToDeepgram(0);
           
           // Send optimized greeting
           const greeting = 'Hi! How can I help you?';
@@ -401,6 +448,9 @@ const setupUnifiedVoiceServer = (ws) => {
           if (data.media?.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             const audioBuffer = Buffer.from(data.media.payload, 'base64');
             deepgramWs.send(audioBuffer);
+          } else if (sttFailed) {
+            // If STT failed, we can still respond to DTMF or provide menu-driven responses
+            console.log('[STT] Audio received but STT unavailable - consider implementing DTMF fallback');
           }
           break;
 
