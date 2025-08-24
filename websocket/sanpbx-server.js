@@ -821,7 +821,7 @@ function getServerStatistics() {
 }
 
 module.exports = {
-  setupEnhancedSanPbxWebSocketServer: setupEnhancedSanPbxWebSocketServer,
+  setupSanPbxWebSocketServer: setupEnhancedSanPbxWebSocketServer,
   OptimizedSanIPPBXSession,
   activeSessions,
   sessionStats,
