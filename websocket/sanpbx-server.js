@@ -1356,7 +1356,7 @@ const handleExternalCallDisconnection = async (streamSid, reason = 'external_dis
 }
 
 // Main WebSocket server setup with enhanced live transcript functionality
-const setupUnifiedVoiceServer = (wss) => {
+const setupSanPbxWebSocketServer = (wss) => {
   wss.on("connection", (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`)
     const urlParams = Object.fromEntries(url.searchParams.entries())
@@ -2014,7 +2014,7 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
 }
 
 module.exports = { 
-  setupUnifiedVoiceServer, 
+  setupSanPbxWebSocketServer, 
   terminateCallByStreamSid,
   // Export termination methods for external use
   terminationMethods: {
