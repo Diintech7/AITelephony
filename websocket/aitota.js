@@ -260,177 +260,183 @@ class SimplifiedSarvamTTSProcessor {
   }
 }
 
-const setupUnifiedVoiceServer = (ws) => {
-  console.log("🔌 [WEBSOCKET] New connection established")
+const setupUnifiedVoiceServer = (wss) => {
+  console.log("🎤 [VOICE-AI] Setting up unified voice server")
 
-  let streamSid = null
-  const currentLanguage = "hi"
-  let conversationHistory = []
-  let currentTTS = null
-  let isProcessing = false
-  let lastProcessedText = ""
-  let processingRequestId = 0
+  // Handle each WebSocket connection
+  wss.on("connection", (ws, req) => {
+    console.log("🔌 [WEBSOCKET] New voice AI connection established")
 
-  // Deepgram WebSocket connection
-  let deepgramWs = null
-  let deepgramReady = false
-  const deepgramAudioQueue = []
-  let sttTimer = null
-  const userUtteranceBuffer = ""
+    let streamSid = null
+    const currentLanguage = "hi"
+    let conversationHistory = []
+    let currentTTS = null
+    let isProcessing = false
+    let lastProcessedText = ""
+    let processingRequestId = 0
 
-  const connectToDeepgram = async () => {
-    try {
-      const deepgramLanguage = getDeepgramLanguage(currentLanguage)
+    // Deepgram WebSocket connection
+    let deepgramWs = null
+    let deepgramReady = false
+    let sttTimer = null
 
-      const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-      deepgramUrl.searchParams.append("sample_rate", "8000")
-      deepgramUrl.searchParams.append("channels", "1")
-      deepgramUrl.searchParams.append("encoding", "linear16")
-      deepgramUrl.searchParams.append("model", "nova-2")
-      deepgramUrl.searchParams.append("language", deepgramLanguage)
-      deepgramUrl.searchParams.append("smart_format", "true")
+    const connectToDeepgram = async () => {
+      try {
+        const deepgramLanguage = getDeepgramLanguage(currentLanguage)
 
-      deepgramWs = new WebSocket(deepgramUrl.toString(), {
-        headers: { Authorization: `Token ${API_KEYS.deepgram}` },
-      })
+        const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
+        deepgramUrl.searchParams.append("sample_rate", "8000")
+        deepgramUrl.searchParams.append("channels", "1")
+        deepgramUrl.searchParams.append("encoding", "linear16")
+        deepgramUrl.searchParams.append("model", "nova-2")
+        deepgramUrl.searchParams.append("language", deepgramLanguage)
+        deepgramUrl.searchParams.append("smart_format", "true")
+        deepgramUrl.searchParams.append("interim_results", "false")
 
-      deepgramWs.onopen = () => {
-        console.log("🎤 [DEEPGRAM] Connection established")
-        deepgramReady = true
-        console.log("🎤 [DEEPGRAM] Ready to process audio")
-      }
+        deepgramWs = new WebSocket(deepgramUrl.toString(), {
+          headers: { Authorization: `Token ${API_KEYS.deepgram}` },
+        })
 
-      deepgramWs.onmessage = async (event) => {
-        const data = JSON.parse(event.data)
-        await handleDeepgramResponse(data)
-      }
-
-      deepgramWs.onerror = (error) => {
-        console.log("❌ [DEEPGRAM] Connection error:", error.message)
-        deepgramReady = false
-      }
-
-      deepgramWs.onclose = () => {
-        console.log("🎤 [DEEPGRAM] Connection closed")
-        deepgramReady = false
-      }
-    } catch (error) {
-      console.log("❌ [DEEPGRAM] Connection failed:", error.message)
-      deepgramReady = false
-    }
-  }
-
-  const handleDeepgramResponse = async (data) => {
-    if (data.type === "Results" && data.is_final) {
-      const transcript = data.channel?.alternatives?.[0]?.transcript
-      if (transcript && transcript.trim()) {
-        if (!sttTimer) {
-          sttTimer = createTimer("STT_TRANSCRIPTION")
+        deepgramWs.onopen = () => {
+          console.log("🎤 [DEEPGRAM] Connection established")
+          deepgramReady = true
+          console.log("🎤 [DEEPGRAM] Ready to process audio")
         }
 
-        console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
-        sttTimer = null
+        deepgramWs.onmessage = async (event) => {
+          const data = JSON.parse(event.data)
+          await handleDeepgramResponse(data)
+        }
 
-        await processUserUtterance(transcript.trim())
+        deepgramWs.onerror = (error) => {
+          console.log("❌ [DEEPGRAM] Connection error:", error.message)
+          deepgramReady = false
+          setTimeout(connectToDeepgram, 2000)
+        }
+
+        deepgramWs.onclose = () => {
+          console.log("🎤 [DEEPGRAM] Connection closed")
+          deepgramReady = false
+        }
+      } catch (error) {
+        console.log("❌ [DEEPGRAM] Connection failed:", error.message)
+        deepgramReady = false
+        setTimeout(connectToDeepgram, 2000)
       }
     }
-  }
 
-  const processUserUtterance = async (text) => {
-    if (!text.trim() || text === lastProcessedText) return
+    const handleDeepgramResponse = async (data) => {
+      if (data.type === "Results" && data.is_final) {
+        const transcript = data.channel?.alternatives?.[0]?.transcript
+        if (transcript && transcript.trim()) {
+          if (!sttTimer) {
+            sttTimer = createTimer("STT_TRANSCRIPTION")
+          }
 
-    console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
-    console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
-    console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
+          console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+          sttTimer = null
 
-    if (currentTTS) {
-      console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
-      currentTTS.interrupt()
-    }
-
-    isProcessing = true
-    lastProcessedText = text
-    const currentRequestId = ++processingRequestId
-
-    try {
-      console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
-      const aiResponse = await processWithOpenAI(text, conversationHistory)
-
-      if (processingRequestId === currentRequestId && aiResponse) {
-        console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-        console.log("🎤 [USER-UTTERANCE] Starting TTS...")
-
-        currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid)
-        await currentTTS.synthesizeAndStream(aiResponse)
-
-        conversationHistory.push({ role: "user", content: text }, { role: "assistant", content: aiResponse })
-
-        // Keep conversation history manageable
-        if (conversationHistory.length > 20) {
-          conversationHistory = conversationHistory.slice(-16)
+          await processUserUtterance(transcript.trim())
         }
       }
-    } catch (error) {
-      console.log("❌ [USER-UTTERANCE] Processing error:", error.message)
-    } finally {
-      isProcessing = false
     }
-  }
 
-  // WebSocket message handling
-  ws.on("message", async (message) => {
-    try {
-      const data = JSON.parse(message)
+    const processUserUtterance = async (text) => {
+      if (!text.trim() || text === lastProcessedText || isProcessing) return
 
-      switch (data.event) {
-        case "connected":
-          console.log("📞 [TWILIO] Call connected")
-          break
+      console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
+      console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
+      console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
 
-        case "start":
-          streamSid = data.start.streamSid
-          console.log("🎵 [TWILIO] Media stream started:", streamSid)
-          await connectToDeepgram()
-          break
+      if (currentTTS) {
+        console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
+        currentTTS.interrupt()
+      }
 
-        case "media":
-          if (data.media && data.media.payload) {
-            const audioBuffer = Buffer.from(data.media.payload, "base64")
+      isProcessing = true
+      lastProcessedText = text
+      const currentRequestId = ++processingRequestId
 
-            if (deepgramReady && deepgramWs) {
-              const chunkSize = 1600 // 100ms chunks for processing
-              for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-                const chunk = audioBuffer.slice(i, i + chunkSize)
-                deepgramWs.send(chunk)
+      try {
+        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
+        const aiResponse = await processWithOpenAI(text, conversationHistory)
+
+        if (processingRequestId === currentRequestId && aiResponse) {
+          console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
+          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+
+          currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid)
+          await currentTTS.synthesizeAndStream(aiResponse)
+
+          conversationHistory.push({ role: "user", content: text }, { role: "assistant", content: aiResponse })
+
+          // Keep conversation history manageable
+          if (conversationHistory.length > 20) {
+            conversationHistory = conversationHistory.slice(-16)
+          }
+        }
+      } catch (error) {
+        console.log("❌ [USER-UTTERANCE] Processing error:", error.message)
+      } finally {
+        isProcessing = false
+      }
+    }
+
+    // WebSocket message handling
+    ws.on("message", async (message) => {
+      try {
+        const data = JSON.parse(message)
+
+        switch (data.event) {
+          case "connected":
+            console.log("📞 [TWILIO] Call connected")
+            break
+
+          case "start":
+            streamSid = data.start.streamSid
+            console.log("🎵 [TWILIO] Media stream started:", streamSid)
+            await connectToDeepgram()
+            break
+
+          case "media":
+            if (data.media && data.media.payload) {
+              const audioBuffer = Buffer.from(data.media.payload, "base64")
+
+              if (deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+                // Send audio directly to Deepgram without additional chunking
+                deepgramWs.send(audioBuffer)
+              } else if (!deepgramReady) {
+                console.log("⚠️ [DEEPGRAM] Not ready, attempting reconnection...")
+                await connectToDeepgram()
               }
             }
-          }
-          break
+            break
 
-        case "stop":
-          console.log("🛑 [TWILIO] Media stream stopped")
-          if (deepgramWs) {
-            deepgramWs.close()
-          }
-          break
+          case "stop":
+            console.log("🛑 [TWILIO] Media stream stopped")
+            if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+              deepgramWs.close()
+            }
+            break
 
-        default:
-          console.log("📨 [TWILIO] Unknown event:", data.event)
+          default:
+            console.log("📨 [TWILIO] Unknown event:", data.event)
+        }
+      } catch (error) {
+        console.log("❌ [WEBSOCKET] Message parsing error:", error.message)
       }
-    } catch (error) {
-      console.log("❌ [WEBSOCKET] Message parsing error:", error.message)
-    }
-  })
+    })
 
-  ws.on("close", () => {
-    console.log("🔌 [WEBSOCKET] Connection closed")
-    if (deepgramWs) {
-      deepgramWs.close()
-    }
-  })
+    ws.on("close", () => {
+      console.log("🔌 [WEBSOCKET] Connection closed")
+      if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+        deepgramWs.close()
+      }
+    })
 
-  ws.on("error", (error) => {
-    console.log("❌ [WEBSOCKET] Connection error:", error.message)
+    ws.on("error", (error) => {
+      console.log("❌ [WEBSOCKET] Connection error:", error.message)
+    })
   })
 }
 
