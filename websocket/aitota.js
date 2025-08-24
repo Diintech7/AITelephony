@@ -260,7 +260,7 @@ class SimplifiedSarvamTTSProcessor {
   }
 }
 
-const handleWebSocketConnection = (ws) => {
+const setupUnifiedVoiceServer = (ws) => {
   console.log("🔌 [WEBSOCKET] New connection established")
 
   let streamSid = null
@@ -434,4 +434,4 @@ const handleWebSocketConnection = (ws) => {
   })
 }
 
-module.exports = { handleWebSocketConnection }
+module.exports = { setupUnifiedVoiceServer }

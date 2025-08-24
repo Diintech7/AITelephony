@@ -10,7 +10,7 @@ require("dotenv").config()
 const { connectDatabase, checkDatabaseHealth, getDatabaseStats, getConnectionState } = require("./config/database")
 
 // Import the unified voice server from aitota.js
-const { setupUnifiedVoiceServer, terminateCallByStreamSid } = require("./websocket/aitota")
+const { setupUnifiedVoiceServer } = require("./websocket/aitota")
 const { setupSipWebSocketServer } = require("./websocket/sip-server")
 const { setupSanPbxWebSocketServer } = require("./websocket/sanpbx-server")
 
@@ -373,56 +373,7 @@ app.post("/api/logs/cleanup", async (req, res) => {
 })
 
 // Terminate active call by streamSid
-app.post("/api/calls/terminate", async (req, res) => {
-  try {
-    const { streamSid, reason } = req.body
 
-    if (!streamSid) {
-      return res.status(400).json({
-        error: "Missing required parameter",
-        message: "streamSid is required",
-        timestamp: new Date().toISOString(),
-      })
-    }
-
-    console.log(
-      `🛑 [API-TERMINATE] Terminating call with streamSid: ${streamSid}, reason: ${reason || "manual_termination"}`,
-    )
-
-    const result = await terminateCallByStreamSid(streamSid, reason || "manual_termination")
-
-    if (result.success) {
-      res.json({
-        success: true,
-        message: result.message,
-        data: {
-          streamSid,
-          reason: reason || "manual_termination",
-          method: result.method,
-          timestamp: new Date().toISOString(),
-        },
-      })
-    } else {
-      res.status(404).json({
-        success: false,
-        message: result.message,
-        data: {
-          streamSid,
-          reason: reason || "manual_termination",
-          method: result.method,
-          timestamp: new Date().toISOString(),
-        },
-      })
-    }
-  } catch (error) {
-    console.error("❌ [API-TERMINATE] Error terminating call:", error.message)
-    res.status(500).json({
-      error: "Failed to terminate call",
-      message: error.message,
-      timestamp: new Date().toISOString(),
-    })
-  }
-})
 
 // Health check endpoint
 app.get("/health", async (req, res) => {
