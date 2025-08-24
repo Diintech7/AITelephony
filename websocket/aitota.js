@@ -71,6 +71,23 @@ const setupUnifiedVoiceServer = (ws) => {
   let sttFailed = false; // Track STT failure state
 
   /**
+   * Generate a simple tone as fallback audio
+   */
+  const generateSimpleTone = (frequency = 440, duration = 0.5) => {
+    const sampleRate = 8000;
+    const samples = Math.floor(sampleRate * duration);
+    const buffer = Buffer.alloc(samples * 2); // 16-bit samples
+    
+    for (let i = 0; i < samples; i++) {
+      const sample = Math.sin(2 * Math.PI * frequency * i / sampleRate) * 0.3; // 30% volume
+      const intSample = Math.floor(sample * 32767);
+      buffer.writeInt16LE(intSample, i * 2);
+    }
+    
+    return buffer.toString('base64');
+  };
+
+  /**
    * Check for quick responses first (0ms latency)
    */
   const getQuickResponse = (text) => {
@@ -79,16 +96,16 @@ const setupUnifiedVoiceServer = (ws) => {
   };
 
   /**
-   * Optimized text-to-speech with parallel processing and streaming
+   * Optimized text-to-speech with C-Zentrix compatible format
    */
   const synthesizeAndStreamAudio = async (text, language = 'en-IN') => {
     try {
       console.log(`[TTS] Synthesizing: "${text}"`);
       const startTime = Date.now();
       
-      // Use fetch with timeout and optimized parameters
+      // Use fetch with timeout and optimized parameters for C-Zentrix
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // Increased timeout
 
       const response = await fetch('https://api.sarvam.ai/text-to-speech', {
         method: 'POST',
@@ -102,10 +119,10 @@ const setupUnifiedVoiceServer = (ws) => {
           target_language_code: language,
           speaker: 'meera',
           pitch: 0,
-          pace: 1.2, // Slightly faster pace
+          pace: 1.1, // Slightly faster but not too fast
           loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false, // Disable to save processing time
+          speech_sample_rate: 8000, // Match C-Zentrix expected format
+          enable_preprocessing: true, // Re-enable for better audio quality
           model: 'bulbul:v1'
         }),
         signal: controller.signal
@@ -114,7 +131,8 @@ const setupUnifiedVoiceServer = (ws) => {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        throw new Error(`Sarvam API error: ${response.status}`);
+        const errorText = await response.text();
+        throw new Error(`Sarvam API error: ${response.status} - ${errorText}`);
       }
 
       const data = await response.json();
@@ -125,47 +143,75 @@ const setupUnifiedVoiceServer = (ws) => {
       }
 
       const ttsTime = Date.now() - startTime;
-      console.log(`[TTS] Audio generated in ${ttsTime}ms, streaming to call`);
+      console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`);
+      
+      // Add a small delay before streaming to ensure call is ready
+      await new Promise(resolve => setTimeout(resolve, 100));
       
       await streamAudioToCall(audioBase64);
       
     } catch (error) {
       console.error('[TTS] Error:', error.message);
-      // Fallback: send a quick beep or skip
+      
+      // Send a simple beep or tone as fallback
+      const fallbackAudio = generateSimpleTone(440, 0.5); // 440Hz for 0.5 seconds
+      await streamAudioToCall(fallbackAudio);
     }
   };
 
   /**
-   * Optimized audio streaming with reduced chunks for lower latency
+   * Optimized audio streaming with proper format for C-Zentrix
    */
   const streamAudioToCall = async (audioBase64) => {
     const audioBuffer = Buffer.from(audioBase64, 'base64');
-    const CHUNK_SIZE = 160; // 10ms chunks for lower latency (was 320)
+    
+    // C-Zentrix expects specific audio format
+    // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
+    const CHUNK_SIZE = 160; // 10ms chunks for 8kHz 16-bit mono
+    const CHUNK_DURATION_MS = 10; // Real-time streaming
     
     let position = 0;
     const streamStart = Date.now();
     
+    console.log(`[STREAM] Starting audio stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`);
+    
     while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
       const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
+      
+      // Pad smaller chunks with silence if needed
+      const paddedChunk = chunk.length < CHUNK_SIZE ? 
+        Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk;
       
       const mediaMessage = {
         event: 'media',
         streamSid: streamSid,
         media: {
-          payload: chunk.toString('base64')
+          payload: paddedChunk.toString('base64')
         }
       };
 
       ws.send(JSON.stringify(mediaMessage));
       position += CHUNK_SIZE;
       
-      // Reduced delay for faster streaming
+      // Maintain real-time streaming pace
       if (position < audioBuffer.length) {
-        await new Promise(resolve => setTimeout(resolve, 8)); // 8ms vs 20ms
+        await new Promise(resolve => setTimeout(resolve, CHUNK_DURATION_MS));
       }
     }
     
-    console.log(`[STREAM] Completed in ${Date.now() - streamStart}ms`);
+    // Add a small silence buffer at the end
+    const silenceChunk = Buffer.alloc(CHUNK_SIZE);
+    const silenceMessage = {
+      event: 'media',
+      streamSid: streamSid,
+      media: {
+        payload: silenceChunk.toString('base64')
+      }
+    };
+    ws.send(JSON.stringify(silenceMessage));
+    
+    const streamDuration = Date.now() - streamStart;
+    console.log(`[STREAM] Completed in ${streamDuration}ms`);
   };
 
   /**
@@ -262,7 +308,7 @@ const setupUnifiedVoiceServer = (ws) => {
       }
     });
 
-    deepgramWs.on('error', async (error) => {
+    deepgramWs.on('error', (error) => {
       console.error(`[STT] Deepgram error (attempt ${attemptCount + 1}):`, error.message);
       
       // Try different connection approaches
@@ -437,10 +483,14 @@ const setupUnifiedVoiceServer = (ws) => {
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0);
           
-          // Send optimized greeting
+          // Send optimized greeting with proper timing
           const greeting = 'Hi! How can I help you?';
           console.log('[CZ] Sending greeting:', greeting);
-          await synthesizeAndStreamAudio(greeting);
+          
+          // Wait a moment for call to stabilize before sending audio
+          setTimeout(async () => {
+            await synthesizeAndStreamAudio(greeting);
+          }, 500);
           break;
 
         case 'media':
