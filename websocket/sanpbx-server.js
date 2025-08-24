@@ -510,6 +510,11 @@ const processWithOpenAI = async (
   userName = null,
 ) => {
   const timer = createTimer("LLM_PROCESSING")
+  console.log("🤖 [OPENAI-PROCESSING] Starting OpenAI processing")
+  console.log("🤖 [OPENAI-PROCESSING] User message:", userMessage)
+  console.log("🤖 [OPENAI-PROCESSING] Detected language:", detectedLanguage)
+  console.log("🤖 [OPENAI-PROCESSING] User name:", userName)
+  console.log("🤖 [OPENAI-PROCESSING] Conversation history length:", conversationHistory.length)
 
   try {
     // Use static configuration
@@ -540,6 +545,9 @@ const processWithOpenAI = async (
       { role: "user", content: userMessage },
     ]
 
+    console.log("🤖 [OPENAI-PROCESSING] Sending request to OpenAI API")
+    console.log("🤖 [OPENAI-PROCESSING] Request messages:", JSON.stringify(messages, null, 2))
+    
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -553,6 +561,8 @@ const processWithOpenAI = async (
         temperature: 0.3,
       }),
     })
+    
+    console.log("🤖 [OPENAI-PROCESSING] OpenAI API response status:", response.status)
 
     if (!response.ok) {
       console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
@@ -560,13 +570,17 @@ const processWithOpenAI = async (
     }
 
     const data = await response.json()
+    console.log("🤖 [OPENAI-PROCESSING] OpenAI API response data:", JSON.stringify(data, null, 2))
     let fullResponse = data.choices[0]?.message?.content?.trim()
+    console.log("🤖 [OPENAI-PROCESSING] Extracted response:", fullResponse)
 
     console.log(`🕐 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
 
     // Ensure a follow-up question is present at the end
     if (fullResponse) {
       const needsFollowUp = !/[?]\s*$/.test(fullResponse)
+      console.log("🤖 [OPENAI-PROCESSING] Response needs follow-up question:", needsFollowUp)
+      
       if (needsFollowUp) {
         const followUps = {
           hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
@@ -578,17 +592,22 @@ const processWithOpenAI = async (
           gu: "શું બીજી કોઈ મદદ કરી શકું?",
         }
         const fu = followUps[detectedLanguage] || followUps.en
+        console.log("🤖 [OPENAI-PROCESSING] Adding follow-up question:", fu)
         fullResponse = `${fullResponse} ${fu}`.trim()
+        console.log("🤖 [OPENAI-PROCESSING] Final response with follow-up:", fullResponse)
       }
     }
 
     if (callLogger && fullResponse) {
+      console.log("🤖 [OPENAI-PROCESSING] Logging AI response to call logger")
       callLogger.logAIResponse(fullResponse, detectedLanguage)
     }
 
+    console.log("🤖 [OPENAI-PROCESSING] Returning final response:", fullResponse)
     return fullResponse
   } catch (error) {
     console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+    console.log(`❌ [LLM-PROCESSING] Error stack: ${error.stack}`)
     return null
   }
 }
@@ -628,6 +647,9 @@ class SimplifiedSarvamTTSProcessor {
     if (this.isInterrupted) return
 
     const timer = createTimer("TTS_SYNTHESIS")
+    console.log("🎤 [TTS-SYNTHESIS] Starting TTS synthesis for text:", text)
+    console.log("🎤 [TTS-SYNTHESIS] Language:", this.sarvamLanguage)
+    console.log("🎤 [TTS-SYNTHESIS] Voice:", this.voice)
 
     try {
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -659,7 +681,9 @@ class SimplifiedSarvamTTSProcessor {
       }
 
       const responseData = await response.json()
+      console.log("🎤 [TTS-SYNTHESIS] Sarvam API response:", JSON.stringify(responseData, null, 2))
       const audioBase64 = responseData.audios?.[0]
+      console.log("🎤 [TTS-SYNTHESIS] Audio base64 length:", audioBase64?.length || 0)
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
@@ -687,7 +711,12 @@ class SimplifiedSarvamTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
+    console.log("🎤 [TTS-STREAMING] Starting audio streaming")
+    console.log("🎤 [TTS-STREAMING] Base64 audio length:", audioBase64.length)
+    
     const audioBuffer = Buffer.from(audioBase64, "base64")
+    console.log("🎤 [TTS-STREAMING] Audio buffer size:", audioBuffer.length, "bytes")
+    
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
@@ -715,12 +744,16 @@ class SimplifiedSarvamTTSProcessor {
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
+          console.log("🎤 [TTS-STREAMING] Sending media chunk:", chunkIndex + 1, "size:", chunk.length, "bytes")
+          console.log("🎤 [TTS-STREAMING] Media message:", JSON.stringify(mediaMessage, null, 2))
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
         } catch (error) {
+          console.log("❌ [TTS-STREAMING] Error sending media chunk:", error.message)
           break
         }
       } else {
+        console.log("⚠️ [TTS-STREAMING] WebSocket not open or interrupted, stopping streaming")
         break
       }
 
@@ -734,6 +767,9 @@ class SimplifiedSarvamTTSProcessor {
       chunkIndex++
     }
 
+    console.log("🎤 [TTS-STREAMING] Streaming completed")
+    console.log("🎤 [TTS-STREAMING] Total chunks sent:", successfulChunks)
+    console.log("🎤 [TTS-STREAMING] Total audio bytes:", this.totalAudioBytes)
     this.currentAudioStreaming = null
   }
 
@@ -756,9 +792,20 @@ const getStaticAgentConfig = () => {
 
 // Main WebSocket server setup with enhanced live transcript functionality
 const setupSanPbxWebSocketServer = (wss) => {
+  console.log('🚀 [SANPBX-WS] Setting up enhanced SanIPPBX WebSocket server with AI integration...')
+  
   wss.on("connection", (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`)
     const urlParams = Object.fromEntries(url.searchParams.entries())
+
+    // Log connection details
+    console.log("🔗 [SANPBX-CONNECTION] ========== NEW CONNECTION ==========")
+    console.log("🔗 [SANPBX-CONNECTION] Client IP:", req.socket.remoteAddress)
+    console.log("🔗 [SANPBX-CONNECTION] User Agent:", req.headers["user-agent"])
+    console.log("🔗 [SANPBX-CONNECTION] URL:", req.url)
+    console.log("🔗 [SANPBX-CONNECTION] URL Parameters:", JSON.stringify(urlParams, null, 2))
+    console.log("🔗 [SANPBX-CONNECTION] Headers:", JSON.stringify(req.headers, null, 2))
+    console.log("🔗 [SANPBX-CONNECTION] ======================================")
 
     // Session state
     let streamSid = null
@@ -794,6 +841,13 @@ const setupSanPbxWebSocketServer = (wss) => {
         deepgramUrl.searchParams.append("smart_format", "true")
         deepgramUrl.searchParams.append("endpointing", "300")
 
+        console.log("🎤 [DEEPGRAM-CONNECT] Connecting to Deepgram with URL:", deepgramUrl.toString())
+        console.log("🎤 [DEEPGRAM-CONNECT] Language:", deepgramLanguage)
+        console.log("🎤 [DEEPGRAM-CONNECT] Sample Rate: 8000")
+        console.log("🎤 [DEEPGRAM-CONNECT] Channels: 1")
+        console.log("🎤 [DEEPGRAM-CONNECT] Encoding: linear16")
+        console.log("🎤 [DEEPGRAM-CONNECT] Model: nova-2")
+
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         })
@@ -808,6 +862,7 @@ const setupSanPbxWebSocketServer = (wss) => {
 
         deepgramWs.onmessage = async (event) => {
           const data = JSON.parse(event.data)
+          console.log("🎤 [DEEPGRAM-RESPONSE] Received from Deepgram:", JSON.stringify(data, null, 2))
           await handleDeepgramResponse(data)
         }
 
@@ -821,7 +876,7 @@ const setupSanPbxWebSocketServer = (wss) => {
           deepgramReady = false
         }
       } catch (error) {
-        // Silent error handling
+        console.log("❌ [DEEPGRAM-CONNECT] Error:", error.message)
       }
     }
 
@@ -834,21 +889,27 @@ const setupSanPbxWebSocketServer = (wss) => {
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
 
+        console.log(`🎤 [DEEPGRAM-RESULTS] Type: ${data.type}, Final: ${is_final}`)
+        console.log(`🎤 [DEEPGRAM-RESULTS] Transcript: "${transcript}"`)
+        console.log(`🎤 [DEEPGRAM-RESULTS] Full Data:`, JSON.stringify(data, null, 2))
+
         if (transcript?.trim()) {
           if (currentTTS && isProcessing) {
+            console.log("🛑 [DEEPGRAM-RESULTS] Interrupting current TTS...")
             currentTTS.interrupt()
             isProcessing = false
             processingRequestId++
           }
 
           if (is_final) {
-            console.log(`🕐 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+            console.log(`🕐 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Final Text: "${transcript.trim()}"`)
             sttTimer = null
 
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
             if (callLogger && transcript.trim()) {
               const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
+              console.log(`🌐 [LANGUAGE-DETECTION] Detected language: ${detectedLang}`)
               callLogger.logUserTranscript(transcript.trim(), detectedLang)
             }
 
@@ -857,6 +918,8 @@ const setupSanPbxWebSocketServer = (wss) => {
           }
         }
       } else if (data.type === "UtteranceEnd") {
+        console.log(`🎤 [DEEPGRAM-UTTERANCE-END] Utterance ended, buffer: "${userUtteranceBuffer.trim()}"`)
+        
         if (sttTimer) {
           console.log(`🕐 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${userUtteranceBuffer.trim()}"`)
           sttTimer = null
@@ -865,12 +928,15 @@ const setupSanPbxWebSocketServer = (wss) => {
         if (userUtteranceBuffer.trim()) {
           if (callLogger && userUtteranceBuffer.trim()) {
             const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
+            console.log(`🌐 [LANGUAGE-DETECTION] Utterance end - Detected language: ${detectedLang}`)
             callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
           }
 
           await processUserUtterance(userUtteranceBuffer)
           userUtteranceBuffer = ""
         }
+      } else {
+        console.log(`🎤 [DEEPGRAM-OTHER] Other event type: ${data.type}`, JSON.stringify(data, null, 2))
       }
     }
 
@@ -942,34 +1008,57 @@ const setupSanPbxWebSocketServer = (wss) => {
     ws.on("message", async (message) => {
       try {
         const messageStr = message.toString()
+        console.log("📨 [SANPBX-MESSAGE] ========== INCOMING MESSAGE ==========")
+        console.log("📨 [SANPBX-MESSAGE] Raw message:", messageStr)
+        console.log("📨 [SANPBX-MESSAGE] Message length:", messageStr.length)
+        console.log("📨 [SANPBX-MESSAGE] Message type:", typeof messageStr)
 
         if (messageStr === "EOS" || messageStr === "BOS" || !messageStr.startsWith("{")) {
+          console.log("📨 [SANPBX-MESSAGE] Skipping non-JSON message:", messageStr)
+          console.log("📨 [SANPBX-MESSAGE] ======================================")
           return
         }
 
         const data = JSON.parse(messageStr)
+        console.log("📨 [SANPBX-MESSAGE] Parsed JSON data:", JSON.stringify(data, null, 2))
+        console.log("📨 [SANPBX-MESSAGE] Event type:", data.event)
+        console.log("📨 [SANPBX-MESSAGE] ======================================")
 
         switch (data.event) {
           case "connected":
-            console.log("🔗 [SIP-CONNECTION] WebSocket connected")
+            console.log("🔗 [SANPBX-CONNECTED] ========== CONNECTED EVENT ==========")
+            console.log("🔗 [SANPBX-CONNECTED] Full data:", JSON.stringify(data, null, 2))
+            console.log("🔗 [SANPBX-CONNECTED] ======================================")
             break
 
           case "start": {
+            console.log("📞 [SANPBX-START] ========== CALL START EVENT ==========")
+            console.log("📞 [SANPBX-START] Full start data:", JSON.stringify(data, null, 2))
+            
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
 
             // Log all incoming SIP data
-            console.log("📞 [SIP-START] ========== CALL START DATA ==========")
-            console.log("📞 [SIP-START] Raw data:", JSON.stringify(data, null, 2))
-            console.log("📞 [SIP-START] URL Parameters:", JSON.stringify(urlParams, null, 2))
-            console.log("📞 [SIP-START] StreamSID:", streamSid)
-            console.log("📞 [SIP-START] AccountSID:", accountSid)
+            console.log("📞 [SANPBX-START] ========== CALL START DATA ==========")
+            console.log("📞 [SANPBX-START] Raw data:", JSON.stringify(data, null, 2))
+            console.log("📞 [SANPBX-START] URL Parameters:", JSON.stringify(urlParams, null, 2))
+            console.log("📞 [SANPBX-START] StreamSID:", streamSid)
+            console.log("📞 [SANPBX-START] AccountSID:", accountSid)
+            console.log("📞 [SANPBX-START] Data.start object:", JSON.stringify(data.start, null, 2))
+            console.log("📞 [SANPBX-START] Data.start.from:", data.start?.from)
+            console.log("📞 [SANPBX-START] Data.start.to:", data.start?.to)
+            console.log("📞 [SANPBX-START] Data.start.callSid:", data.start?.callSid)
+            console.log("📞 [SANPBX-START] Data.start.CallSid:", data.start?.CallSid)
+            console.log("📞 [SANPBX-START] Data.start.extraData:", JSON.stringify(data.start?.extraData, null, 2))
+            console.log("📞 [SANPBX-START] Data.start.extraData (raw):", data.start?.extraData)
 
             let mobile = null;
             let callerId = null;
             let customParams = {};
             let czdataDecoded = null;
+            
             if (urlParams.czdata) {
+              console.log("📞 [SANPBX-START] Found czdata in URL params:", urlParams.czdata)
               czdataDecoded = decodeCzdata(urlParams.czdata);
               if (czdataDecoded) {
                 customParams = czdataDecoded;
@@ -985,43 +1074,57 @@ const setupSanPbxWebSocketServer = (wss) => {
                   czdataDecoded.contactName ||
                   null
                 );
-                console.log("[SIP-START] Decoded czdata customParams:", customParams);
+                console.log("📞 [SANPBX-START] Decoded czdata customParams:", JSON.stringify(customParams, null, 2));
                 if (userName) {
-                  console.log("[SIP-START] User Name (czdata):", userName);
+                  console.log("📞 [SANPBX-START] User Name (czdata):", userName);
                 }
+              } else {
+                console.log("📞 [SANPBX-START] Failed to decode czdata")
               }
             }
 
             if (data.start?.from) {
               mobile = data.start.from;
+              console.log("📞 [SANPBX-START] Mobile from data.start.from:", mobile)
             } else if (urlParams.caller_id) {
               mobile = urlParams.caller_id;
+              console.log("📞 [SANPBX-START] Mobile from URL caller_id:", mobile)
             } else if (data.start?.extraData?.CallCli) {
               mobile = data.start.extraData.CallCli;
+              console.log("📞 [SANPBX-START] Mobile from extraData.CallCli:", mobile)
             }
 
             let to = null
             if (data.start?.to) {
               to = data.start.to
+              console.log("📞 [SANPBX-START] To from data.start.to:", to)
             } else if (urlParams.did) {
               to = urlParams.did
+              console.log("📞 [SANPBX-START] To from URL did:", to)
             } else if (data.start?.extraData?.DID) {
               to = data.start.extraData.DID
+              console.log("📞 [SANPBX-START] To from extraData.DID:", to)
             }
 
             let extraData = null;
 
             if (data.start?.extraData) {
+              console.log("📞 [SANPBX-START] Found extraData in start object")
               extraData = decodeExtraData(data.start.extraData);
+              console.log("📞 [SANPBX-START] Decoded extraData:", JSON.stringify(extraData, null, 2))
             } else if (urlParams.extra) {
+              console.log("📞 [SANPBX-START] Found extra in URL params")
               extraData = decodeExtraData(urlParams.extra);
+              console.log("📞 [SANPBX-START] Decoded URL extra:", JSON.stringify(extraData, null, 2))
             }
 
             if (extraData?.CallCli) {
               mobile = extraData.CallCli;
+              console.log("📞 [SANPBX-START] Mobile updated from extraData.CallCli:", mobile)
             }
             if (extraData?.CallVaId) {
               callerId = extraData.CallVaId;
+              console.log("📞 [SANPBX-START] CallerId from extraData.CallVaId:", callerId)
             }
             if (!userName && extraData) {
               userName = (
@@ -1037,55 +1140,61 @@ const setupSanPbxWebSocketServer = (wss) => {
                 null
               );
               if (userName) {
-                console.log("[SIP-START] User Name (extraData):", userName);
+                console.log("📞 [SANPBX-START] User Name (extraData):", userName);
               }
             }
 
             if (!userName && urlParams.name) {
               userName = urlParams.name;
-              console.log("[SIP-START] User Name (url param):", userName);
+              console.log("📞 [SANPBX-START] User Name (url param):", userName);
             }
 
             if (extraData && extraData.CallDirection === "OutDial") {
               callDirection = "outbound";
+              console.log("📞 [SANPBX-START] Call direction set to outbound from extraData")
             } else if (urlParams.direction === "OutDial") {
               callDirection = "outbound";
+              console.log("📞 [SANPBX-START] Call direction set to outbound from URL")
               if (!extraData && urlParams.extra) {
                 extraData = decodeExtraData(urlParams.extra);
+                console.log("📞 [SANPBX-START] Decoded URL extra for outbound:", JSON.stringify(extraData, null, 2))
               }
             } else {
               callDirection = "inbound";
+              console.log("📞 [SANPBX-START] Call direction set to inbound (default)")
             }
 
             // Log parsed call information
-            console.log("📞 [SIP-START] ========== PARSED CALL INFO ==========")
-            console.log("📞 [SIP-START] Call Direction:", callDirection)
-            console.log("📞 [SIP-START] From/Mobile:", mobile)
-            console.log("📞 [SIP-START] To/DID:", to)
-            console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
-            console.log("📞 [SIP-START] ======================================")
+            console.log("📞 [SANPBX-START] ========== PARSED CALL INFO ==========")
+            console.log("📞 [SANPBX-START] Call Direction:", callDirection)
+            console.log("📞 [SANPBX-START] From/Mobile:", mobile)
+            console.log("📞 [SANPBX-START] To/DID:", to)
+            console.log("📞 [SANPBX-START] Extra Data:", JSON.stringify(extraData, null, 2))
+            console.log("📞 [SANPBX-START] User Name:", userName)
+            console.log("📞 [SANPBX-START] Custom Params:", JSON.stringify(customParams, null, 2))
+            console.log("📞 [SANPBX-START] ======================================")
 
             // Use static agent configuration instead of database lookup
-            console.log("📋 [SIP-AGENT-CONFIG] ========== USING STATIC CONFIG ==========")
-            console.log("📋 [SIP-AGENT-CONFIG] Agent Name:", STATIC_CONFIG.agentName)
-            console.log("📋 [SIP-AGENT-CONFIG] Language:", STATIC_CONFIG.language)
-            console.log("📋 [SIP-AGENT-CONFIG] Voice Selection:", STATIC_CONFIG.voiceSelection)
-            console.log("📋 [SIP-AGENT-CONFIG] First Message:", STATIC_CONFIG.firstMessage)
-            console.log("📋 [SIP-AGENT-CONFIG] System Prompt:", STATIC_CONFIG.systemPrompt)
-            console.log("✅ [SIP-AGENT-CONFIG] Static configuration loaded successfully")
-            console.log("✅ [SIP-AGENT-CONFIG] ======================================")
+            console.log("📋 [SANPBX-AGENT-CONFIG] ========== USING STATIC CONFIG ==========")
+            console.log("📋 [SANPBX-AGENT-CONFIG] Agent Name:", STATIC_CONFIG.agentName)
+            console.log("📋 [SANPBX-AGENT-CONFIG] Language:", STATIC_CONFIG.language)
+            console.log("📋 [SANPBX-AGENT-CONFIG] Voice Selection:", STATIC_CONFIG.voiceSelection)
+            console.log("📋 [SANPBX-AGENT-CONFIG] First Message:", STATIC_CONFIG.firstMessage)
+            console.log("📋 [SANPBX-AGENT-CONFIG] System Prompt:", STATIC_CONFIG.systemPrompt)
+            console.log("✅ [SANPBX-AGENT-CONFIG] Static configuration loaded successfully")
+            console.log("✅ [SANPBX-AGENT-CONFIG] ======================================")
 
             agentConfig = getStaticAgentConfig()
             ws.sessionAgentConfig = agentConfig
             currentLanguage = agentConfig.language || "en"
 
-            console.log("🎯 [SIP-CALL-SETUP] ========== CALL SETUP ==========")
-            console.log("🎯 [SIP-CALL-SETUP] Current Language:", currentLanguage)
-            console.log("🎯 [SIP-CALL-SETUP] Mobile Number:", mobile)
-            console.log("🎯 [SIP-CALL-SETUP] Call Direction:", callDirection)
-            console.log("🎯 [SIP-CALL-SETUP] Client ID:", agentConfig.clientId || accountSid)
-            console.log("🎯 [SIP-CALL-SETUP] StreamSID:", streamSid)
-            console.log("🎯 [SIP-CALL-SETUP] CallSID:", data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid)
+            console.log("🎯 [SANPBX-CALL-SETUP] ========== CALL SETUP ==========")
+            console.log("🎯 [SANPBX-CALL-SETUP] Current Language:", currentLanguage)
+            console.log("🎯 [SANPBX-CALL-SETUP] Mobile Number:", mobile)
+            console.log("🎯 [SANPBX-CALL-SETUP] Call Direction:", callDirection)
+            console.log("🎯 [SANPBX-CALL-SETUP] Client ID:", agentConfig.clientId || accountSid)
+            console.log("🎯 [SANPBX-CALL-SETUP] StreamSID:", streamSid)
+            console.log("🎯 [SANPBX-CALL-SETUP] CallSID:", data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid)
 
             // Create enhanced call logger with live transcript capability
             callLogger = new EnhancedCallLogger(
@@ -1103,15 +1212,15 @@ const setupSanPbxWebSocketServer = (wss) => {
             // Create initial call log entry immediately (static implementation)
             try {
               await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
-              console.log("✅ [SIP-CALL-SETUP] Initial call log created successfully")
-              console.log("✅ [SIP-CALL-SETUP] Call Log ID:", callLogger.callLogId)
+              console.log("✅ [SANPBX-CALL-SETUP] Initial call log created successfully")
+              console.log("✅ [SANPBX-CALL-SETUP] Call Log ID:", callLogger.callLogId)
             } catch (error) {
-              console.log("❌ [SIP-CALL-SETUP] Failed to create initial call log:", error.message)
+              console.log("❌ [SANPBX-CALL-SETUP] Failed to create initial call log:", error.message)
               // Continue anyway - fallback will create log at end
             }
 
-            console.log("🎯 [SIP-CALL-SETUP] Call Logger initialized")
-            console.log("🎯 [SIP-CALL-SETUP] Connecting to Deepgram...")
+            console.log("🎯 [SANPBX-CALL-SETUP] Call Logger initialized")
+            console.log("🎯 [SANPBX-CALL-SETUP] Connecting to Deepgram...")
 
             await connectToDeepgram()
 
@@ -1121,106 +1230,124 @@ const setupSanPbxWebSocketServer = (wss) => {
               greeting = `Hello ${userName.trim()}! ${base}`
             }
 
-            console.log("🎯 [SIP-CALL-SETUP] Greeting Message:", greeting)
-            console.log("🎯 [SIP-CALL-SETUP] ======================================")
+            console.log("🎯 [SANPBX-CALL-SETUP] Greeting Message:", greeting)
+            console.log("🎯 [SANPBX-CALL-SETUP] ======================================")
 
             if (callLogger) {
               callLogger.logAIResponse(greeting, currentLanguage)
             }
 
-            console.log("🎤 [SIP-TTS] Starting greeting TTS...")
+            console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
             const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
-            console.log("✅ [SIP-TTS] Greeting TTS completed")
+            console.log("✅ [SANPBX-TTS] Greeting TTS completed")
             break
           }
 
           case "media":
+            console.log("🎵 [SANPBX-MEDIA] ========== MEDIA EVENT ==========")
+            console.log("🎵 [SANPBX-MEDIA] Full media data:", JSON.stringify(data, null, 2))
+            console.log("🎵 [SANPBX-MEDIA] Media object:", JSON.stringify(data.media, null, 2))
+            console.log("🎵 [SANPBX-MEDIA] Payload exists:", !!data.media?.payload)
+            console.log("🎵 [SANPBX-MEDIA] Payload length:", data.media?.payload?.length || 0)
+            
             if (data.media?.payload) {
               const audioBuffer = Buffer.from(data.media.payload, "base64")
+              console.log("🎵 [SANPBX-MEDIA] Audio buffer created, length:", audioBuffer.length, "bytes")
               
               // Log media stats periodically (every 1000 packets to avoid spam)
               if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
               ws.mediaPacketCount++
               
               if (ws.mediaPacketCount % 1000 === 0) {
-                console.log("🎵 [SIP-MEDIA] Audio packets received:", ws.mediaPacketCount)
+                console.log("🎵 [SANPBX-MEDIA] Audio packets received:", ws.mediaPacketCount)
               }
 
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+                console.log("🎵 [SANPBX-MEDIA] Sending audio to Deepgram, buffer size:", audioBuffer.length)
                 deepgramWs.send(audioBuffer)
               } else {
+                console.log("🎵 [SANPBX-MEDIA] Queuing audio for Deepgram, queue size:", deepgramAudioQueue.length)
                 deepgramAudioQueue.push(audioBuffer)
                 if (deepgramAudioQueue.length % 100 === 0) {
-                  console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+                  console.log("⏳ [SANPBX-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
                 }
               }
+            } else {
+              console.log("⚠️ [SANPBX-MEDIA] No payload found in media event")
             }
+            console.log("🎵 [SANPBX-MEDIA] ======================================")
             break
 
           case "stop":
-            console.log("🛑 [SIP-STOP] ========== CALL END ==========")
-            console.log("🛑 [SIP-STOP] StreamSID:", streamSid)
-            console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
-            console.log("🛑 [SIP-STOP] Mobile:", mobile)
+            console.log("🛑 [SANPBX-STOP] ========== CALL END EVENT ==========")
+            console.log("🛑 [SANPBX-STOP] Full stop data:", JSON.stringify(data, null, 2))
+            console.log("🛑 [SANPBX-STOP] StreamSID:", streamSid)
+            console.log("🛑 [SANPBX-STOP] Call Direction:", callDirection)
+            console.log("🛑 [SANPBX-STOP] Mobile:", mobile)
             
             if (callLogger) {
               const stats = callLogger.getStats()
-              console.log("🛑 [SIP-STOP] Call Stats:", JSON.stringify(stats, null, 2))
+              console.log("🛑 [SANPBX-STOP] Call Stats:", JSON.stringify(stats, null, 2))
               
               try {
-                console.log("💾 [SIP-STOP] Saving final call log...")
+                console.log("💾 [SANPBX-STOP] Saving final call log...")
                 const savedLog = await callLogger.saveToDatabase("maybe")
-                console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
+                console.log("✅ [SANPBX-STOP] Final call log saved with ID:", savedLog._id)
               } catch (error) {
-                console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
+                console.log("❌ [SANPBX-STOP] Error saving final call log:", error.message)
               } finally {
                 callLogger.cleanup()
               }
             }
 
             if (deepgramWs?.readyState === WebSocket.OPEN) {
-              console.log("🛑 [SIP-STOP] Closing Deepgram connection...")
+              console.log("🛑 [SANPBX-STOP] Closing Deepgram connection...")
               deepgramWs.close()
             }
             
-            console.log("🛑 [SIP-STOP] ======================================")
+            console.log("🛑 [SANPBX-STOP] ======================================")
             break
 
           default:
+            console.log("❓ [SANPBX-UNKNOWN] Unknown event type:", data.event)
+            console.log("❓ [SANPBX-UNKNOWN] Full data:", JSON.stringify(data, null, 2))
             break
         }
       } catch (error) {
-        // Silent error handling
+        console.log("❌ [SANPBX-MESSAGE-ERROR] Error processing message:", error.message)
+        console.log("❌ [SANPBX-MESSAGE-ERROR] Stack trace:", error.stack)
       }
     })
 
     ws.on("close", async () => {
-      console.log("🔌 [SIP-CLOSE] ========== WEBSOCKET CLOSED ==========")
-      console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
-      console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
+      console.log("🔌 [SANPBX-CLOSE] ========== WEBSOCKET CLOSED ==========")
+      console.log("🔌 [SANPBX-CLOSE] StreamSID:", streamSid)
+      console.log("🔌 [SANPBX-CLOSE] Call Direction:", callDirection)
+      console.log("🔌 [SANPBX-CLOSE] Close code:", ws.closeCode)
+      console.log("🔌 [SANPBX-CLOSE] Close reason:", ws.closeReason)
       
       if (callLogger) {
         const stats = callLogger.getStats()
-        console.log("🔌 [SIP-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
+        console.log("🔌 [SANPBX-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
         
         try {
-          console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
+          console.log("💾 [SANPBX-CLOSE] Saving call log due to connection close...")
           const savedLog = await callLogger.saveToDatabase("maybe")
-          console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
+          console.log("✅ [SANPBX-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
-          console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
+          console.log("❌ [SANPBX-CLOSE] Error saving call log:", error.message)
         } finally {
           callLogger.cleanup()
         }
       }
 
       if (deepgramWs?.readyState === WebSocket.OPEN) {
-        console.log("🔌 [SIP-CLOSE] Closing Deepgram connection...")
+        console.log("🔌 [SANPBX-CLOSE] Closing Deepgram connection...")
         deepgramWs.close()
       }
 
-      console.log("🔌 [SIP-CLOSE] Resetting session state...")
+      console.log("🔌 [SANPBX-CLOSE] Resetting session state...")
       
       // Reset state
       streamSid = null
@@ -1238,13 +1365,16 @@ const setupSanPbxWebSocketServer = (wss) => {
       agentConfig = null
       sttTimer = null
       
-      console.log("🔌 [SIP-CLOSE] ======================================")
+      console.log("🔌 [SANPBX-CLOSE] ======================================")
     })
 
     ws.on("error", (error) => {
-      console.log("❌ [SIP-ERROR] WebSocket error:", error.message)
-      console.log("❌ [SIP-ERROR] StreamSID:", streamSid)
-      console.log("❌ [SIP-ERROR] Call Direction:", callDirection)
+      console.log("❌ [SANPBX-ERROR] ========== WEBSOCKET ERROR ==========")
+      console.log("❌ [SANPBX-ERROR] Error message:", error.message)
+      console.log("❌ [SANPBX-ERROR] Error stack:", error.stack)
+      console.log("❌ [SANPBX-ERROR] StreamSID:", streamSid)
+      console.log("❌ [SANPBX-ERROR] Call Direction:", callDirection)
+      console.log("❌ [SANPBX-ERROR] ======================================")
     })
   })
 }
