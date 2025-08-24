@@ -4,6 +4,8 @@ const EventEmitter = require('events');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const ffmpegPath = require('ffmpeg-static');
+ffmpeg.setFfmpegPath(ffmpegPath);
 
 // Audio format constants optimized for telephony
 const AUDIO_FORMATS = {

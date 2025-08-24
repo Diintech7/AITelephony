@@ -113,7 +113,7 @@ class OptimizedSanIPPBXSession extends EventEmitter {
       model: 'nova-2',
       language: 'en',
       smart_format: true,
-      interim_results: false, // Disable for lower latency
+      interim_results: true, // Must be true for utterance_end_ms
       endpointing: 200, // Faster endpointing
       vad_events: true,
       punctuate: true,
@@ -502,6 +502,8 @@ class OptimizedSanIPPBXSession extends EventEmitter {
   }
 
   cleanup() {
+    if (this.cleanedUp) return;
+    this.cleanedUp = true;
     try {
       console.log(`🧹 [CLEANUP] Session cleanup for: ${this.callId}`);
       
