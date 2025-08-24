@@ -308,7 +308,7 @@ const setupUnifiedVoiceServer = (ws) => {
       }
     });
 
-    deepgramWs.on('error', (error) => {
+    deepgramWs.on('error', async (error) => {
       console.error(`[STT] Deepgram error (attempt ${attemptCount + 1}):`, error.message);
       
       // Try different connection approaches
