@@ -167,6 +167,47 @@ const decodeCzdata = (czdataBase64) => {
   }
 };
 
+// Utility function to validate and analyze audio data
+const validateAudioData = (base64Payload, chunkDurationMs = 20) => {
+  try {
+    const audioBuffer = Buffer.from(base64Payload, "base64")
+    
+    // Basic validation
+    if (audioBuffer.length === 0) {
+      return { valid: false, error: "Empty audio buffer" }
+    }
+    
+    if (audioBuffer.length > 1000000) { // 1MB limit
+      return { valid: false, error: "Audio buffer too large" }
+    }
+    
+    // Calculate expected size for 20ms of 8kHz 16-bit mono audio
+    const expectedBytesPerMs = (8000 * 2) / 1000 // 16 bytes per ms
+    const expectedSize = Math.floor(chunkDurationMs * expectedBytesPerMs)
+    const sizeRatio = audioBuffer.length / expectedSize
+    
+    // Check if size is reasonable (within 50% of expected)
+    const sizeValid = sizeRatio >= 0.5 && sizeRatio <= 2.0
+    
+    // Analyze first few bytes to detect format
+    const header = audioBuffer.slice(0, 16).toString('hex')
+    const isLikelyPCM = !header.includes('52494646') && !header.includes('494433') // Not WAV or MP3
+    
+    return {
+      valid: true,
+      bufferSize: audioBuffer.length,
+      expectedSize: expectedSize,
+      sizeRatio: sizeRatio.toFixed(2),
+      sizeValid: sizeValid,
+      header: header,
+      isLikelyPCM: isLikelyPCM,
+      chunkDurationMs: chunkDurationMs
+    }
+  } catch (error) {
+    return { valid: false, error: error.message }
+  }
+}
+
 // Enhanced language detection with better fallback logic
 const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
   try {
@@ -854,16 +895,37 @@ const setupSanPbxWebSocketServer = (wss) => {
 
         deepgramWs.onopen = () => {
           console.log("🎤 [DEEPGRAM] Connection established")
+          console.log("🎤 [DEEPGRAM] WebSocket ready state:", deepgramWs.readyState)
           deepgramReady = true
           console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
-          deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
-          deepgramAudioQueue = []
+          
+          if (deepgramAudioQueue.length > 0) {
+            console.log("🎤 [DEEPGRAM] Sending queued audio packets to Deepgram...")
+            deepgramAudioQueue.forEach((buffer, index) => {
+              console.log(`🎤 [DEEPGRAM] Sending queued packet ${index + 1}/${deepgramAudioQueue.length}, size: ${buffer.length} bytes`)
+              deepgramWs.send(buffer)
+            })
+            deepgramAudioQueue = []
+            console.log("🎤 [DEEPGRAM] All queued audio packets sent")
+          }
         }
 
         deepgramWs.onmessage = async (event) => {
-          const data = JSON.parse(event.data)
-          console.log("🎤 [DEEPGRAM-RESPONSE] Received from Deepgram:", JSON.stringify(data, null, 2))
-          await handleDeepgramResponse(data)
+          try {
+            const data = JSON.parse(event.data)
+            console.log("🎤 [DEEPGRAM-RESPONSE] Received from Deepgram:", JSON.stringify(data, null, 2))
+            console.log("🎤 [DEEPGRAM-RESPONSE] Event type:", data.type)
+            console.log("🎤 [DEEPGRAM-RESPONSE] Is final:", data.is_final)
+            
+            if (data.channel?.alternatives?.[0]?.transcript) {
+              console.log("🎤 [DEEPGRAM-RESPONSE] Transcript:", data.channel.alternatives[0].transcript)
+            }
+            
+            await handleDeepgramResponse(data)
+          } catch (error) {
+            console.log("❌ [DEEPGRAM-RESPONSE] Error parsing Deepgram response:", error.message)
+            console.log("❌ [DEEPGRAM-RESPONSE] Raw response:", event.data)
+          }
         }
 
         deepgramWs.onerror = (error) => {
@@ -1247,31 +1309,69 @@ const setupSanPbxWebSocketServer = (wss) => {
           case "media":
             console.log("🎵 [SANPBX-MEDIA] ========== MEDIA EVENT ==========")
             console.log("🎵 [SANPBX-MEDIA] Full media data:", JSON.stringify(data, null, 2))
-            console.log("🎵 [SANPBX-MEDIA] Media object:", JSON.stringify(data.media, null, 2))
-            console.log("🎵 [SANPBX-MEDIA] Payload exists:", !!data.media?.payload)
-            console.log("🎵 [SANPBX-MEDIA] Payload length:", data.media?.payload?.length || 0)
+            console.log("🎵 [SANPBX-MEDIA] Payload exists:", !!data.payload)
+            console.log("🎵 [SANPBX-MEDIA] Payload length:", data.payload?.length || 0)
+            console.log("🎵 [SANPBX-MEDIA] Chunk:", data.chunk)
+            console.log("🎵 [SANPBX-MEDIA] Chunk duration (ms):", data.chunk_durn_ms)
+            console.log("🎵 [SANPBX-MEDIA] Channel ID:", data.channelId)
+            console.log("🎵 [SANPBX-MEDIA] Call ID:", data.callId)
+            console.log("🎵 [SANPBX-MEDIA] Stream ID:", data.streamId)
+            console.log("🎵 [SANPBX-MEDIA] Caller ID:", data.callerId)
+            console.log("🎵 [SANPBX-MEDIA] Call Direction:", data.callDirection)
+            console.log("🎵 [SANPBX-MEDIA] DID:", data.did)
+            console.log("🎵 [SANPBX-MEDIA] Timestamp:", data.timestamp)
             
-            if (data.media?.payload) {
-              const audioBuffer = Buffer.from(data.media.payload, "base64")
-              console.log("🎵 [SANPBX-MEDIA] Audio buffer created, length:", audioBuffer.length, "bytes")
-              
-              // Log media stats periodically (every 1000 packets to avoid spam)
-              if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
-              ws.mediaPacketCount++
-              
-              if (ws.mediaPacketCount % 1000 === 0) {
-                console.log("🎵 [SANPBX-MEDIA] Audio packets received:", ws.mediaPacketCount)
-              }
-
-              if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
-                console.log("🎵 [SANPBX-MEDIA] Sending audio to Deepgram, buffer size:", audioBuffer.length)
-                deepgramWs.send(audioBuffer)
-              } else {
-                console.log("🎵 [SANPBX-MEDIA] Queuing audio for Deepgram, queue size:", deepgramAudioQueue.length)
-                deepgramAudioQueue.push(audioBuffer)
-                if (deepgramAudioQueue.length % 100 === 0) {
-                  console.log("⏳ [SANPBX-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+            if (data.payload) {
+              try {
+                // Validate and analyze audio data
+                const audioValidation = validateAudioData(data.payload, data.chunk_durn_ms || 20)
+                console.log("🎵 [SANPBX-MEDIA] Audio validation result:", JSON.stringify(audioValidation, null, 2))
+                
+                if (!audioValidation.valid) {
+                  console.log("❌ [SANPBX-MEDIA] Audio validation failed:", audioValidation.error)
+                  break
                 }
+                
+                const audioBuffer = Buffer.from(data.payload, "base64")
+                console.log("🎵 [SANPBX-MEDIA] Audio buffer created, length:", audioBuffer.length, "bytes")
+                console.log("🎵 [SANPBX-MEDIA] Audio buffer first 16 bytes:", audioBuffer.slice(0, 16).toString('hex'))
+                
+                // Check if audio size is reasonable
+                if (!audioValidation.sizeValid) {
+                  console.log("⚠️ [SANPBX-MEDIA] Audio size ratio unusual:", audioValidation.sizeRatio, "(expected ~1.0)")
+                  console.log("⚠️ [SANPBX-MEDIA] This might indicate audio format issues")
+                }
+                
+                if (!audioValidation.isLikelyPCM) {
+                  console.log("⚠️ [SANPBX-MEDIA] Audio doesn't appear to be raw PCM format")
+                  console.log("⚠️ [SANPBX-MEDIA] Deepgram expects linear16 PCM at 8kHz")
+                }
+                
+                // Log media stats periodically (every 100 packets to avoid spam)
+                if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
+                ws.mediaPacketCount++
+                
+                if (ws.mediaPacketCount % 100 === 0) {
+                  console.log("🎵 [SANPBX-MEDIA] Audio packets received:", ws.mediaPacketCount)
+                }
+
+                if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+                  console.log("🎵 [SANPBX-MEDIA] Sending audio to Deepgram, buffer size:", audioBuffer.length)
+                  console.log("🎵 [SANPBX-MEDIA] Deepgram WebSocket state:", deepgramWs.readyState)
+                  deepgramWs.send(audioBuffer)
+                  console.log("✅ [SANPBX-MEDIA] Audio sent to Deepgram successfully")
+                } else {
+                  console.log("🎵 [SANPBX-MEDIA] Queuing audio for Deepgram, queue size:", deepgramAudioQueue.length)
+                  console.log("🎵 [SANPBX-MEDIA] Deepgram ready:", deepgramReady)
+                  console.log("🎵 [SANPBX-MEDIA] Deepgram WebSocket state:", deepgramWs?.readyState)
+                  deepgramAudioQueue.push(audioBuffer)
+                  if (deepgramAudioQueue.length % 50 === 0) {
+                    console.log("⏳ [SANPBX-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+                  }
+                }
+              } catch (error) {
+                console.log("❌ [SANPBX-MEDIA] Error processing audio payload:", error.message)
+                console.log("❌ [SANPBX-MEDIA] Payload preview:", data.payload.substring(0, 100))
               }
             } else {
               console.log("⚠️ [SANPBX-MEDIA] No payload found in media event")
