@@ -12,7 +12,6 @@ if (!DEEPGRAM_API_KEY || !SARVAM_API_KEY || !OPENAI_API_KEY) {
   process.exit(1)
 }
 
-
 const fetch = globalThis.fetch || require("node-fetch")
 
 // Precompiled responses for common queries (instant responses)
@@ -56,7 +55,7 @@ const setupUnifiedVoiceServer = (ws) => {
     const audioBuffer = Buffer.from(audioBase64, "base64")
 
     const CHUNK_SIZE = 320 // 20ms chunks for faster transmission
-    const CHUNK_DELAY = 1 // Minimal 1ms delay
+    const CHUNK_DELAY = 10 // Increased delay for individual chunk sending
     let position = 0
 
     const chunks = []
@@ -66,38 +65,30 @@ const setupUnifiedVoiceServer = (ws) => {
       position += CHUNK_SIZE
     }
 
-    const BATCH_SIZE = 10
-    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-      const batch = chunks.slice(i, i + BATCH_SIZE)
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]
 
-      const batchPromises = batch.map((chunk) => {
-        const mediaMessage = {
-          event: "media",
-          streamSid: streamSid,
-          media: {
-            payload: chunk.toString("base64"),
-          },
-        }
-
-        return new Promise((resolve, reject) => {
-          try {
-            ws.send(JSON.stringify(mediaMessage))
-            resolve()
-          } catch (error) {
-            reject(error)
-          }
-        })
-      })
+      const mediaMessage = {
+        event: "media",
+        streamSid: streamSid,
+        media: {
+          payload: chunk.toString("base64"),
+        },
+      }
 
       try {
-        await Promise.all(batchPromises)
-        // Minimal delay between batches
-        if (i + BATCH_SIZE < chunks.length) {
-          await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY))
+        ws.send(JSON.stringify(mediaMessage))
+
+        if ((i + 1) % 20 === 0) {
+          console.log(`[STREAM-ALT] Sent ${i + 1} chunks`)
         }
       } catch (error) {
-        console.error("[STREAM-ALT] Batch error:", error.message)
+        console.error("[STREAM-ALT] Chunk error:", error.message)
         break
+      }
+
+      if (i < chunks.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY))
       }
     }
 
@@ -206,8 +197,7 @@ const setupUnifiedVoiceServer = (ws) => {
     // C-Zentrix expects specific audio format
     // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
     const CHUNK_SIZE = 160 // 10ms chunks for 8kHz 16-bit mono
-    const CHUNK_DURATION_MS = 2 // Reduced from 10ms to 2ms for faster streaming
-    const BATCH_SIZE = 5 // Send multiple chunks in quick succession
+    const CHUNK_DURATION_MS = 10 // Increased back to 10ms for proper timing
 
     let position = 0
     const streamStart = Date.now()
@@ -235,51 +225,33 @@ const setupUnifiedVoiceServer = (ws) => {
     let chunksSuccessfullySent = 0
 
     while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
-      // Send multiple chunks in a batch to reduce overall delay
-      const batchPromises = []
+      const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
 
-      for (let i = 0; i < BATCH_SIZE && position < audioBuffer.length; i++) {
-        const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
+      // Pad smaller chunks with silence if needed
+      const paddedChunk =
+        chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
 
-        // Pad smaller chunks with silence if needed
-        const paddedChunk =
-          chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
-
-        const mediaMessage = {
-          event: "media",
-          streamSid: streamSid,
-          media: {
-            payload: paddedChunk.toString("base64"),
-          },
-        }
-
-        batchPromises.push(
-          new Promise((resolve, reject) => {
-            try {
-              ws.send(JSON.stringify(mediaMessage))
-              chunksSuccessfullySent++
-              resolve()
-            } catch (error) {
-              reject(error)
-            }
-          }),
-        )
-
-        position += CHUNK_SIZE
+      const mediaMessage = {
+        event: "media",
+        streamSid: streamSid,
+        media: {
+          payload: paddedChunk.toString("base64"),
+        },
       }
 
-      // Wait for the batch to complete
       try {
-        await Promise.all(batchPromises)
+        ws.send(JSON.stringify(mediaMessage))
+        chunksSuccessfullySent++
 
-        // Log every 50th chunk to monitor progress
-        if (chunksSuccessfullySent % 2 === 0) {
+        if (chunksSuccessfullySent % 10 === 0) {
           console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`)
         }
       } catch (error) {
-        console.error(`[STREAM] Failed to send batch at chunk ${chunksSuccessfullySent}:`, error.message)
+        console.error(`[STREAM] Failed to send chunk ${chunksSuccessfullySent + 1}:`, error.message)
         break
       }
+
+      position += CHUNK_SIZE
 
       if (position < audioBuffer.length) {
         await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
