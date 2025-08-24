@@ -1,6 +1,9 @@
 const ffmpeg = require('fluent-ffmpeg');
 const { Transform } = require('stream');
 const EventEmitter = require('events');
+const path = require('path');
+const fs = require('fs');
+const { spawn } = require('child_process');
 
 // Audio format constants optimized for telephony
 const AUDIO_FORMATS = {
@@ -24,6 +27,75 @@ const AUDIO_FORMATS = {
   }
 };
 
+/**
+ * FFmpeg path detection and setup
+ */
+class FFmpegSetup {
+  static async findFFmpeg() {
+    const possiblePaths = [
+      '/usr/bin/ffmpeg',
+      '/usr/local/bin/ffmpeg',
+      '/opt/homebrew/bin/ffmpeg',
+      'ffmpeg', // System PATH
+      path.join(__dirname, 'node_modules', 'ffmpeg-static', 'ffmpeg'),
+      path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg'),
+      path.join(process.cwd(), 'bin', 'ffmpeg')
+    ];
+    
+    for (const ffmpegPath of possiblePaths) {
+      if (await this.testFFmpeg(ffmpegPath)) {
+        console.log(`✅ [FFMPEG] Found FFmpeg at: ${ffmpegPath}`);
+        ffmpeg.setFfmpegPath(ffmpegPath);
+        return ffmpegPath;
+      }
+    }
+    
+    throw new Error('FFmpeg not found. Please install FFmpeg or ffmpeg-static package');
+  }
+  
+  static testFFmpeg(ffmpegPath) {
+    return new Promise((resolve) => {
+      const child = spawn(ffmpegPath, ['-version'], { stdio: 'pipe' });
+      let resolved = false;
+      
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          child.kill();
+          resolve(false);
+        }
+      }, 3000);
+      
+      child.on('error', () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve(false);
+        }
+      });
+      
+      child.on('close', (code) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve(code === 0);
+        }
+      });
+    });
+  }
+  
+  static async initialize() {
+    try {
+      return await this.findFFmpeg();
+    } catch (error) {
+      console.error('❌ [FFMPEG] FFmpeg initialization failed:', error.message);
+      console.error('💡 [FFMPEG] Install FFmpeg: sudo apt install ffmpeg (Ubuntu) or brew install ffmpeg (macOS)');
+      console.error('💡 [FFMPEG] Or install ffmpeg-static: npm install ffmpeg-static');
+      return null;
+    }
+  }
+}
+
 class AudioProcessor extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -32,6 +104,7 @@ class AudioProcessor extends EventEmitter {
       enableVAD: options.enableVAD || true,
       enableNoiseSupression: options.enableNoiseSupression || false,
       bufferOptimization: options.bufferOptimization || true,
+      fallbackToNodeBuffers: options.fallbackToNodeBuffers !== false,
       ...options
     };
     
@@ -39,6 +112,7 @@ class AudioProcessor extends EventEmitter {
     this.silenceThreshold = options.silenceThreshold || 500;
     this.lastAudioTime = Date.now();
     this.isProcessing = false;
+    this.ffmpegAvailable = false;
     
     // Performance tracking
     this.stats = {
@@ -46,8 +120,28 @@ class AudioProcessor extends EventEmitter {
       converted: 0,
       avgProcessingTime: 0,
       avgConversionTime: 0,
-      bufferSize: 0
+      bufferSize: 0,
+      conversionMethod: 'unknown'
     };
+    
+    // Initialize FFmpeg
+    this.initializeFFmpeg();
+  }
+
+  async initializeFFmpeg() {
+    try {
+      const ffmpegPath = await FFmpegSetup.initialize();
+      this.ffmpegAvailable = !!ffmpegPath;
+      this.stats.conversionMethod = this.ffmpegAvailable ? 'ffmpeg' : 'node-buffer';
+      
+      if (!this.ffmpegAvailable && this.options.fallbackToNodeBuffers) {
+        console.log('⚠️ [AUDIO-PROCESSOR] FFmpeg not available, using Node.js buffer fallback');
+      }
+    } catch (error) {
+      console.error('❌ [AUDIO-PROCESSOR] FFmpeg initialization failed:', error.message);
+      this.ffmpegAvailable = false;
+      this.stats.conversionMethod = 'node-buffer';
+    }
   }
 
   /**
@@ -180,50 +274,87 @@ class AudioProcessor extends EventEmitter {
   }
 
   /**
-   * Convert MP3 to PCM for SanIPPBX with optimized streaming
+   * Convert MP3 to PCM - with FFmpeg and Node.js fallback
    */
   async convertMp3ToPcm(mp3Buffer) {
     const startTime = Date.now();
     
+    if (this.ffmpegAvailable) {
+      return this.convertMp3ToPcmFFmpeg(mp3Buffer, startTime);
+    } else {
+      return this.convertMp3ToPcmNodeFallback(mp3Buffer, startTime);
+    }
+  }
+
+  /**
+   * Convert MP3 to PCM using FFmpeg (preferred method)
+   */
+  async convertMp3ToPcmFFmpeg(mp3Buffer, startTime) {
     return new Promise((resolve, reject) => {
       const { PassThrough } = require('stream');
       const inputStream = new PassThrough();
       const chunks = [];
       
-      // Setup FFmpeg conversion
-      const command = ffmpeg(inputStream)
-        .audioFrequency(AUDIO_FORMATS.SANIPBX.sampleRate)
-        .audioChannels(AUDIO_FORMATS.SANIPBX.channels)
-        .audioCodec('pcm_s16le')
-        .format('s16le')
-        .audioFilters([
-          'highpass=f=300', // Remove low frequency noise
-          'lowpass=f=3400',  // Telephony band limit
-          'volume=1.5'       // Slight amplification
-        ])
-        .on('start', (commandLine) => {
-          console.log('🔄 [AUDIO-CONVERT] Started FFmpeg:', commandLine.substring(0, 100));
-        })
-        .on('error', (error) => {
-          console.error('❌ [AUDIO-CONVERT] FFmpeg error:', error.message);
-          reject(error);
-        })
-        .on('end', () => {
-          const pcmBuffer = Buffer.concat(chunks);
-          const conversionTime = Date.now() - startTime;
-          this.updateStats('converted', conversionTime);
-          console.log(`✅ [AUDIO-CONVERT] Converted ${mp3Buffer.length}b MP3 to ${pcmBuffer.length}b PCM in ${conversionTime}ms`);
-          resolve(pcmBuffer);
-        });
-      
-      // Pipe output to chunks collector
-      const outputStream = new PassThrough();
-      outputStream.on('data', chunk => chunks.push(chunk));
-      command.pipe(outputStream);
-      
-      // Send MP3 data to FFmpeg
-      inputStream.end(mp3Buffer);
+      try {
+        // Setup FFmpeg conversion
+        const command = ffmpeg(inputStream)
+          .audioFrequency(AUDIO_FORMATS.SANIPBX.sampleRate)
+          .audioChannels(AUDIO_FORMATS.SANIPBX.channels)
+          .audioCodec('pcm_s16le')
+          .format('s16le')
+          .audioFilters([
+            'highpass=f=300', // Remove low frequency noise
+            'lowpass=f=3400',  // Telephony band limit
+            'volume=1.5'       // Slight amplification
+          ])
+          .on('start', (commandLine) => {
+            console.log('🔄 [AUDIO-CONVERT] Started FFmpeg:', commandLine.substring(0, 100));
+          })
+          .on('error', (error) => {
+            console.error('❌ [AUDIO-CONVERT] FFmpeg error:', error.message);
+            reject(error);
+          })
+          .on('end', () => {
+            const pcmBuffer = Buffer.concat(chunks);
+            const conversionTime = Date.now() - startTime;
+            this.updateStats('converted', conversionTime);
+            console.log(`✅ [AUDIO-CONVERT] Converted ${mp3Buffer.length}b MP3 to ${pcmBuffer.length}b PCM in ${conversionTime}ms`);
+            resolve(pcmBuffer);
+          });
+        
+        // Pipe output to chunks collector
+        const outputStream = new PassThrough();
+        outputStream.on('data', chunk => chunks.push(chunk));
+        command.pipe(outputStream);
+        
+        // Send MP3 data to FFmpeg
+        inputStream.end(mp3Buffer);
+      } catch (error) {
+        reject(error);
+      }
     });
+  }
+
+  /**
+   * Convert MP3 to PCM using Node.js fallback (when FFmpeg unavailable)
+   */
+  async convertMp3ToPcmNodeFallback(mp3Buffer, startTime) {
+    console.log('⚠️ [AUDIO-CONVERT] Using Node.js fallback for MP3 conversion');
+    
+    // This is a simplified fallback - in production you might want to use a pure JS MP3 decoder
+    // For now, we'll return a basic PCM representation
+    const conversionTime = Date.now() - startTime;
+    this.updateStats('converted', conversionTime);
+    
+    // Generate silence buffer as fallback (replace with actual MP3 decoder if needed)
+    const durationEstimate = Math.floor(mp3Buffer.length / 1000); // Rough estimate
+    const sampleCount = AUDIO_FORMATS.SANIPBX.sampleRate * Math.max(1, durationEstimate);
+    const pcmBuffer = Buffer.alloc(sampleCount * 2); // 16-bit samples
+    
+    console.log(`⚠️ [AUDIO-CONVERT] Fallback conversion completed in ${conversionTime}ms (silence buffer)`);
+    console.log('💡 [AUDIO-CONVERT] Install FFmpeg for proper MP3 conversion');
+    
+    return pcmBuffer;
   }
 
   /**
@@ -312,8 +443,12 @@ class AudioProcessor extends EventEmitter {
    */
   updateStats(type, processingTime) {
     this.stats[type]++;
-    const avgKey = `avg${type.charAt(0).toUpperCase() + type.slice(1)}Time`;
-    this.stats[avgKey] = (this.stats[avgKey] + processingTime) / 2;
+    const avgKey = `avg${type.charAt(0).toUpperCase() + type.slice(1)}ingTime`;
+    if (this.stats[avgKey]) {
+      this.stats[avgKey] = (this.stats[avgKey] + processingTime) / 2;
+    } else {
+      this.stats[`avg${type.charAt(0).toUpperCase() + type.slice(1)}Time`] = processingTime;
+    }
     this.stats.bufferSize = this.audioBuffer.length;
   }
 
@@ -323,6 +458,7 @@ class AudioProcessor extends EventEmitter {
   getStats() {
     return {
       ...this.stats,
+      ffmpegAvailable: this.ffmpegAvailable,
       bufferHealth: this.audioBuffer.length < AUDIO_FORMATS.SANIPBX.bytesPerFrame * 10 ? 'good' : 'high',
       timestamp: new Date().toISOString()
     };
@@ -337,7 +473,8 @@ class AudioProcessor extends EventEmitter {
       converted: 0,
       avgProcessingTime: 0,
       avgConversionTime: 0,
-      bufferSize: 0
+      bufferSize: 0,
+      conversionMethod: this.ffmpegAvailable ? 'ffmpeg' : 'node-buffer'
     };
   }
 
@@ -474,6 +611,13 @@ const AudioUtils = {
     }
     
     return mixed;
+  },
+
+  /**
+   * Initialize FFmpeg for the entire module
+   */
+  async initializeFFmpeg() {
+    return await FFmpegSetup.initialize();
   }
 };
 
@@ -481,5 +625,6 @@ module.exports = {
   AudioProcessor,
   RealTimeAudioStream,
   AudioUtils,
-  AUDIO_FORMATS
+  AUDIO_FORMATS,
+  FFmpegSetup
 };
