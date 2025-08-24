@@ -273,7 +273,7 @@ const setupUnifiedVoiceServer = (ws) => {
         await Promise.all(batchPromises)
 
         // Log every 50th chunk to monitor progress
-        if (chunksSuccessfullySent % 50 === 0) {
+        if (chunksSuccessfullySent % 2 === 0) {
           console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`)
         }
       } catch (error) {
