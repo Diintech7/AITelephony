@@ -419,7 +419,6 @@ class SanPbxCallSession extends EventEmitter {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Prefer x-api-key; some tenants also accept API-Subscription-Key
           "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
@@ -430,8 +429,7 @@ class SanPbxCallSession extends EventEmitter {
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 44100,
-          enable_preprocessing: false,
+          speech_sample_rate: 24000,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
