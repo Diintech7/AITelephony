@@ -144,31 +144,38 @@ const setupUnifiedVoiceServer = (ws) => {
   };
 
   /**
-   * Connect to Deepgram with optimized settings
+   * Connect to Deepgram with optimized settings and fallback
    */
   const connectToDeepgram = () => {
     console.log('[STT] Connecting to Deepgram');
 
-    const deepgramUrl = 'wss://api.deepgram.com/v1/listen?' + 
-      'sample_rate=8000&' +
-      'channels=1&' +
-      'encoding=linear16&' +
-      'model=nova-2&' +
-      'language=en&' +
-      'interim_results=true&' +
-      'smart_format=true&' +
-      'endpointing=150&' + // Reduced from 300ms to 150ms
-      'vad_turnoff=100&' +   // Voice activity detection optimization
-      'no_delay=true';       // Minimize processing delays
+    // Try primary connection first
+    const primaryParams = {
+      'sample_rate': '8000',
+      'channels': '1', 
+      'encoding': 'linear16',
+      'model': 'nova-2',
+      'language': 'en',
+      'interim_results': 'true',
+      'smart_format': 'true',
+      'endpointing': '200',
+      'vad_turnoff': '250',
+      'punctuate': 'true'
+    };
+
+    const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(primaryParams).toString()}`;
+    
+    console.log('[STT] Connecting to URL:', deepgramUrl);
 
     deepgramWs = new WebSocket(deepgramUrl, {
       headers: {
-        'Authorization': `Token ${DEEPGRAM_API_KEY}`
+        'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+        'User-Agent': 'CZentrix-VoiceBot/1.0'
       }
     });
 
     deepgramWs.on('open', () => {
-      console.log('[STT] Connected to Deepgram');
+      console.log('[STT] Connected to Deepgram successfully');
     });
 
     deepgramWs.on('message', async (data) => {
@@ -216,6 +223,15 @@ const setupUnifiedVoiceServer = (ws) => {
 
     deepgramWs.on('error', (error) => {
       console.error('[STT] Deepgram error:', error.message);
+      console.error('[STT] Full error details:', error);
+      
+      // Attempt to reconnect after a brief delay
+      setTimeout(() => {
+        if (!deepgramWs || deepgramWs.readyState === WebSocket.CLOSED) {
+          console.log('[STT] Attempting to reconnect to Deepgram...');
+          connectToDeepgram();
+        }
+      }, 2000);
     });
 
     deepgramWs.on('close', () => {
