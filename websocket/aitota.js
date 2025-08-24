@@ -219,11 +219,11 @@ class SimplifiedSarvamTTSProcessor {
 
     try {
       const audioBuffer = Buffer.from(audioBase64, "base64")
-      const chunkSize = 320 // 20ms chunks for 8kHz (optimal for Twilio)
-      let sequenceNumber = 0
+      const chunkSize = 640 // 40ms chunks for 8kHz (within C-Zentrix recommended range)
+      let chunkNumber = 1
       const totalChunks = Math.ceil(audioBuffer.length / chunkSize)
 
-      console.log(`🎵 [AUDIO-STREAMING] Starting chunked streaming: ${totalChunks} chunks`)
+      console.log(`🎵 [AUDIO-STREAMING] Starting C-Zentrix streaming: ${totalChunks} chunks`)
 
       for (let i = 0; i < audioBuffer.length; i += chunkSize) {
         if (this.isInterrupted || this.currentAudioStreaming.interrupt) {
@@ -232,21 +232,20 @@ class SimplifiedSarvamTTSProcessor {
         }
 
         const chunk = audioBuffer.slice(i, i + chunkSize)
+
         const audioPayload = {
           event: "media",
           streamSid: this.streamSid,
           media: {
-            payload: chunk.toString("base64"),
+            payload: chunk.toString("base64"), // C-Zentrix expects base64 slinear16
           },
-          sequenceNumber: sequenceNumber,
-          timestamp: Date.now(),
         }
 
         this.ws.send(JSON.stringify(audioPayload))
         this.totalAudioBytes += chunk.length
-        sequenceNumber++
+        chunkNumber++
 
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        await new Promise((resolve) => setTimeout(resolve, 40))
       }
 
       console.log(
@@ -268,12 +267,15 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log("🔌 [WEBSOCKET] New voice AI connection established")
 
     let streamSid = null
+    let accountSid = null
+    let callSid = null
     const currentLanguage = "hi"
     let conversationHistory = []
     let currentTTS = null
     let isProcessing = false
     let lastProcessedText = ""
     let processingRequestId = 0
+    let sequenceNumber = 0
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -386,24 +388,38 @@ const setupUnifiedVoiceServer = (wss) => {
     ws.on("message", async (message) => {
       try {
         const data = JSON.parse(message)
+        console.log(`📨 [C-ZENTRIX] Received event: ${data.event}`)
 
         switch (data.event) {
           case "connected":
-            console.log("📞 [TWILIO] Call connected")
+            console.log("📞 [C-ZENTRIX] Call connected - Protocol:", data.protocol, "Version:", data.version)
             break
 
           case "start":
-            streamSid = data.start.streamSid
-            console.log("🎵 [TWILIO] Media stream started:", streamSid)
+            streamSid = data.start.streamSid || data.streamSid
+            accountSid = data.start.accountSid
+            callSid = data.start.callSid
+            sequenceNumber = Number.parseInt(data.sequenceNumber) || 0
+
+            console.log("🎵 [C-ZENTRIX] Media stream started:")
+            console.log("  - StreamSid:", streamSid)
+            console.log("  - AccountSid:", accountSid)
+            console.log("  - CallSid:", callSid)
+            console.log("  - Tracks:", data.start.tracks)
+            console.log("  - Media Format:", data.start.mediaFormat)
+
             await connectToDeepgram()
             break
 
           case "media":
-            if (data.media && data.media.payload) {
+            if (data.media && data.media.payload && data.media.track === "inbound") {
               const audioBuffer = Buffer.from(data.media.payload, "base64")
+              console.log(
+                `🎵 [C-ZENTRIX] Received audio chunk: ${data.media.chunk}, timestamp: ${data.media.timestamp}`,
+              )
 
               if (deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-                // Send audio directly to Deepgram without additional chunking
+                // Send audio directly to Deepgram (C-Zentrix already sends slinear16)
                 deepgramWs.send(audioBuffer)
               } else if (!deepgramReady) {
                 console.log("⚠️ [DEEPGRAM] Not ready, attempting reconnection...")
@@ -412,18 +428,32 @@ const setupUnifiedVoiceServer = (wss) => {
             }
             break
 
+          case "dtmf":
+            console.log(`📞 [C-ZENTRIX] DTMF detected: ${data.dtmf.digit} on track: ${data.dtmf.track}`)
+            // Could be used for menu navigation or interruption
+            break
+
+          case "vad":
+            console.log(`🎤 [C-ZENTRIX] VAD event: ${data.vad.value} on track: ${data.vad.track}`)
+            // Could be used for better conversation flow
+            break
+
           case "stop":
-            console.log("🛑 [TWILIO] Media stream stopped")
+            console.log("🛑 [C-ZENTRIX] Media stream stopped")
+            console.log("  - AccountSid:", data.stop.accountSid)
+            console.log("  - CallSid:", data.stop.callSid)
+
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
               deepgramWs.close()
             }
             break
 
           default:
-            console.log("📨 [TWILIO] Unknown event:", data.event)
+            console.log("📨 [C-ZENTRIX] Unknown event:", data.event)
         }
       } catch (error) {
         console.log("❌ [WEBSOCKET] Message parsing error:", error.message)
+        console.log("Raw message:", message.toString())
       }
     })
 
