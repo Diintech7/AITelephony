@@ -1,718 +1,1040 @@
-// websocket/sanpbx-server-integrated.js
-// Complete SanIPPBX WebSocket Server with AI Integration and Performance Optimization
+const WebSocket = require("ws")
+const EventEmitter = require("events")
+require("dotenv").config()
 
-const WebSocket = require('ws');
-const { createClient } = require('@deepgram/sdk');
-const OpenAI = require('openai');
-const { AudioProcessor, AUDIO_FORMATS } = require('./audio-utils');
-const { PerformanceMonitor, LatencyOptimizer } = require('./performance-monitor');
-const EventEmitter = require('events');
+const API_KEYS = {
+  deepgram: process.env.DEEPGRAM_API_KEY,
+  sarvam: process.env.SARVAM_API_KEY,
+  openai: process.env.OPENAI_API_KEY,
+}
 
-// Initialize performance monitoring
-const performanceMonitor = new PerformanceMonitor({
-  enableRealTimeMonitoring: true,
-  latencyThresholds: {
-    excellent: 50,
-    good: 100,
-    acceptable: 150,
-    poor: 300
-  },
-  alertThreshold: 200
-});
+console.log("🔑 [SANPBX] API Keys loaded:", Object.keys(API_KEYS).filter(key => API_KEYS[key]))
 
-const latencyOptimizer = new LatencyOptimizer(performanceMonitor, {
-  autoOptimize: true,
-  targetLatency: 100,
-  aggressiveness: 'high'
-});
+// Validate API keys
+if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+  console.error("❌ [SANPBX] Missing required API keys in environment variables")
+  process.exit(1)
+}
 
-// Session storage with performance tracking
-const activeSessions = new Map();
-const sessionStats = new Map();
+const LANGUAGE_MAPPING = {
+  hi: "hi-IN",
+  en: "en-IN",
+  bn: "bn-IN",
+  te: "te-IN",
+  ta: "ta-IN",
+  mr: "mr-IN",
+  gu: "gu-IN",
+  kn: "kn-IN",
+  ml: "ml-IN",
+  pa: "pa-IN",
+  or: "or-IN",
+  as: "as-IN",
+  ur: "ur-IN",
+}
 
-class OptimizedSanIPPBXSession extends EventEmitter {
-  constructor(ws, sessionData) {
-    super();
-    
-    // Basic session info
-    this.ws = ws;
-    this.callId = sessionData.callId;
-    this.streamId = sessionData.streamId;
-    this.channelId = sessionData.channelId;
-    this.callerId = sessionData.callerId;
-    this.callDirection = sessionData.callDirection;
-    this.did = sessionData.did;
-    
-    // Performance tracking
-    this.sessionStartTime = Date.now();
-    this.lastActivityTime = Date.now();
-    this.audioProcessor = new AudioProcessor({
-      enablePreprocessing: true,
-      enableVAD: true,
-      bufferOptimization: true,
-      silenceThreshold: 300
-    });
-    
-    // AI services
-    this.deepgram = null;
-    this.openai = null;
-    this.sarvam = null;
-    
-    // Conversation management
-    this.conversationHistory = [];
-    this.isProcessingAudio = false;
-    this.isSpeaking = false;
-    this.currentTranscription = '';
-    
-    // Performance metrics
-    this.metrics = {
-      packetsReceived: 0,
-      packetsProcessed: 0,
-      audioLatency: [],
-      aiLatency: [],
-      errors: 0,
-      conversationTurns: 0
-    };
-    
-    // Initialize all services
-    this.initializeServices();
+const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  return LANGUAGE_MAPPING[lang] || "hi-IN"
+}
+
+const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  if (lang === "hi") return "hi"
+  if (lang === "en") return "en-IN"
+  if (lang === "mr") return "mr"
+  return lang
+}
+
+const VALID_SARVAM_VOICES = new Set([
+  "abhilash",
+  "anushka",
+  "meera",
+  "meera",
+  "maitreyi",
+  "arvind",
+  "amol",
+  "amartya",
+  "diya",
+  "neel",
+  "misha",
+  "vian",
+  "arjun",
+  "maya",
+  "manisha",
+  "vidya",
+  "arya",
+  "karun",
+  "hitesh",
+])
+
+const getValidSarvamVoice = (voiceSelection = "meera") => {
+  const normalized = (voiceSelection || "").toString().trim().toLowerCase()
+  if (VALID_SARVAM_VOICES.has(normalized)) {
+    return normalized
+  }
+  return "meera" // Default fallback
+}
+
+// -------- Base64 helpers --------
+function isProbablyBase64(str) {
+  if (typeof str !== "string") return false
+  if (str.length < 8) return false
+  if (str.length % 4 !== 0) return false
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(str)
+}
+
+function normalizeBase64String(str) {
+  if (typeof str !== "string") return str
+  // Strip whitespace
+  let s = str.replace(/\s+/g, "")
+  if (isProbablyBase64(s)) return s
+  // Convert URL-safe base64 to standard
+  let urlFixed = s.replace(/-/g, "+").replace(/_/g, "/")
+  const pad = urlFixed.length % 4
+  if (pad) urlFixed = urlFixed + "=".repeat(4 - pad)
+  if (isProbablyBase64(urlFixed)) return urlFixed
+  // Fallback: attempt to interpret as binary (latin1) and encode
+  try {
+    const buf = Buffer.from(str, "binary")
+    const b64 = buf.toString("base64")
+    return b64
+  } catch (_) {
+    return str
+  }
+}
+
+// -------- Audio utils: Base64 audio processing --------
+// SanIPPBX sends base64 audio directly, no conversion needed
+
+// -------- Audio utils: base64 PCM -> µ-law (8kHz mono) --------
+function linearPcmSampleToMuLaw(sample) {
+  // Clamp to 16-bit signed range
+  if (sample > 32767) sample = 32767
+  if (sample < -32768) sample = -32768
+
+  const MU = 255
+
+  let sign = 0
+  if (sample < 0) {
+    sign = 0x80
+    sample = -sample
   }
 
-  async initializeServices() {
-    try {
-      const startTime = performance.now();
-      
-      await Promise.all([
-        this.initializeDeepgram(),
-        this.initializeOpenAI(),
-        this.initializeSarvam()
-      ]);
-      
-      const initTime = performance.now() - startTime;
-      performanceMonitor.recordAudioLatency(startTime, performance.now());
-      
-      console.log(`🚀 [SANPBX-SESSION] All services initialized in ${initTime.toFixed(2)}ms for: ${this.callId}`);
-      
-      // Send welcome message after short delay
-      setTimeout(() => {
-        this.sendWelcomeMessage();
-      }, 500);
-      
-    } catch (error) {
-      console.error(`❌ [SANPBX-SESSION] Service initialization failed:`, error.message);
-      this.metrics.errors++;
-      this.emit('error', error);
+  // Bias for μ-law
+  sample = sample + 132
+  if (sample > 32635) sample = 32635
+
+  // Determine exponent
+  let exponent = 7
+  for (let expMask = 0x4000; (sample & expMask) === 0 && exponent > 0; expMask >>= 1) {
+    exponent--
+  }
+
+  const mantissa = (sample >> (exponent + 3)) & 0x0f
+  const muLawByte = ~(sign | (exponent << 4) | mantissa) & 0xff
+  return muLawByte
+}
+
+function pcm16ToMuLawBase64(pcm16Base64) {
+  try {
+    const buffer = Buffer.from(pcm16Base64, "base64")
+    const sampleCount = buffer.length / 2
+    const muLawBuffer = Buffer.alloc(sampleCount)
+    
+    for (let i = 0; i < sampleCount; i++) {
+      const sample = buffer.readInt16LE(i * 2)
+      muLawBuffer[i] = linearPcmSampleToMuLaw(sample)
     }
-  }
-
-  async initializeDeepgram() {
-    const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
     
-    // Optimized connection settings for minimal latency
-    const connection = deepgram.listen.live({
-      model: 'nova-2',
-      language: 'en',
-      smart_format: true,
-      interim_results: true, // Must be true for utterance_end_ms
-      endpointing: 200, // Faster endpointing
-      vad_events: true,
-      punctuate: true,
-      profanity_filter: false,
-      diarize: false,
-      multichannel: false,
-      alternatives: 1,
-      numerals: true,
-      filler_words: false,
-      utterance_end_ms: 1000, // Changed from 800 to 1000 for Deepgram API compliance
-      encoding: 'linear16',
-      sample_rate: 8000,
-      channels: 1
-    });
+    return muLawBuffer.toString("base64")
+  } catch (err) {
+    console.error("❌ [SANPBX-AUDIO] Linear16 to µ-law conversion error:", err.message)
+    return pcm16Base64 // Return original if conversion fails
+  }
+}
 
-    connection.on('open', () => {
-      console.log(`🎤 [DEEPGRAM] WebSocket OPEN for session: ${this.callId}`);
-    });
+// Extract raw PCM16 data from a WAV base64 (assumes PCM16 LE), returns base64 of PCM chunk
+function extractPcm16FromWavBase64(wavBase64) {
+  try {
+    const buffer = Buffer.from(wavBase64, "base64")
+    if (buffer.length < 44) return null
+    if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") return null
 
-    connection.on('close', () => {
-      console.log(`🎤 [DEEPGRAM] WebSocket CLOSED for session: ${this.callId}`);
-    });
+    let offset = 12
+    let dataOffset = -1
+    let dataSize = 0
 
-    connection.on('Results', async (data) => {
-      const transcript = data.channel?.alternatives?.[0]?.transcript;
-      if (transcript && transcript.trim() && data.is_final) {
-        const transcriptionEndTime = performance.now();
-        
-        // Record transcription latency
-        performanceMonitor.recordAILatency('transcription', this.lastActivityTime, transcriptionEndTime, true);
-        
-        console.log(`🗣️ [TRANSCRIPT] "${transcript}" (${this.callId})`);
-        this.currentTranscription = transcript;
-        
-        // Process conversation
-        await this.processConversation(transcript);
-        
-        this.metrics.conversationTurns++;
+    while (offset + 8 <= buffer.length) {
+      const chunkId = buffer.toString("ascii", offset, offset + 4)
+      const chunkSize = buffer.readUInt32LE(offset + 4)
+      const next = offset + 8 + chunkSize
+      if (chunkId === "data") {
+        dataOffset = offset + 8
+        dataSize = chunkSize
       }
-    });
-
-    connection.on('error', (error) => {
-      console.error(`❌ [DEEPGRAM] Error:`, error);
-      this.metrics.errors++;
-      performanceMonitor.recordAILatency('transcription', this.lastActivityTime, performance.now(), false);
-    });
-
-    this.deepgram = connection;
-    this.deepgramOpen = true;
-  }
-
-  initializeOpenAI() {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      timeout: 10000 // 10 second timeout for real-time performance
-    });
-    
-    // Optimized system prompt for telephony
-    this.conversationHistory = [{
-      role: 'system',
-      content: `You are a professional phone assistant. Rules:
-- Keep responses under 25 words
-- Be natural and conversational  
-- Ask clarifying questions when needed
-- End calls politely if requested
-- Current caller: ${this.callerId}, DID: ${this.did}`
-    }];
-    
-    console.log(`🧠 [OPENAI] Initialized for session: ${this.callId}`);
-  }
-
-  async initializeSarvam() {
-    // Sarvam AI for Indian language support (optional)
-    this.sarvam = {
-      apiKey: process.env.SARVAM_API_KEY,
-      baseUrl: 'https://api.sarvam.ai',
-      available: !!process.env.SARVAM_API_KEY
-    };
-    
-    if (this.sarvam.available) {
-      console.log(`🇮🇳 [SARVAM] Initialized for session: ${this.callId}`);
+      offset = next
     }
-  }
 
-  async sendWelcomeMessage() {
-    const welcomeMessages = [
-      "Hello! How can I assist you today?",
-      "Hi there! What can I help you with?",
-      "Welcome! How may I help you?"
-    ];
-    
-    const message = welcomeMessages[Math.floor(Math.random() * welcomeMessages.length)];
-    await this.generateAndSendResponse(message);
+    if (dataOffset < 0 || dataSize <= 0) return null
+    const pcmData = buffer.slice(dataOffset, dataOffset + dataSize)
+    return pcmData.toString("base64")
+  } catch (_) {
+    return null
   }
+}
 
-  processIncomingAudio(base64Audio) {
-    // Use a queue to batch audio processing
-    if (!this.audioQueue) this.audioQueue = [];
-    this.audioQueue.push(base64Audio);
-    if (!this.processingAudioQueue) {
-      this.processingAudioQueue = true;
-      this._processAudioQueue();
+class SanPbxCallSession extends EventEmitter {
+  constructor(ws, callData) {
+    super()
+    this.ws = ws
+    this.callId = callData.callId
+    this.streamId = callData.streamId
+    this.channelId = callData.channelId
+    this.callerId = callData.callerId
+    this.callDirection = callData.callDirection
+    this.did = callData.did
+    this.isActive = false
+    this.isAnswered = false
+    this.audioBuffer = []
+    this.conversationHistory = []
+    this.detectedLanguage = "en"
+    this.createdAt = new Date()
+    this.mediaFormat = null
+
+    this.deepgramWs = null
+    this.deepgramReady = false
+    this.deepgramAudioQueue = []
+
+    // Audio packet statistics
+    this.audioPacketStats = {
+      totalPackets: 0,
+      totalBytes: 0,
+      averagePacketSize: 0,
+      firstPacketTime: null,
+      lastPacketTime: null,
+      packetSizes: [],
+      samplePackets: [] // Store sample packets for analysis
     }
+
+    console.log(`📞 [SANPBX-SESSION] New session created: ${this.callId} | Stream: ${this.streamId}`)
+    console.log(`📞 [SANPBX-SESSION] Caller: ${this.callerId} | Direction: ${this.callDirection} | DID: ${this.did}`)
   }
 
-  _processAudioQueue() {
-    if (!this.audioQueue || this.audioQueue.length === 0) {
-      this.processingAudioQueue = false;
-      return;
-    }
-    const base64Audio = this.audioQueue.shift();
-    const audioStartTime = performance.now();
-    this.metrics.packetsReceived++;
-    this.lastActivityTime = Date.now();
+  async connectToDeepgram() {
     try {
-      const processedAudio = this.audioProcessor.processIncomingAudio(base64Audio);
-      if (processedAudio && this.deepgram && !this.isSpeaking) {
-        const base64Pcm = processedAudio.toString('base64');
-        this.deepgram.send(Buffer.from(base64Pcm, 'base64'));
-        console.log(`🎤 [DEEPGRAM] Sent base64 PCM audio for session: ${this.callId}`);
-        this.metrics.packetsProcessed++;
-        const audioLatency = performance.now() - audioStartTime;
-        performanceMonitor.recordAudioLatency(audioStartTime, performance.now());
-        this.metrics.audioLatency.push(audioLatency);
-        if (this.metrics.audioLatency.length > 100) {
-          this.metrics.audioLatency.shift();
+      const deepgramLanguage = getDeepgramLanguage(this.detectedLanguage)
+
+      const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
+      deepgramUrl.searchParams.append("sample_rate", "44100")
+      deepgramUrl.searchParams.append("channels", "1")
+      // Do not force encoding; stream base64 PCM as-is (44100 Hz mono)
+      deepgramUrl.searchParams.append("model", "nova-2")
+      deepgramUrl.searchParams.append("language", deepgramLanguage)
+      deepgramUrl.searchParams.append("interim_results", "true")
+      deepgramUrl.searchParams.append("smart_format", "true")
+      deepgramUrl.searchParams.append("endpointing", "300")
+
+      this.deepgramWs = new WebSocket(deepgramUrl.toString(), {
+        headers: { Authorization: `Token ${API_KEYS.deepgram}` },
+      })
+
+      this.deepgramWs.onopen = () => {
+        console.log("🎤 [SANPBX-DEEPGRAM] Connection established")
+        this.deepgramReady = true
+        console.log("🎤 [SANPBX-DEEPGRAM] Processing queued audio packets:", this.deepgramAudioQueue.length)
+        this.deepgramAudioQueue.forEach((buffer) => this.deepgramWs.send(buffer))
+        this.deepgramAudioQueue = []
+      }
+
+      this.deepgramWs.onmessage = async (event) => {
+        const data = JSON.parse(event.data)
+        await this.handleDeepgramResponse(data)
+      }
+
+      this.deepgramWs.onerror = (error) => {
+        console.log("❌ [SANPBX-DEEPGRAM] Connection error:", error.message)
+        this.deepgramReady = false
+      }
+
+      this.deepgramWs.onclose = () => {
+        console.log("🔌 [SANPBX-DEEPGRAM] Connection closed")
+        this.deepgramReady = false
+      }
+    } catch (error) {
+      console.error("❌ [SANPBX-DEEPGRAM] Connection setup error:", error.message)
+    }
+  }
+
+  async handleDeepgramResponse(data) {
+    try {
+      if (data.channel?.alternatives?.[0]?.transcript) {
+        const transcript = data.channel.alternatives[0].transcript
+        const confidence = data.channel.alternatives[0].confidence
+        const isFinal = data.is_final
+
+        if (isFinal && transcript.trim() && confidence > 0.5) {
+          console.log(`🎤 [SANPBX-STT] Final transcript: ${transcript}`)
+
+          // Detect language if available
+          if (data.channel.detected_language) {
+            this.detectedLanguage = data.channel.detected_language
+          }
+
+          // Process with OpenAI
+          await this.processWithOpenAI(transcript)
         }
       }
     } catch (error) {
-      console.error(`❌ [AUDIO-PROCESSING] Error:`, error.message);
-      this.metrics.errors++;
+      console.error("❌ [SANPBX-DEEPGRAM] Response handling error:", error.message)
     }
-    // Yield to event loop before processing next chunk
-    setImmediate(() => this._processAudioQueue());
   }
 
-  async processConversation(transcript) {
-    const conversationStartTime = performance.now();
-    
+  async processAudioChunk(audioData) {
     try {
-      // Add user message to history
+      // Log the incoming audio data format for debugging
+      if (!this.audioFormatLogged) {
+        console.log(`🎵 [SANPBX-AUDIO] Incoming audio format check:`)
+        console.log(`   - Data type: ${typeof audioData}`)
+        console.log(`   - Data length: ${audioData.length}`)
+        console.log(`   - Is base64: ${isProbablyBase64(audioData)}`)
+        console.log(`   - Sample data: ${audioData.substring(0, 50)}...`)
+        
+        // Additional detailed analysis
+        if (audioData.length > 0) {
+          console.log(`   - First 10 characters: "${audioData.substring(0, 10)}"`)
+          console.log(`   - Contains special chars: ${/[^A-Za-z0-9+/=]/.test(audioData)}`)
+          console.log(`   - Contains padding: ${audioData.includes('=')}`)
+          console.log(`   - Padding count: ${(audioData.match(/=/g) || []).length}`)
+        }
+        
+        this.audioFormatLogged = true
+      }
+
+      // Ensure audioData is base64
+      const normalizedAudioData = normalizeBase64String(audioData)
+      
+      // Log normalization details
+      if (normalizedAudioData !== audioData && !this.normalizationLogged) {
+        console.log(`🔁 [SANPBX-AUDIO] Base64 normalization applied:`)
+        console.log(`   - Original: ${audioData.substring(0, 30)}...`)
+        console.log(`   - Normalized: ${normalizedAudioData.substring(0, 30)}...`)
+        this.normalizationLogged = true
+      }
+      
+      // Update audio packet statistics
+      this.updateAudioPacketStats(audioData)
+      
+      // Convert base64 to buffer for Deepgram (no resampling needed)
+      const audioBuffer = Buffer.from(normalizedAudioData, "base64")
+
+      // Log the processed audio format
+      if (!this.processedFormatLogged) {
+        console.log(`🎵 [SANPBX-AUDIO] Processed audio format:`)
+        console.log(`   - Buffer size: ${audioBuffer.length} bytes`)
+        console.log(`   - Base64 length: ${normalizedAudioData.length}`)
+        console.log(`   - Estimated samples: ${Math.floor(audioBuffer.length)}`)
+        console.log(`   - Estimated duration: ${(audioBuffer.length / 8000 * 1000).toFixed(2)}ms`)
+        this.processedFormatLogged = true
+      }
+
+      if (this.deepgramReady && this.deepgramWs) {
+        this.deepgramWs.send(audioBuffer)
+      } else {
+        // Queue audio if Deepgram not ready
+        this.deepgramAudioQueue.push(audioBuffer)
+      }
+    } catch (error) {
+      console.error(`❌ [SANPBX-STT] Error processing audio:`, error.message)
+    }
+  }
+
+  async processWithOpenAI(userMessage) {
+    try {
+      // Add user message to conversation history
       this.conversationHistory.push({
-        role: 'user',
-        content: transcript
-      });
-      
-      // Keep conversation history manageable (last 6 exchanges)
-      if (this.conversationHistory.length > 13) { // 1 system + 12 messages (6 exchanges)
-        this.conversationHistory = [
-          this.conversationHistory[0],
-          ...this.conversationHistory.slice(-12)
-        ];
+        role: "user",
+        content: userMessage,
+        timestamp: new Date(),
+        language: this.detectedLanguage,
+      })
+
+      // Create system prompt with token limit instruction
+      const systemPrompt = `${this.getSystemPrompt(this.detectedLanguage)}\n\nIMPORTANT: Keep your responses concise and under 100 tokens. Be brief but helpful.`
+
+      // Prepare messages for OpenAI
+      const messages = [
+        { role: "system", content: systemPrompt },
+        ...this.conversationHistory.slice(-6).map((msg) => ({
+          role: msg.role,
+          content: msg.content,
+        })),
+      ]
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${API_KEYS.openai}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages,
+          max_tokens: 100,
+          temperature: 0.7,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status}`)
       }
-      
-      // Generate AI response with optimized settings
-      const completion = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo', // Fastest available model
-        messages: this.conversationHistory,
-        max_tokens: 50, // Limit response length for speed
-        temperature: 0.7,
-        presence_penalty: 0.6,
-        frequency_penalty: 0.3,
-        stream: false // Disable streaming for simplicity
-      });
-      
-      const aiResponse = completion.choices[0]?.message?.content?.trim();
-      
+
+      const completion = await response.json()
+      const aiResponse = completion.choices[0]?.message?.content
+
       if (aiResponse) {
-        // Record conversation latency
-        const conversationLatency = performance.now() - conversationStartTime;
-        performanceMonitor.recordAILatency('conversation', conversationStartTime, performance.now(), true);
-        this.metrics.aiLatency.push(conversationLatency);
-        
-        // Add assistant response to history
+        console.log(`🤖 [SANPBX-AI] Response (${this.detectedLanguage}): ${aiResponse}`)
+
+        // Add AI response to conversation history
         this.conversationHistory.push({
-          role: 'assistant',
-          content: aiResponse
-        });
-        
-        console.log(`🤖 [AI-RESPONSE] "${aiResponse}" (${conversationLatency.toFixed(2)}ms)`);
-        
-        // Convert to speech and send
-        await this.generateAndSendResponse(aiResponse);
+          role: "assistant",
+          content: aiResponse,
+          timestamp: new Date(),
+          language: this.detectedLanguage,
+        })
+
+        // Convert to speech using Sarvam AI
+        await this.convertToSpeech(aiResponse)
       }
-      
     } catch (error) {
-      console.error(`❌ [CONVERSATION] Error:`, error.message);
-      this.metrics.errors++;
-      performanceMonitor.recordAILatency('conversation', conversationStartTime, performance.now(), false);
-      
-      // Send fallback response
-      await this.generateAndSendResponse("I'm sorry, could you please repeat that?");
+      console.error(`❌ [SANPBX-AI] Error processing with OpenAI:`, error.message)
     }
   }
 
-  async generateAndSendResponse(text) {
-    const ttsStartTime = performance.now();
-    this.isSpeaking = true;
-    
+  async convertToSpeech(text) {
     try {
-      // Generate speech with OpenAI TTS
-      const mp3 = await this.openai.audio.speech.create({
-        model: 'tts-1', // Fastest TTS model
-        voice: 'alloy',
-        input: text,
-        response_format: 'mp3',
-        speed: 1.0 // Normal speed for clarity
-      });
-      
-      const mp3Buffer = Buffer.from(await mp3.arrayBuffer());
-      
-      // Convert MP3 to PCM for telephony
-      const pcmAudio = await this.audioProcessor.convertMp3ToPcm(mp3Buffer);
-      
-      // Convert to base64 and send to SanIPPBX
-      const base64Audio = this.audioProcessor.convertPcmToBase64(pcmAudio);
-      this.sendAudioToSanIPPBX(base64Audio);
-      
-      // Record TTS latency
-      const ttsLatency = performance.now() - ttsStartTime;
-      performanceMonitor.recordAILatency('tts', ttsStartTime, performance.now(), true);
-      
-      console.log(`🔊 [TTS] Audio generated and sent in ${ttsLatency.toFixed(2)}ms`);
-      
-      // Allow audio processing to resume after speech
-      setTimeout(() => {
-        this.isSpeaking = false;
-      }, Math.max(1000, text.length * 50)); // Estimate speech duration
-      
-    } catch (error) {
-      console.error(`❌ [TTS] Error:`, error.message);
-      this.metrics.errors++;
-      performanceMonitor.recordAILatency('tts', ttsStartTime, performance.now(), false);
-      this.isSpeaking = false;
-    }
-  }
+      const sarvamLanguage = getSarvamLanguage(this.detectedLanguage)
+      const voice = getValidSarvamVoice("meera")
 
-  sendAudioToSanIPPBX(base64Audio) {
-    try {
-      if (this.ws.readyState !== WebSocket.OPEN) {
-        console.warn(`⚠️ [SANPBX-AUDIO] WebSocket not open for ${this.callId}`);
-        return;
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // Prefer x-api-key; some tenants also accept API-Subscription-Key
+          "x-api-key": API_KEYS.sarvam,
+          "API-Subscription-Key": API_KEYS.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: sarvamLanguage,
+          speaker: voice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 44100,
+          enable_preprocessing: false,
+          enable_preprocessing: true,
+          model: "bulbul:v1",
+        }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "")
+        console.log(`❌ [SANPBX-TTS] Sarvam error ${response.status}: ${errorText}`)
+        throw new Error(`Sarvam API error: ${response.status}`)
       }
-      
-      // Send audio in chunks to avoid overwhelming the WebSocket
-      const chunks = this.audioProcessor.createAudioChunks(Buffer.from(base64Audio, 'base64'));
-      
-      chunks.forEach((chunk, index) => {
-        setTimeout(() => {
-          const audioEvent = {
-            event: 'media',
-            streamId: this.streamId,
-            callId: this.callId,
-            channelId: this.channelId,
-            media: {
-              payload: chunk.toString('base64')
-            },
-            timestamp: new Date().toISOString()
-          };
-          
-          this.ws.send(JSON.stringify(audioEvent));
-        }, index * 20); // 20ms between chunks
-      });
-      
-      console.log(`📤 [SANPBX-AUDIO] Sent ${chunks.length} audio chunks`);
-      
+
+      const responseData = await response.json()
+      const audioBase64 = responseData.audios?.[0]
+
+      if (audioBase64) {
+        // Sarvam often returns WAV; extract PCM16 data at 44100 for base64 streaming
+        const pcmBase64 = extractPcm16FromWavBase64(audioBase64) || audioBase64
+        this.sendAudioToClient(pcmBase64)
+      } else {
+        throw new Error("No audio data received from Sarvam API")
+      }
     } catch (error) {
-      console.error(`❌ [SANPBX-AUDIO] Send error:`, error.message);
-      this.metrics.errors++;
+      console.error(`❌ [SANPBX-TTS] Error converting to speech:`, error.message)
+      // Fallback: send a simple text response
+      this.sendTextToClient("I'm sorry, I'm having trouble with audio processing right now.")
     }
   }
 
-  handleDTMF(digit, duration) {
-    console.log(`📞 [DTMF] ${digit} pressed (${duration}ms) - ${this.callId}`);
-    
-    const dtmfResponses = {
-      '0': "You pressed zero. Connecting you to an operator.",
-      '1': "You pressed one. Please hold while I process your request.",
-      '2': "You pressed two. Let me check that information for you.",
-      '3': "You pressed three. I'll help you with that.",
-      '4': "You pressed four. One moment please.",
-      '5': "You pressed five. How can I assist you further?",
-      '6': "You pressed six. I'm here to help.",
-      '7': "You pressed seven. Please continue.",
-      '8': "You pressed eight. What would you like to know?",
-      '9': "You pressed nine. I'm listening.",
-      '*': "Thank you for using our service. Is there anything else I can help you with?",
-      '#': "Thank you for calling. Have a great day! Goodbye."
-    };
-    
-    const response = dtmfResponses[digit] || `You pressed ${digit}. How can I help you?`;
-    
-    // Send immediate response
-    this.generateAndSendResponse(response);
-    
-    // Handle special actions
-    if (digit === '#') {
-      setTimeout(() => {
-        this.hangup();
-      }, 3000); // Hang up after 3 seconds
-    }
-    
-    if (digit === '0') {
-      // Could implement transfer logic here
-      this.emit('transfer-requested', { destination: 'operator' });
+
+
+  sendAudioToClient(base64Audio) {
+    if (this.ws.readyState === WebSocket.OPEN && this.isAnswered) {
+      // Ensure the audio is in base64 format
+      const normalizedAudio = normalizeBase64String(base64Audio)
+      
+      // Log the outgoing audio format for debugging
+      if (!this.outgoingFormatLogged) {
+        console.log(`🎵 [SANPBX-AUDIO] Outgoing audio format:`)
+        console.log(`   - Original base64 length: ${base64Audio.length}`)
+        console.log(`   - Normalized base64 length: ${normalizedAudio.length}`)
+        console.log(`   - Sample data: ${normalizedAudio.substring(0, 50)}...`)
+        this.outgoingFormatLogged = true
+      }
+
+      const audioMessage = {
+        event: "media",
+        streamId: this.streamId,
+        channelId: this.channelId,
+        callId: this.callId,
+        media: {
+          payload: normalizedAudio,
+          format: {
+            encoding: "base64",
+            sampleRate: 44100,
+            channels: 1
+          }
+        },
+        timestamp: new Date().toISOString()
+      }
+
+      this.ws.send(JSON.stringify(audioMessage))
+      console.log(`🔊 [SANPBX-AUDIO] Sent audio response to client`)
     }
   }
 
-  handleTransferCall(transferTo) {
-    console.log(`🔄 [TRANSFER] Call ${this.callId} transferring to: ${transferTo}`);
-    
-    // Send transfer confirmation
-    this.generateAndSendResponse("Transferring your call now. Please hold.");
-    
-    const transferEvent = {
-      event: 'transfer-call-response',
-      status: true,
-      message: 'Transfer initiated successfully',
-      data: { transferTo },
-      status_code: 200,
-      channelId: this.channelId,
-      callId: this.callId,
-      streamId: this.streamId,
-      timestamp: new Date().toISOString()
-    };
-    
+  sendTextToClient(text) {
     if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(transferEvent));
-    }
-    
-    // Clean up session after transfer
-    setTimeout(() => {
-      this.cleanup();
-    }, 2000);
-  }
-
-  hangup() {
-    console.log(`📞 [HANGUP] Terminating call: ${this.callId}`);
-    
-    const hangupEvent = {
-      event: 'hangup-call-response',
-      status: true,
-      message: 'Call terminated successfully',
-      data: {
-        duration: Date.now() - this.sessionStartTime,
-        conversationTurns: this.metrics.conversationTurns,
-        packetsProcessed: this.metrics.packetsProcessed
-      },
-      status_code: 200,
-      channelId: this.channelId,
-      callId: this.callId,
-      streamId: this.streamId,
-      timestamp: new Date().toISOString()
-    };
-    
-    if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(hangupEvent));
-    }
-    
-    this.cleanup();
-  }
-
-  getSessionStats() {
-    const sessionDuration = Date.now() - this.sessionStartTime;
-    const avgAudioLatency = this.metrics.audioLatency.length > 0 ? 
-      this.metrics.audioLatency.reduce((a, b) => a + b, 0) / this.metrics.audioLatency.length : 0;
-    const avgAILatency = this.metrics.aiLatency.length > 0 ?
-      this.metrics.aiLatency.reduce((a, b) => a + b, 0) / this.metrics.aiLatency.length : 0;
-    
-    return {
-      callId: this.callId,
-      duration: sessionDuration,
-      packetsReceived: this.metrics.packetsReceived,
-      packetsProcessed: this.metrics.packetsProcessed,
-      conversationTurns: this.metrics.conversationTurns,
-      errors: this.metrics.errors,
-      avgAudioLatency: Math.round(avgAudioLatency),
-      avgAILatency: Math.round(avgAILatency),
-      processingRate: this.metrics.packetsProcessed / (sessionDuration / 1000),
-      errorRate: this.metrics.errors / Math.max(1, this.metrics.packetsReceived) * 100,
-      quality: this.calculateCallQuality()
-    };
-  }
-
-  calculateCallQuality() {
-    const stats = this.getSessionStats();
-    let score = 100;
-    
-    // Penalize high latency
-    if (stats.avgAudioLatency > 100) score -= 20;
-    if (stats.avgAILatency > 500) score -= 15;
-    
-    // Penalize errors
-    if (stats.errorRate > 5) score -= 30;
-    if (stats.errorRate > 10) score -= 50;
-    
-    // Penalize low processing rate
-    if (stats.processingRate < 10) score -= 25;
-    
-    return Math.max(0, Math.min(100, score));
-  }
-
-  cleanup() {
-    if (this.cleanedUp) return;
-    this.cleanedUp = true;
-    // Remove all event listeners first to prevent recursion
-    this.removeAllListeners();
-    try {
-      console.log(`🧹 [CLEANUP] Session cleanup for: ${this.callId}`);
-      
-      // Log final statistics
-      const finalStats = this.getSessionStats();
-      console.log(`📊 [SESSION-STATS] Final stats for ${this.callId}:`, finalStats);
-      
-      // Close Deepgram connection only at the end
-      if (this.deepgram && this.deepgramOpen) {
-        try {
-          this.deepgram.finish();
-          this.deepgramOpen = false;
-          console.log(`🎤 [DEEPGRAM] WebSocket FINISH called for session: ${this.callId}`);
-        } catch (error) {
-          console.warn(`⚠️ [CLEANUP] Deepgram cleanup error:`, error.message);
-        }
+      const textMessage = {
+        event: "text",
+        streamId: this.streamId,
+        channelId: this.channelId,
+        callId: this.callId,
+        text: text,
+        timestamp: new Date().toISOString(),
       }
-      
-      // Clean up audio processor
-      if (this.audioProcessor) {
-        this.audioProcessor.cleanup();
-      }
-      
-      // Store session stats for analytics
-      sessionStats.set(this.callId, finalStats);
-      
-      // Remove from activeSessions map, but do NOT call cleanup again
-      activeSessions.delete(this.callId);
-      activeSessions.delete(this.streamId);
-      
-      console.log(`✅ [CLEANUP] Session ${this.callId} cleaned up successfully`);
-      
-    } catch (error) {
-      console.error(`❌ [CLEANUP] Error during cleanup:`, error.message);
+
+      this.ws.send(JSON.stringify(textMessage))
+      console.log(`📝 [SANPBX-TEXT] Sent text response: ${text}`)
     }
+  }
+
+  getSystemPrompt(language) {
+    const prompts = {
+      en: "You are a helpful AI assistant for voice calls. Provide concise, natural responses suitable for phone conversations. Keep responses under 50 words.",
+      hi: "आप एक सहायक AI असिस्टेंट हैं। संक्षिप्त और प्राकृतिक उत्तर दें जो फोन कॉल के लिए उपयुक्त हों।",
+      es: "Eres un asistente de IA útil para llamadas de voz. Proporciona respuestas concisas y naturales adecuadas para conversaciones telefónicas.",
+      fr: "Vous êtes un assistant IA utile pour les appels vocaux. Fournissez des réponses concisas et naturelles adaptées aux conversations téléphoniques.",
+      de: "Sie sind ein hilfreicher KI-Assistent für Sprachanrufe. Geben Sie prägnante, natürliche Antworten, die für Telefongespräche geeignet sind.",
+    }
+
+    return prompts[language] || prompts["en"]
+  }
+
+  updateAudioPacketStats(audioData) {
+    const now = new Date()
+    const packetSize = audioData.length
+    
+    this.audioPacketStats.totalPackets++
+    this.audioPacketStats.totalBytes += packetSize
+    this.audioPacketStats.packetSizes.push(packetSize)
+    
+    // Store sample packets for analysis (keep last 5)
+    if (this.audioPacketStats.samplePackets.length >= 5) {
+      this.audioPacketStats.samplePackets.shift()
+    }
+    this.audioPacketStats.samplePackets.push({
+      size: packetSize,
+      timestamp: now,
+      sample: audioData.substring(0, 50) + "..." // First 50 chars
+    })
+    
+    if (!this.audioPacketStats.firstPacketTime) {
+      this.audioPacketStats.firstPacketTime = now
+    }
+    this.audioPacketStats.lastPacketTime = now
+    
+    // Keep only last 100 packet sizes for average calculation
+    if (this.audioPacketStats.packetSizes.length > 100) {
+      this.audioPacketStats.packetSizes.shift()
+    }
+    
+    this.audioPacketStats.averagePacketSize = Math.round(
+      this.audioPacketStats.packetSizes.reduce((sum, size) => sum + size, 0) / 
+      this.audioPacketStats.packetSizes.length
+    )
+    
+    // Log statistics every 50 packets
+    if (this.audioPacketStats.totalPackets % 50 === 0) {
+      this.logAudioPacketStats()
+    }
+  }
+
+  logAudioPacketStats() {
+    const duration = this.audioPacketStats.lastPacketTime - this.audioPacketStats.firstPacketTime
+    const durationSeconds = duration / 1000
+    
+    console.log(`📊 [SANPBX-STATS] Audio packet statistics:`)
+    console.log(`   - Total packets: ${this.audioPacketStats.totalPackets}`)
+    console.log(`   - Total bytes: ${this.audioPacketStats.totalBytes}`)
+    console.log(`   - Average packet size: ${this.audioPacketStats.averagePacketSize} bytes`)
+    console.log(`   - Duration: ${durationSeconds.toFixed(2)} seconds`)
+    console.log(`   - Packet rate: ${(this.audioPacketStats.totalPackets / durationSeconds).toFixed(2)} packets/sec`)
+    console.log(`   - Data rate: ${(this.audioPacketStats.totalBytes / durationSeconds).toFixed(2)} bytes/sec`)
+    
+    // Show packet size distribution
+    const sizeRanges = {
+      '0-100': 0,
+      '101-500': 0,
+      '501-1000': 0,
+      '1001-2000': 0,
+      '2000+': 0
+    }
+    
+    this.audioPacketStats.packetSizes.forEach(size => {
+      if (size <= 100) sizeRanges['0-100']++
+      else if (size <= 500) sizeRanges['101-500']++
+      else if (size <= 1000) sizeRanges['501-1000']++
+      else if (size <= 2000) sizeRanges['1001-2000']++
+      else sizeRanges['2000+']++
+    })
+    
+    console.log(`   - Packet size distribution:`, sizeRanges)
+    
+    // Show sample packets
+    console.log(`📦 [SANPBX-STATS] Recent audio packet samples:`)
+    this.audioPacketStats.samplePackets.forEach((packet, index) => {
+      console.log(`   Packet ${index + 1}: ${packet.size} bytes - "${packet.sample}"`)
+    })
+  }
+
+  terminate(reason = "normal_termination") {
+    console.log(`🛑 [SANPBX-SESSION] Terminating session ${this.callId}: ${reason}`)
+    
+    // Log final audio statistics
+    if (this.audioPacketStats.totalPackets > 0) {
+      console.log(`📊 [SANPBX-STATS] Final audio statistics for session ${this.callId}:`)
+      this.logAudioPacketStats()
+    }
+    
+    this.isActive = false
+    this.isAnswered = false
+
+    if (this.deepgramWs) {
+      this.deepgramWs.close()
+      this.deepgramWs = null
+    }
+
+    this.emit("terminated", { callId: this.callId, reason })
   }
 }
 
-/**
- * Enhanced WebSocket Server Setup with Performance Optimization
- */
-function setupEnhancedSanPbxWebSocketServer(wss) {
-  console.log('🚀 [SANPBX-WS] Setting up enhanced SanIPPBX WebSocket server with AI integration...');
-  
-  // Performance monitoring setup
-  performanceMonitor.on('alert', (alert) => {
-    console.warn(`🚨 [PERFORMANCE-ALERT] ${alert.type}: ${alert.message} (${alert.latency.toFixed(2)}ms)`);
-  });
-  
-  latencyOptimizer.on('optimization-applied', (optimization) => {
-    console.log(`🔧 [OPTIMIZER] Applied optimizations for ${optimization.category}:`, optimization.optimizations);
-  });
-  
-  wss.on('connection', (ws, req) => {
-    const clientIP = req.socket.remoteAddress;
-    console.log(`🔗 [SANPBX-WS] New enhanced connection from ${clientIP}`);
+// Active sessions storage
+const activeSessions = new Map()
+
+function setupSanPbxWebSocketServer(wss) {
+  console.log("🔧 [SANPBX-WS] Setting up SanIPPBX WebSocket server...")
+
+  wss.on("connection", (ws, req) => {
+    console.log("🔗 [SANPBX-WS] New SanIPPBX WebSocket connection established")
+
+    // Send immediate connection acknowledgment with first message
+    ws.send(
+      JSON.stringify({
+        event: "connected",
+        protocol: "SanIPPBX-WebSocket-v1.0",
+        message: "SanIPPBX WebSocket server is ready to handle calls",
+        status: "ready",
+        timestamp: new Date().toISOString(),
+      }),
+    )
     
-    let currentSession = null;
-    let connectionStartTime = Date.now();
-    
-    // Send enhanced welcome message
-    const welcomeMessage = {
-      event: 'connection-ready',
-      message: 'Enhanced SanIPPBX WebSocket server ready with AI integration',
-      features: [
-        'Real-time speech recognition',
-        'AI-powered conversations', 
-        'Text-to-speech synthesis',
-        'Performance optimization',
-        'Latency monitoring'
-      ],
-      performance: {
-        targetLatency: '< 200ms',
-        audioProcessing: 'optimized',
-        aiIntegration: 'enabled'
-      },
-      timestamp: new Date().toISOString()
-    };
-    
-    ws.send(JSON.stringify(welcomeMessage));
-    console.log('📝 [SANPBX-WS] Sent enhanced welcome message');
-    
-    ws.on('message', async (data) => {
-      const messageStartTime = performance.now();
-      
+    console.log("📝 [SANPBX-WS] Sent first connection message to client")
+
+    ws.on("message", async (message) => {
       try {
-        const message = JSON.parse(data.toString());
-        console.log(`📨 [SANPBX-WS] Event: ${message.event} (${message.callId || 'unknown'})`);
-        
-        // Record network latency
-        performanceMonitor.recordNetworkMetrics('websocket_latency', performance.now() - messageStartTime);
-        
-        switch (message.event) {
-          case 'connected':
-            console.log(`🔗 [CONNECTED] Call: ${message.callId} | Stream: ${message.streamId}`);
-            console.log(`📞 [CONNECTED] Caller: ${message.callerId} → DID: ${message.did} (${message.callDirection})`);
-            
-            currentSession = new OptimizedSanIPPBXSession(ws, {
-              callId: message.callId,
-              streamId: message.streamId,
-              channelId: message.channelId,
-              callerId: message.callerId,
-              callDirection: message.callDirection,
-              did: message.did
-            });
-            
-            // Store session with both keys for fast lookup
-            activeSessions.set(message.callId, currentSession);
-            activeSessions.set(message.streamId, currentSession);
-            
-            // Set up session event handlers
-            currentSession.on('error', (error) => {
-              console.error(`❌ [SESSION-ERROR] ${message.callId}:`, error.message);
-            });
-            
-            currentSession.on('transfer-requested', (data) => {
-              console.log(`🔄 [TRANSFER-REQUEST] ${message.callId} → ${data.destination}`);
-            });
-            
-            break;
-            
-          case 'start':
-            if (currentSession) {
-              console.log(`🚀 [START] Session starting: ${message.callId}`);
-              console.log(`🎵 [START] Audio format:`, message.mediaFormat);
-              
-              // Validate audio format compatibility
-              const format = message.mediaFormat;
-              if (format && format.sampleRate !== 8000) {
-                console.warn(`⚠️ [AUDIO-FORMAT] Non-optimal sample rate: ${format.sampleRate}Hz (recommended: 8000Hz)`);
-              }
-            }
-            break;
-            
-          case 'media':
-            if (currentSession) {
-              const base64Audio = message.media.payload;
-              currentSession.processIncomingAudio(base64Audio);
-            }
-            break;
-            
-          case 'dtmf':
-            if (currentSession) {
-              const digit = message.dtmf.digit;
-              const duration = message.dtmf.duration;
-              currentSession.handleDTMF(digit, duration);
-            }
-            break;
-            
-          case 'transfer-call':
-            if (currentSession) {
-              const transferTo = message.transferTo;
-              currentSession.handleTransferCall(transferTo);
-            }
-            break;
-            
-          case 'hangup':
-            if (currentSession) {
-              currentSession.hangup();
-            }
-            break;
-            
+        const data = JSON.parse(message.toString())
+        console.log(`📨 [SANPBX-WS] Received event: ${data.event}`)
+
+        switch (data.event) {
+          case "connected":
+            await handleConnected(ws, data)
+            break
+
+          case "start":
+            await handleStart(ws, data)
+            break
+
+          case "answer":
+            await handleAnswer(ws, data)
+            break
+
+          case "media":
+            await handleMedia(ws, data)
+            break
+
+          case "dtmf":
+            await handleDtmf(ws, data)
+            break
+
+          case "stop":
+            await handleStop(ws, data)
+            break
+
+          case "transfer-call":
+            await handleTransferCall(ws, data)
+            break
+
+          case "hangup-call":
+            await handleHangupCall(ws, data)
+            break
+
           default:
-            console.log(`👉 [SANPBX-WS] Unhandled event: ${message.event} (${message.callId || 'unknown'})`);
-            break;
+            console.log(`⚠️ [SANPBX-WS] Unknown event type: ${data.event}`)
         }
-        
       } catch (error) {
-        console.error(`❌ [SANPBX-WS] Error processing message:`, error.message);
-        if (currentSession) {
-          currentSession.metrics.errors++;
-          currentSession.emit('error', error);
+        console.error("❌ [SANPBX-WS] Error processing message:", error.message)
+        ws.send(
+          JSON.stringify({
+            event: "error",
+            message: "Invalid message format",
+            timestamp: new Date().toISOString(),
+          }),
+        )
+      }
+    })
+
+    ws.on("close", (code, reason) => {
+      console.log(`🔗 [SANPBX-WS] Connection closed: ${code} - ${reason}`)
+
+      // Clean up any active sessions for this connection
+      const keysToDelete = []
+      for (const [key, session] of activeSessions.entries()) {
+        if (session.ws === ws) {
+          session.terminate("connection_closed")
+          keysToDelete.push(key)
         }
       }
-    });
-    
-    ws.on('close', () => {
-      console.log(`🔗 [SANPBX-WS] Enhanced connection closed for: ${req.socket.remoteAddress}`);
-      if (currentSession) {
-        currentSession.cleanup();
-      }
-    });
-    
-    ws.on('error', (error) => {
-      console.error(`❌ [SANPBX-WS] Enhanced connection error:`, error.message);
-      if (currentSession) {
-        currentSession.emit('error', error);
-      }
-    });
-  });
+      
+      // Delete all keys for this connection
+      keysToDelete.forEach(key => activeSessions.delete(key))
+      console.log(`🔍 [SANPBX-WS] Cleaned up ${keysToDelete.length} session keys`)
+    })
+
+    ws.on("error", (error) => {
+      console.error("❌ [SANPBX-WS] WebSocket error:", error.message)
+    })
+  })
+
+  console.log("✅ [SANPBX-WS] SanIPPBX WebSocket server setup complete")
 }
 
+async function handleConnected(ws, data) {
+  console.log(`🔗 [SANPBX-CONNECTED] Call connected: ${data.callId} | Stream: ${data.streamId}`)
+  console.log(`📞 [SANPBX-CONNECTED] Caller: ${data.callerId} | Direction: ${data.callDirection} | DID: ${data.did}`)
+  
+  // Store initial call data for session creation
+  ws.pendingCallData = {
+    callId: data.callId,
+    streamId: data.streamId,
+    channelId: data.channelId,
+    callerId: data.callerId,
+    callDirection: data.callDirection,
+    did: data.did,
+    extraParams: data.extraParams
+  }
+}
+
+async function handleStart(ws, data) {
+  const callId = data.callId
+  const streamId = data.streamId
+  const mediaFormat = data.mediaFormat
+
+  console.log(`🚀 [SANPBX-START] Starting call session: ${callId} | Stream: ${streamId}`)
+  console.log(`🎵 [SANPBX-START] Media format:`, mediaFormat)
+
+  // Create new session
+  const session = new SanPbxCallSession(ws, {
+    callId,
+    streamId,
+    channelId: data.channelId,
+    callerId: data.callerId,
+    callDirection: data.callDirection,
+    did: data.did
+  })
+  
+  session.mediaFormat = mediaFormat
+  session.isActive = true
+
+  // Store session with both callId and streamId as keys (like SIP server)
+  activeSessions.set(callId, session)
+  if (streamId && streamId !== callId) {
+    activeSessions.set(streamId, session)
+  }
+  
+  console.log(`🔍 [SANPBX-START] Session stored with keys: callId=${callId}, streamId=${streamId}`)
+  console.log(`🔍 [SANPBX-START] Active sessions count: ${activeSessions.size}`)
+
+  // Connect to Deepgram
+  await session.connectToDeepgram()
+
+  console.log(`✅ [SANPBX-START] Session started. CallId: ${callId}`)
+}
+
+async function handleAnswer(ws, data) {
+  const callId = data.callId
+  const session = activeSessions.get(callId)
+
+  if (!session) {
+    console.log(`⚠️ [SANPBX-ANSWER] No active session found for callId: ${callId}`)
+    return
+  }
+
+  console.log(`📞 [SANPBX-ANSWER] Call answered: ${callId}`)
+  session.isAnswered = true
+
+  // Send initial greeting with enhanced message
+  try {
+    const greetingMessage = "Hello! Welcome to our AI assistant.?"
+    console.log(`🎤 [SANPBX-ANSWER] Sending first message: ${greetingMessage}`)
+    await session.convertToSpeech(greetingMessage)
+  } catch (error) {
+    console.error("❌ [SANPBX-ANSWER] Error sending greeting:", error.message)
+    // Fallback: send text message if TTS fails
+    session.sendTextToClient("Hello! Welcome to our AI assistant. How can I help you today?")
+  }
+}
+
+async function handleMedia(ws, data) {
+  console.log(`🎵 [SANPBX-MEDIA] === MEDIA EVENT RECEIVED ===`)
+  console.log(data)
+  
+  const { streamId, media } = data
+  const callId = data.callId
+
+  // Debug: Log the media event data structure
+  console.log(`🔍 [SANPBX-MEDIA] Media event data:`, {
+    streamId,
+    callId,
+    mediaKeys: media ? Object.keys(media) : 'no media',
+    hasPayload: media && media.payload ? 'yes' : 'no',
+    payload: media && media.payload ? media.payload : 'no payload',
+    payloadLength: media && media.payload ? media.payload.length : 0
+  })
+
+  // Find session by streamId (like SIP server) or callId
+  let session = null
+  if (streamId) {
+    session = Array.from(activeSessions.values()).find((s) => s.streamId === streamId)
+    console.log(`🔍 [SANPBX-MEDIA] Looking for session with streamId: ${streamId}, found:`, session ? 'yes' : 'no')
+  }
+  if (!session && callId) {
+    session = Array.from(activeSessions.values()).find((s) => s.callId === callId)
+    console.log(`🔍 [SANPBX-MEDIA] Looking for session with callId: ${callId}, found:`, session ? 'yes' : 'no')
+  }
+
+  if (!session) {
+    console.log(`⚠️ [SANPBX-MEDIA] No active session found for streamId: ${streamId} or callId: ${callId}`)
+    console.log(`🔍 [SANPBX-MEDIA] Available sessions:`, Array.from(activeSessions.keys()))
+    return
+  }
+  
+
+  if (media && media.payload) {
+    consoloe.log(media)
+    // Log the incoming media format for debugging
+    if (!session.mediaFormatLogged) {
+     
+      if (media.metadata) {
+        console.log(`   - Metadata: ${JSON.stringify(media.metadata)}`)
+      }
+      if (media.timestamp) {
+        console.log(`   - Timestamp: ${media.timestamp}`)
+      }
+      if (media.sequence) {
+        console.log(`   - Sequence: ${media.sequence}`)
+      }
+      
+      // Detailed base64 analysis
+      console.log(`🎵 [SANPBX-MEDIA] Base64 Audio Packet Analysis:`)
+      console.log(`   - Is valid base64: ${isProbablyBase64(media.payload)}`)
+      console.log(`   - First 20 chars: "${media.payload.substring(0, 20)}"`)
+      console.log(`   - Last 10 chars: "${media.payload.substring(media.payload.length - 10)}"`)
+      console.log(`   - Contains padding (=): ${media.payload.includes('=')}`)
+      console.log(`   - Padding count: ${(media.payload.match(/=/g) || []).length}`)
+      console.log(`   - Length divisible by 4: ${media.payload.length % 4 === 0}`)
+      
+      // Calculate estimated audio duration
+      try {
+        const buffer = Buffer.from(media.payload, "base64")
+        const sampleCount = Math.floor(buffer.length / 2) // PCM16 = 2 bytes per sample
+        const sampleRate = media.format?.sampleRate || 44100
+        const durationMs = (sampleCount / sampleRate) * 1000
+        console.log(`   - Decoded buffer size: ${buffer.length} bytes`)
+        console.log(`   - Estimated samples: ${sampleCount}`)
+        console.log(`   - Estimated duration: ${durationMs.toFixed(2)}ms`)
+        console.log(`   - Estimated frequency: ${(sampleRate / sampleCount * 1000).toFixed(2)}Hz`)
+      } catch (err) {
+        console.log(`   - Error decoding base64: ${err.message}`)
+      }
+      
+      session.mediaFormatLogged = true
+    }
+
+    // Ensure payload is base64 for downstream processing
+    const normalized = normalizeBase64String(media.payload)
+    if (normalized !== media.payload) {
+      console.log("🔁 [SANPBX-MEDIA] Normalized incoming payload to base64")
+    }
+    
+    // Log detailed packet info for first few packets
+    if (!session.detailedPacketLogged) {
+      console.log(`📦 [SANPBX-MEDIA] Detailed Audio Packet #${session.audioPacketStats.totalPackets + 1}:`)
+      console.log(`   - Raw payload length: ${media.payload.length}`)
+      console.log(`   - Normalized length: ${normalized.length}`)
+      console.log(`   - Base64 validation: ${isProbablyBase64(normalized)}`)
+      console.log(`   - Sample data (first 100 chars): "${media.payload.substring(0, 100)}"`)
+      console.log(`   - Sample data (last 50 chars): "${media.payload.substring(media.payload.length - 50)}"`)
+      
+      // Try to decode and analyze the audio data
+      try {
+        const buffer = Buffer.from(normalized, "base64")
+        console.log(`   - Decoded buffer size: ${buffer.length} bytes`)
+        console.log(`   - Buffer type: ${buffer.constructor.name}`)
+        
+        // Show first few bytes as hex
+        const hexBytes = buffer.slice(0, 16).toString('hex').match(/.{2}/g)?.join(' ') || ''
+        console.log(`   - First 16 bytes (hex): ${hexBytes}`)
+        
+        // Show first few bytes as decimal
+        const decBytes = Array.from(buffer.slice(0, 8)).join(', ')
+        console.log(`   - First 8 bytes (decimal): ${decBytes}`)
+        
+        // Calculate audio metrics
+        const sampleCount = Math.floor(buffer.length / 2)
+        const sampleRate = media.format?.sampleRate || 44100
+        const durationMs = (sampleCount / sampleRate) * 1000
+        console.log(`   - Estimated audio samples: ${sampleCount}`)
+        console.log(`   - Estimated duration: ${durationMs.toFixed(2)}ms`)
+        console.log(`   - Audio frequency: ${(sampleRate / sampleCount * 1000).toFixed(2)}Hz`)
+        
+      } catch (err) {
+        console.log(`   - Error analyzing audio data: ${err.message}`)
+      }
+      
+      session.detailedPacketLogged = true
+    }
+    
+    await session.processAudioChunk(normalized)
+  }
+}
+
+async function handleDtmf(ws, data) {
+  const { callId, digit, dtmfDurationMs } = data
+
+  console.log(`📞 [SANPBX-DTMF] DTMF received. callId: ${callId}, digit: ${digit}, duration: ${dtmfDurationMs}ms`)
+
+  const session = activeSessions.get(callId)
+  if (session) {
+    // Handle DTMF input (could be used for menu navigation, etc.)
+    session.sendTextToClient(`DTMF digit received: ${digit}`)
+  }
+}
+
+async function handleStop(ws, data) {
+  const callId = data.callId
+  const streamId = data.streamId
+  const disconnectedBy = data.disconnectedBy
+
+  console.log(`🛑 [SANPBX-STOP] Stopping call session. callId: ${callId}, streamId: ${streamId}, disconnected by: ${disconnectedBy}`)
+
+  // Find and terminate session
+  let session = activeSessions.get(callId)
+  if (!session && streamId) {
+    session = activeSessions.get(streamId)
+  }
+
+  if (session) {
+    session.terminate("call_ended")
+    
+    // Clean up both keys
+    activeSessions.delete(callId)
+    if (streamId && streamId !== callId) {
+      activeSessions.delete(streamId)
+    }
+
+    console.log(`✅ [SANPBX-STOP] Session terminated. CallId: ${callId}, streamId: ${streamId}`)
+    console.log(`🔍 [SANPBX-STOP] Remaining active sessions: ${activeSessions.size}`)
+  } else {
+    console.log(`⚠️ [SANPBX-STOP] No session found for callId: ${callId} or streamId: ${streamId}`)
+  }
+}
+
+async function handleTransferCall(ws, data) {
+  const { callId, transferTo, streamId, channelId } = data
+
+  console.log(`🔄 [SANPBX-TRANSFER] Transfer request. callId: ${callId}, transferTo: ${transferTo}`)
+
+  // Send transfer response (success)
+  ws.send(
+    JSON.stringify({
+      event: "transfer-call-response",
+      status: true,
+      message: "Redirect successful",
+      data: {},
+      status_code: 200,
+      channelId: channelId,
+      callId: callId,
+      streamId: streamId,
+      timestamp: new Date().toISOString(),
+    }),
+  )
+
+  // Terminate the session
+  let session = activeSessions.get(callId)
+  if (!session && streamId) {
+    session = activeSessions.get(streamId)
+  }
+  if (session) {
+    session.terminate("call_transferred")
+    activeSessions.delete(callId)
+    if (streamId && streamId !== callId) {
+      activeSessions.delete(streamId)
+    }
+  }
+}
+
+async function handleHangupCall(ws, data) {
+  const { callId, streamId, channel } = data
+
+  console.log(`📞 [SANPBX-HANGUP] Hangup request. callId: ${callId}`)
+
+  // Send hangup response (success)
+  ws.send(
+    JSON.stringify({
+      event: "hangup-call-response",
+      status: true,
+      message: "Channel Hungup",
+      data: {},
+      status_code: 200,
+      channelId: channel,
+      callId: callId,
+      streamId: streamId,
+      timestamp: new Date().toISOString(),
+    }),
+  )
+
+  // Terminate the session
+  let session = activeSessions.get(callId)
+  if (!session && streamId) {
+    session = activeSessions.get(streamId)
+  }
+  if (session) {
+    session.terminate("call_hungup")
+    activeSessions.delete(callId)
+    if (streamId && streamId !== callId) {
+      activeSessions.delete(streamId)
+    }
+  }
+}
+
+// Export the setup function and session management
 module.exports = {
-  setupEnhancedSanPbxWebSocketServer
-};
+  setupSanPbxWebSocketServer,
+  activeSessions,
+  SanPbxCallSession,
+}
