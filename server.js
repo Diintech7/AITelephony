@@ -12,8 +12,7 @@ const { connectDatabase, checkDatabaseHealth, getDatabaseStats, getConnectionSta
 // Import the unified voice server from aitota.js
 const { setupUnifiedVoiceServer, terminateCallByStreamSid } = require("./websocket/aitota")
 const { setupSipWebSocketServer } = require("./websocket/sip-server")
-const { setupSanPbxWebSocketServer } = require("./websocket/sanpbx-server")
-
+const { setupEnhancedSanPbxWebSocketServer } = require("./websocket/sanpbx-server")
 // Environment configuration
 const PORT = process.env.PORT || 3000
 const NODE_ENV = process.env.NODE_ENV || "development"
@@ -192,7 +191,7 @@ setupSipWebSocketServer(sipWss)
 console.log("✅ [SERVER] SIP WebSocket server setup enabled")
 
 // Setup SanIPPBX WebSocket server
-setupSanPbxWebSocketServer(sanpbxWss)
+setupEnhancedSanPbxWebSocketServer(sanpbxWss)
 console.log("✅ [SERVER] SanIPPBX WebSocket server setup enabled")
 
 // ==================== API ENDPOINTS ====================
