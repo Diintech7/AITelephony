@@ -800,126 +800,26 @@ async function handleAnswer(ws, data) {
 }
 
 async function handleMedia(ws, data) {
-  console.log(`🎵 [SANPBX-MEDIA] === MEDIA EVENT RECEIVED ===`)
-  console.log(data)
-  
-  const { streamId, media } = data
-  const callId = data.callId
+  // Accept SIP team's format: payload at root
+  const { streamId, callId, payload } = data;
 
-  // Debug: Log the media event data structure
-  console.log(`🔍 [SANPBX-MEDIA] Media event data:`, {
-    streamId,
-    callId,
-    mediaKeys: media ? Object.keys(media) : 'no media',
-    hasPayload: media && media.payload ? 'yes' : 'no',
-    payload: media && media.payload ? media.payload : 'no payload',
-    payloadLength: media && media.payload ? media.payload.length : 0
-  })
-
-  // Find session by streamId (like SIP server) or callId
-  let session = null
+  // Find session by streamId or callId
+  let session = null;
   if (streamId) {
-    session = Array.from(activeSessions.values()).find((s) => s.streamId === streamId)
-    console.log(`🔍 [SANPBX-MEDIA] Looking for session with streamId: ${streamId}, found:`, session ? 'yes' : 'no')
+    session = Array.from(activeSessions.values()).find((s) => s.streamId === streamId);
   }
   if (!session && callId) {
-    session = Array.from(activeSessions.values()).find((s) => s.callId === callId)
-    console.log(`🔍 [SANPBX-MEDIA] Looking for session with callId: ${callId}, found:`, session ? 'yes' : 'no')
+    session = Array.from(activeSessions.values()).find((s) => s.callId === callId);
   }
-
   if (!session) {
-    console.log(`⚠️ [SANPBX-MEDIA] No active session found for streamId: ${streamId} or callId: ${callId}`)
-    console.log(`🔍 [SANPBX-MEDIA] Available sessions:`, Array.from(activeSessions.keys()))
-    return
+    return;
   }
-  
 
-  if (media && media.payload) {
-    consoloe.log(media)
-    // Log the incoming media format for debugging
-    if (!session.mediaFormatLogged) {
-     
-      if (media.metadata) {
-        console.log(`   - Metadata: ${JSON.stringify(media.metadata)}`)
-      }
-      if (media.timestamp) {
-        console.log(`   - Timestamp: ${media.timestamp}`)
-      }
-      if (media.sequence) {
-        console.log(`   - Sequence: ${media.sequence}`)
-      }
-      
-      // Detailed base64 analysis
-      console.log(`🎵 [SANPBX-MEDIA] Base64 Audio Packet Analysis:`)
-      console.log(`   - Is valid base64: ${isProbablyBase64(media.payload)}`)
-      console.log(`   - First 20 chars: "${media.payload.substring(0, 20)}"`)
-      console.log(`   - Last 10 chars: "${media.payload.substring(media.payload.length - 10)}"`)
-      console.log(`   - Contains padding (=): ${media.payload.includes('=')}`)
-      console.log(`   - Padding count: ${(media.payload.match(/=/g) || []).length}`)
-      console.log(`   - Length divisible by 4: ${media.payload.length % 4 === 0}`)
-      
-      // Calculate estimated audio duration
-      try {
-        const buffer = Buffer.from(media.payload, "base64")
-        const sampleCount = Math.floor(buffer.length / 2) // PCM16 = 2 bytes per sample
-        const sampleRate = media.format?.sampleRate || 44100
-        const durationMs = (sampleCount / sampleRate) * 1000
-        console.log(`   - Decoded buffer size: ${buffer.length} bytes`)
-        console.log(`   - Estimated samples: ${sampleCount}`)
-        console.log(`   - Estimated duration: ${durationMs.toFixed(2)}ms`)
-        console.log(`   - Estimated frequency: ${(sampleRate / sampleCount * 1000).toFixed(2)}Hz`)
-      } catch (err) {
-        console.log(`   - Error decoding base64: ${err.message}`)
-      }
-      
-      session.mediaFormatLogged = true
-    }
-
-    // Ensure payload is base64 for downstream processing
-    const normalized = normalizeBase64String(media.payload)
-    if (normalized !== media.payload) {
-      console.log("🔁 [SANPBX-MEDIA] Normalized incoming payload to base64")
-    }
-    
-    // Log detailed packet info for first few packets
-    if (!session.detailedPacketLogged) {
-      console.log(`📦 [SANPBX-MEDIA] Detailed Audio Packet #${session.audioPacketStats.totalPackets + 1}:`)
-      console.log(`   - Raw payload length: ${media.payload.length}`)
-      console.log(`   - Normalized length: ${normalized.length}`)
-      console.log(`   - Base64 validation: ${isProbablyBase64(normalized)}`)
-      console.log(`   - Sample data (first 100 chars): "${media.payload.substring(0, 100)}"`)
-      console.log(`   - Sample data (last 50 chars): "${media.payload.substring(media.payload.length - 50)}"`)
-      
-      // Try to decode and analyze the audio data
-      try {
-        const buffer = Buffer.from(normalized, "base64")
-        console.log(`   - Decoded buffer size: ${buffer.length} bytes`)
-        console.log(`   - Buffer type: ${buffer.constructor.name}`)
-        
-        // Show first few bytes as hex
-        const hexBytes = buffer.slice(0, 16).toString('hex').match(/.{2}/g)?.join(' ') || ''
-        console.log(`   - First 16 bytes (hex): ${hexBytes}`)
-        
-        // Show first few bytes as decimal
-        const decBytes = Array.from(buffer.slice(0, 8)).join(', ')
-        console.log(`   - First 8 bytes (decimal): ${decBytes}`)
-        
-        // Calculate audio metrics
-        const sampleCount = Math.floor(buffer.length / 2)
-        const sampleRate = media.format?.sampleRate || 44100
-        const durationMs = (sampleCount / sampleRate) * 1000
-        console.log(`   - Estimated audio samples: ${sampleCount}`)
-        console.log(`   - Estimated duration: ${durationMs.toFixed(2)}ms`)
-        console.log(`   - Audio frequency: ${(sampleRate / sampleCount * 1000).toFixed(2)}Hz`)
-        
-      } catch (err) {
-        console.log(`   - Error analyzing audio data: ${err.message}`)
-      }
-      
-      session.detailedPacketLogged = true
-    }
-    
-    await session.processAudioChunk(normalized)
+  // Only process if payload exists
+  if (payload) {
+    // Normalize and process audio chunk
+    const normalized = normalizeBase64String(payload);
+    await session.processAudioChunk(normalized);
   }
 }
 
