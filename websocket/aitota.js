@@ -107,6 +107,101 @@ const setupUnifiedVoiceServer = (ws) => {
   };
 
   /**
+   * Convert linear16 to µ-law encoding (alternative format)
+   */
+  const convertToMuLaw = (linearBuffer) => {
+    const muLawBuffer = Buffer.alloc(linearBuffer.length / 2);
+    
+    for (let i = 0; i < linearBuffer.length; i += 2) {
+      const sample = linearBuffer.readInt16LE(i);
+      // Convert 16-bit linear to µ-law
+      const muLawValue = linearToMuLaw(sample);
+      muLawBuffer[i / 2] = muLawValue;
+    }
+    
+    return muLawBuffer;
+  };
+
+  /**
+   * Linear to µ-law conversion
+   */
+  const linearToMuLaw = (sample) => {
+    const BIAS = 0x84;
+    const CLIP = 32635;
+    const MULAW_MAX = 0x7F;
+    
+    if (sample < 0) {
+      sample = -sample;
+      let mulaw = 0x7F;
+      
+      if (sample < CLIP) {
+        sample += BIAS;
+        let exp = 7;
+        
+        for (let expMask = 0x4000; sample < expMask && exp > 0; exp--, expMask >>= 1) {}
+        
+        mulaw = (exp << 4) | ((sample >> (exp + 3)) & 0x0F);
+      }
+      
+      return mulaw;
+    } else {
+      let mulaw = 0xFF;
+      
+      if (sample < CLIP) {
+        sample += BIAS;
+        let exp = 7;
+        
+        for (let expMask = 0x4000; sample < expMask && exp > 0; exp--, expMask >>= 1) {}
+        
+        mulaw = ~((exp << 4) | ((sample >> (exp + 3)) & 0x0F));
+      }
+      
+      return mulaw & 0xFF;
+    }
+  };
+
+  /**
+   * Generate a simple test tone to verify audio pipeline
+   */
+  const generateTestTone = (frequency = 800, duration = 2.0, volume = 0.3) => {
+    const sampleRate = 8000;
+    const samples = Math.floor(sampleRate * duration);
+    const buffer = Buffer.alloc(samples * 2); // 16-bit samples
+    
+    for (let i = 0; i < samples; i++) {
+      const sample = Math.sin(2 * Math.PI * frequency * i / sampleRate) * volume;
+      const intSample = Math.floor(sample * 32767);
+      buffer.writeInt16LE(intSample, i * 2);
+    }
+    
+    return buffer.toString('base64');
+  };
+
+  /**
+   * Convert audio format - try different processing
+   */
+  const processAudioData = (audioBase64) => {
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+    
+    // Check if audio needs format conversion
+    console.log(`[AUDIO] Processing ${audioBuffer.length} bytes of audio data`);
+    
+    // Ensure proper 16-bit PCM format
+    const processed = Buffer.alloc(audioBuffer.length);
+    audioBuffer.copy(processed);
+    
+    // Apply volume normalization if needed
+    for (let i = 0; i < processed.length; i += 2) {
+      let sample = processed.readInt16LE(i);
+      // Boost volume slightly
+      sample = Math.min(32767, Math.max(-32768, Math.floor(sample * 1.2)));
+      processed.writeInt16LE(sample, i);
+    }
+    
+    return processed.toString('base64');
+  };
+
+  /**
    * Generate a simple tone as fallback audio
    */
   const generateSimpleTone = (frequency = 440, duration = 0.5) => {
@@ -132,86 +227,113 @@ const setupUnifiedVoiceServer = (ws) => {
   };
 
   /**
-   * Optimized text-to-speech with C-Zentrix compatible format
+   * Optimized text-to-speech with audio format processing
    */
-  const synthesizeAndStreamAudio = async (text, language = 'en-IN') => {
+  const synthesizeAndStreamAudio = async (text, language = 'en-IN', testTone = false) => {
     try {
-      console.log(`[TTS] Synthesizing: "${text}"`);
-      const startTime = Date.now();
+      let audioBase64;
       
-      // Use fetch with timeout and optimized parameters for C-Zentrix
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000); // Increased timeout
+      if (testTone) {
+        console.log(`[TTS] Generating test tone instead of TTS`);
+        audioBase64 = generateTestTone(800, 2.0, 0.3);
+      } else {
+        console.log(`[TTS] Synthesizing: "${text}"`);
+        const startTime = Date.now();
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-      const response = await fetch('https://api.sarvam.ai/text-to-speech', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'API-Subscription-Key': SARVAM_API_KEY,
-          'Connection': 'keep-alive'
-        },
-        body: JSON.stringify({
-          inputs: [text],
-          target_language_code: language,
-          speaker: 'meera',
-          pitch: 0,
-          pace: 1.1, // Slightly faster but not too fast
-          loudness: 1.0,
-          speech_sample_rate: 8000, // Match C-Zentrix expected format
-          enable_preprocessing: true, // Re-enable for better audio quality
-          model: 'bulbul:v1'
-        }),
-        signal: controller.signal
-      });
+        const response = await fetch('https://api.sarvam.ai/text-to-speech', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'API-Subscription-Key': SARVAM_API_KEY,
+            'Connection': 'keep-alive'
+          },
+          body: JSON.stringify({
+            inputs: [text],
+            target_language_code: language,
+            speaker: 'meera',
+            pitch: 0,
+            pace: 1.1,
+            loudness: 1.0,
+            speech_sample_rate: 8000,
+            enable_preprocessing: true,
+            model: 'bulbul:v1'
+          }),
+          signal: controller.signal
+        });
 
-      clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Sarvam API error: ${response.status} - ${errorText}`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Sarvam API error: ${response.status} - ${errorText}`);
+        }
+
+        const data = await response.json();
+        audioBase64 = data.audios?.[0];
+
+        if (!audioBase64) {
+          throw new Error('No audio data received from Sarvam');
+        }
+
+        const ttsTime = Date.now() - startTime;
+        console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`);
       }
-
-      const data = await response.json();
-      const audioBase64 = data.audios?.[0];
-
-      if (!audioBase64) {
-        throw new Error('No audio data received from Sarvam');
-      }
-
-      const ttsTime = Date.now() - startTime;
-      console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`);
       
-      // Add a small delay before streaming to ensure call is ready
+      // Process audio data
+      const processedAudio = processAudioData(audioBase64);
+      
+      // Add a small delay before streaming
       await new Promise(resolve => setTimeout(resolve, 100));
       
-      // Stream audio with optimized buffering
-      await streamAudioToCall(audioBase64);
+      // Try streaming with linear16 format first
+      console.log('[TTS] Attempting linear16 format streaming');
+      const success = await streamAudioToCall(processedAudio, false);
+      
+      // If linear16 didn't work, try µ-law format after delay
+      if (success) {
+        console.log('[TTS] Linear16 streaming completed successfully');
+      } else {
+        console.log('[TTS] Trying µ-law format as alternative');
+        setTimeout(async () => {
+          await streamAudioToCall(processedAudio, true);
+        }, 1000);
+      }
       
     } catch (error) {
       console.error('[TTS] Error:', error.message);
       
-      // Send a simple beep or tone as fallback
-      const fallbackAudio = generateSimpleTone(440, 0.5); // 440Hz for 0.5 seconds
-      await streamAudioToCall(fallbackAudio);
+      // Send a test tone as fallback
+      console.log('[TTS] Sending test tone as fallback');
+      const fallbackAudio = generateTestTone(600, 1.0, 0.4);
+      const processedFallback = processAudioData(fallbackAudio);
+      await streamAudioToCall(processedFallback);
     }
   };
 
   /**
-   * Optimized audio streaming with proper buffering for C-Zentrix
+   * Optimized audio streaming with format options for C-Zentrix
    */
-  const streamAudioToCall = async (audioBase64) => {
-    const audioBuffer = Buffer.from(audioBase64, 'base64');
+  const streamAudioToCall = async (audioBase64, tryMuLaw = false) => {
+    let audioBuffer = Buffer.from(audioBase64, 'base64');
     
-    // C-Zentrix expects 160-byte chunks but we should send them faster to build buffer
-    const CHUNK_SIZE = 160; // 160 bytes = 10ms of 8kHz 16-bit mono
-    const BATCH_SIZE = 10; // Send 10 chunks at once (100ms of audio)
-    const BATCH_DELAY = 50; // 50ms delay between batches (faster buffering)
+    // Try µ-law format if specified
+    if (tryMuLaw) {
+      console.log('[STREAM] Converting to µ-law format');
+      audioBuffer = convertToMuLaw(audioBuffer);
+    }
+    
+    const CHUNK_SIZE = tryMuLaw ? 80 : 160; // µ-law uses 80 bytes, linear16 uses 160
+    const BATCH_SIZE = 10;
+    const BATCH_DELAY = 50;
     
     let position = 0;
     const streamStart = Date.now();
     const totalChunks = Math.ceil(audioBuffer.length / CHUNK_SIZE);
     
-    console.log(`[STREAM] Starting audio stream: ${audioBuffer.length} bytes in ${totalChunks} chunks`);
+    console.log(`[STREAM] Starting ${tryMuLaw ? 'µ-law' : 'linear16'} audio stream: ${audioBuffer.length} bytes in ${totalChunks} chunks`);
     console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`);
     
     let chunksSuccessfullySent = 0;
@@ -246,12 +368,12 @@ const setupUnifiedVoiceServer = (ws) => {
       
       batchCount++;
       
-      // Log progress every 20 batches (2 seconds of audio)
+      // Log progress every 20 batches
       if (batchCount % 20 === 0) {
         console.log(`[STREAM] Sent ${chunksSuccessfullySent}/${totalChunks} chunks (${batchCount} batches)`);
       }
       
-      // Short delay between batches to allow buffering
+      // Short delay between batches
       if (position < audioBuffer.length) {
         await new Promise(resolve => setTimeout(resolve, BATCH_DELAY));
       }
@@ -268,15 +390,16 @@ const setupUnifiedVoiceServer = (ws) => {
         }
       };
       ws.send(JSON.stringify(silenceMessage));
-      console.log('[STREAM] End silence sent');
     } catch (error) {
       console.error('[STREAM] Failed to send end silence:', error.message);
     }
     
     const streamDuration = Date.now() - streamStart;
-    const expectedAudioDuration = (totalChunks * 10); // 10ms per chunk
+    const expectedAudioDuration = (totalChunks * (tryMuLaw ? 10 : 10)); // 10ms per chunk
     console.log(`[STREAM] Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks`);
     console.log(`[STREAM] Expected audio duration: ${expectedAudioDuration}ms, Stream efficiency: ${(expectedAudioDuration/streamDuration*100).toFixed(1)}%`);
+    
+    return chunksSuccessfullySent === totalChunks; // Return success status
   };
 
   /**
@@ -559,14 +682,16 @@ const setupUnifiedVoiceServer = (ws) => {
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0);
           
-          // Send optimized greeting with proper timing
-          const greeting = 'Hi! How can I help you?';
-          console.log('[CZ] Sending greeting:', greeting);
+          // Send test tone first to verify audio pipeline works
+          console.log('[CZ] Sending test tone first');
+          await synthesizeAndStreamAudio("Testing", 'en-IN', true); // Send test tone
           
-          // Wait a moment for call to stabilize before sending audio
+          // Then send greeting after a delay
           setTimeout(async () => {
+            const greeting = 'Hi! How can I help you?';
+            console.log('[CZ] Sending greeting:', greeting);
             await synthesizeAndStreamAudio(greeting);
-          }, 500);
+          }, 3000); // 3 second delay between test tone and greeting
           break;
 
         case 'media':
