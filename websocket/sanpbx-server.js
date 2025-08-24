@@ -1,517 +1,1783 @@
 const WebSocket = require("ws")
-const EventEmitter = require("events")
+require("dotenv").config()
 
-// AI Service Integrations
-const { createClient } = require("@deepgram/sdk")
-const OpenAI = require("openai")
+// Import franc with fallback for different versions
+let franc;
+try {
+  franc = require("franc").franc;
+  if (!franc) {
+    franc = require("franc");
+  }
+} catch (error) {
+  franc = () => 'und';
+}
 
-class SanPBXWebSocketServer extends EventEmitter {
-  constructor() {
-    super()
-    this.activeCalls = new Map()
-    this.deepgramClient = null
-    this.openaiClient = null
-    this.sarvamConfig = null
+// Load API keys from environment variables
+const API_KEYS = {
+  deepgram: process.env.DEEPGRAM_API_KEY,
+  sarvam: process.env.SARVAM_API_KEY,
+  openai: process.env.OPENAI_API_KEY,
+}
 
-    this.initializeAIServices()
+// Validate API keys
+if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+  console.error("❌ Missing required API keys in environment variables")
+  process.exit(1)
+}
+
+const fetch = globalThis.fetch || require("node-fetch")
+
+// Performance timing helper
+const createTimer = (label) => {
+  const start = Date.now()
+  return {
+    start,
+    end: () => Date.now() - start,
+    checkpoint: (checkpointName) => Date.now() - start,
+  }
+}
+
+// Enhanced language mappings with Marathi support
+const LANGUAGE_MAPPING = {
+  hi: "hi-IN",
+  en: "en-IN",
+  bn: "bn-IN",
+  te: "te-IN",
+  ta: "ta-IN",
+  mr: "mr-IN",
+  gu: "gu-IN",
+  kn: "kn-IN",
+  ml: "ml-IN",
+  pa: "pa-IN",
+  or: "or-IN",
+  as: "as-IN",
+  ur: "ur-IN",
+}
+
+// Enhanced Franc language code mapping to our supported languages
+const FRANC_TO_SUPPORTED = {
+  'hin': 'hi',
+  'eng': 'en',
+  'ben': 'bn',
+  'tel': 'te',
+  'tam': 'ta',
+  'mar': 'mr',
+  'guj': 'gu',
+  'kan': 'kn',
+  'mal': 'ml',
+  'pan': 'pa',
+  'ori': 'or',
+  'asm': 'as',
+  'urd': 'ur',
+  'src': 'en',
+  'und': 'en',
+  'lat': 'en',
+  'sco': 'en',
+  'fra': 'en',
+  'deu': 'en',
+  'nld': 'en',
+  'spa': 'en',
+  'ita': 'en',
+  'por': 'en',
+}
+
+const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  return LANGUAGE_MAPPING[lang] || "hi-IN"
+}
+
+const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  if (lang === "hi") return "hi"
+  if (lang === "en") return "en-IN"
+  if (lang === "mr") return "mr"
+  return lang
+}
+
+// Valid Sarvam voice options
+const VALID_SARVAM_VOICES = new Set([
+  "abhilash",
+  "anushka",
+  "meera",
+  "pavithra",
+  "maitreyi",
+  "arvind",
+  "amol",
+  "amartya",
+  "diya",
+  "neel",
+  "misha",
+  "vian",
+  "arjun",
+  "maya",
+  "manisha",
+  "vidya",
+  "arya",
+  "karun",
+  "hitesh",
+])
+
+const getValidSarvamVoice = (voiceSelection = "pavithra") => {
+  const normalized = (voiceSelection || "").toString().trim().toLowerCase()
+  if (VALID_SARVAM_VOICES.has(normalized)) {
+    return normalized
   }
 
-  initializeAIServices() {
-    // Initialize Deepgram for Speech-to-Text
-    if (process.env.DEEPGRAM_API_KEY) {
-      this.deepgramClient = createClient(process.env.DEEPGRAM_API_KEY)
-      console.log("✅ [SANPBX] Deepgram client initialized")
-    } else {
-      console.warn("⚠️ [SANPBX] DEEPGRAM_API_KEY not found")
-    }
-
-    // Initialize OpenAI for Conversation AI
-    if (process.env.OPENAI_API_KEY) {
-      this.openaiClient = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-      })
-      console.log("✅ [SANPBX] OpenAI client initialized")
-    } else {
-      console.warn("⚠️ [SANPBX] OPENAI_API_KEY not found")
-    }
-
-    // Initialize Sarvam configuration
-    if (process.env.SARVAM_API_KEY) {
-      this.sarvamConfig = {
-        apiKey: process.env.SARVAM_API_KEY,
-        baseUrl: "https://api.sarvam.ai/text-to-speech",
-      }
-      console.log("✅ [SANPBX] Sarvam configuration initialized")
-    } else {
-      console.warn("⚠️ [SANPBX] SARVAM_API_KEY not found")
-    }
+  const voiceMapping = {
+    "male-professional": "arvind",
+    "female-professional": "pavithra",
+    "male-friendly": "amol",
+    "female-friendly": "maya",
+    neutral: "pavithra",
+    default: "pavithra",
+    male: "arvind",
+    female: "pavithra",
   }
 
-  setupWebSocketServer(wss) {
-    wss.on("connection", (ws, req) => {
-      console.log("🔗 [SANPBX] New WebSocket connection established")
+  return voiceMapping[normalized] || "pavithra"
+}
 
-      // Initialize connection state
-      ws.callState = {
-        callId: null,
-        streamId: null,
-        channelId: null,
-        isActive: false,
-        conversationHistory: [],
-        deepgramConnection: null,
-        audioBuffer: [],
-        lastActivity: Date.now(),
+// Utility function to decode base64 extra data
+const decodeExtraData = (extraBase64) => {
+  try {
+    if (!extraBase64) return null
+
+    const decodedString = Buffer.from(extraBase64, "base64").toString("utf-8")
+    const fixedString = decodedString
+      .replace(/="([^"]*?)"/g, ':"$1"')
+      .replace(/=([^",}\s]+)/g, ':"$1"')
+      .replace(/,\s*}/g, "}")
+      .replace(/,\s*]/g, "]")
+
+    const parsedData = JSON.parse(fixedString)
+    return parsedData
+  } catch (error) {
+    return null
+  }
+}
+
+// Utility function to decode czdata (base64 JSON)
+const decodeCzdata = (czdataBase64) => {
+  try {
+    if (!czdataBase64) return null;
+    const decoded = Buffer.from(czdataBase64, "base64").toString("utf-8");
+    return JSON.parse(decoded);
+  } catch (e) {
+    return null;
+  }
+};
+
+// Enhanced language detection with better fallback logic
+const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
+  try {
+    const cleanText = text.trim()
+    
+    if (cleanText.length < 10) {
+      const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
+      const hindiPatterns = /[\u0900-\u097F]/
+      const englishWords = /^[a-zA-Z\s\?\!\.\,\'\"]+$/
+      
+      if (hindiPatterns.test(cleanText)) {
+        return "hi"
+      } else if (englishPatterns.test(cleanText) || englishWords.test(cleanText)) {
+        return "en"
+      } else {
+        return fallbackLanguage
       }
+    }
 
-      // Handle incoming messages
-      ws.on("message", async (data) => {
-        try {
-          await this.handleMessage(ws, data)
-        } catch (error) {
-          console.error("❌ [SANPBX] Error handling message:", error)
-          this.sendError(ws, "Message processing failed", error.message)
-        }
-      })
+    if (typeof franc !== 'function') {
+      return fallbackLanguage
+    }
 
-      // Handle connection close
-      ws.on("close", (code, reason) => {
-        console.log(`🔗 [SANPBX] Connection closed: ${code} - ${reason}`)
-        this.cleanupConnection(ws)
-      })
+    const detected = franc(cleanText)
 
-      // Handle connection errors
-      ws.on("error", (error) => {
-        console.error("❌ [SANPBX] WebSocket error:", error)
-        this.cleanupConnection(ws)
-      })
+    if (detected === 'und' || !detected) {
+      const hindiPatterns = /[\u0900-\u097F]/
+      if (hindiPatterns.test(cleanText)) {
+        return "hi"
+      }
+      
+      const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
+      if (latinScript.test(cleanText)) {
+        return "en"
+      }
+      
+      return fallbackLanguage
+    }
 
-      // Send initial connection acknowledgment
-      this.sendMessage(ws, {
-        event: "connection_ready",
-        message: "SanPBX WebSocket server ready",
-        timestamp: new Date().toISOString(),
-        capabilities: {
-          deepgram: !!this.deepgramClient,
-          openai: !!this.openaiClient,
-          sarvam: !!this.sarvamConfig,
-        },
-      })
+    const mappedLang = FRANC_TO_SUPPORTED[detected]
+    
+    if (mappedLang) {
+      return mappedLang
+    } else {
+      const hindiPatterns = /[\u0900-\u097F]/
+      if (hindiPatterns.test(cleanText)) {
+        return "hi"
+      }
+      
+      const tamilScript = /[\u0B80-\u0BFF]/
+      const teluguScript = /[\u0C00-\u0C7F]/
+      const kannadaScript = /[\u0C80-\u0CFF]/
+      const malayalamScript = /[\u0D00-\u0D7F]/
+      const gujaratiScript = /[\u0A80-\u0AFF]/
+      const bengaliScript = /[\u0980-\u09FF]/
+      
+      if (tamilScript.test(cleanText)) return "ta"
+      if (teluguScript.test(cleanText)) return "te"
+      if (kannadaScript.test(cleanText)) return "kn"
+      if (malayalamScript.test(cleanText)) return "ml"
+      if (gujaratiScript.test(cleanText)) return "gu"
+      if (bengaliScript.test(cleanText)) return "bn"
+      
+      const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
+      if (latinScript.test(cleanText)) {
+        return "en"
+      }
+      
+      return fallbackLanguage
+    }
+    
+  } catch (error) {
+    return fallbackLanguage
+  }
+}
+
+// Fallback to OpenAI for uncertain cases
+const detectLanguageWithOpenAI = async (text) => {
+  const timer = createTimer("LLM_LANGUAGE_DETECTION")
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code (hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur). 
+
+Examples:
+- "Hello, how are you?" → en
+- "What's our name?" → en
+- "नमस्ते, आप कैसे हैं?" → hi
+- "আপনি কেমন আছেন?" → bn
+- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
+- "तुम्ही कसे आहात?" → mr
+- "તમે કેમ છો?" → gu
+
+Return only the language code, nothing else.`,
+          },
+          {
+            role: "user",
+            content: text,
+          },
+        ],
+        max_tokens: 10,
+        temperature: 0.1,
+      }),
     })
 
-    console.log("✅ [SANPBX] WebSocket server setup complete")
+    if (!response.ok) {
+      throw new Error(`Language detection failed: ${response.status}`)
+    }
+
+    const data = await response.json()
+    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
+
+    const validLanguages = Object.keys(LANGUAGE_MAPPING)
+    if (validLanguages.includes(detectedLang)) {
+      console.log(`🕐 [LLM-LANG-DETECT] ${timer.end()}ms - Detected: ${detectedLang}`)
+      return detectedLang
+    }
+
+    return "en"
+  } catch (error) {
+    console.log(`❌ [LLM-LANG-DETECT] ${timer.end()}ms - Error: ${error.message}`)
+    return "en"
+  }
+}
+
+// Enhanced hybrid language detection
+const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
+  const francResult = detectLanguageWithFranc(text)
+  
+  if (text.trim().length < 20) {
+    const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
+    const hindiPatterns = /[\u0900-\u097F]/
+    
+    if (hindiPatterns.test(text)) {
+      return "hi"
+    } else if (englishPatterns.test(text)) {
+      return "en"
+    }
+  }
+  
+  if (francResult === 'hi' || francResult === 'en') {
+    return francResult
+  }
+  
+  if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
+    return await detectLanguageWithOpenAI(text)
+  }
+  
+  return francResult
+}
+
+// STATIC CONFIGURATION - No database integration
+const STATIC_CONFIG = {
+  language: "en",
+  voiceSelection: "pavithra",
+  firstMessage: "Hello! Welcome to our AI assistant. How can I help you today?",
+  systemPrompt: "You are a helpful and friendly AI assistant. You assist users with their queries in a professional manner. Keep your responses concise and helpful. Always end with a relevant follow-up question to keep the conversation engaging.",
+  clientId: "static-client",
+  agentName: "Static AI Assistant",
+  isActive: true
+}
+
+// Enhanced Call logging utility class with live transcript saving
+class EnhancedCallLogger {
+  constructor(clientId, mobile = null, callDirection = "inbound") {
+    this.clientId = clientId
+    this.mobile = mobile
+    this.callDirection = callDirection
+    this.callStartTime = new Date()
+    this.transcripts = []
+    this.responses = []
+    this.totalDuration = 0
+    this.callLogId = null
+    this.isCallLogCreated = false
+    this.pendingTranscripts = []
+    this.batchTimer = null
+    this.batchSize = 5 // Save every 5 transcript entries
+    this.batchTimeout = 3000 // Or save every 3 seconds
+    this.customParams = {}
+    this.callerId = null
+    this.streamSid = null
+    this.callSid = null
+    this.accountSid = null
+    this.ws = null // Store WebSocket reference for disconnection
   }
 
-  async handleMessage(ws, data) {
-    let message
-
+  // Create initial call log entry immediately when call starts
+  async createInitialCallLog(agentId = null, leadStatusInput = 'not_connected') {
+    const timer = createTimer("INITIAL_CALL_LOG_CREATE")
     try {
-      // Handle both JSON and binary data
-      if (Buffer.isBuffer(data)) {
-        // Binary audio data - convert to base64
-        const base64Audio = data.toString("base64")
-        await this.processAudioData(ws, base64Audio)
-        return
+      // Static implementation - just log the creation
+      const callLogId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      this.callLogId = callLogId
+      this.isCallLogCreated = true
+
+      // Add to active call loggers map for manual termination
+      if (this.streamSid) {
+        activeCallLoggers.set(this.streamSid, this)
+        console.log(`📋 [ACTIVE-CALL-LOGGERS] Added call logger for streamSid: ${this.streamSid}`)
       }
 
-      message = JSON.parse(data.toString())
+      console.log(`🕐 [INITIAL-CALL-LOG] ${timer.end()}ms - Created: ${callLogId}`)
+      return { _id: callLogId }
     } catch (error) {
-      console.error("❌ [SANPBX] Invalid message format:", error)
+      console.log(`❌ [INITIAL-CALL-LOG] ${timer.end()}ms - Error: ${error.message}`)
+      throw error
+    }
+  }
+
+  // Method to disconnect the call - OPTIMIZED FOR PARALLEL EXECUTION
+  async disconnectCall(reason = 'user_disconnected') {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.log("⚠️ [CALL-DISCONNECT] WebSocket not available for disconnection")
+      return false
+    }
+
+    try {
+      console.log(`🛑 [CALL-DISCONNECT] Disconnecting call: ${reason}`)
+      
+      // Send stop event to terminate the call with proper structure
+      const stopMessage = {
+        event: "stop",
+        sequenceNumber: stopEventSequence++,
+        stop: {
+          accountSid: this.accountSid || "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+          callSid: this.callSid || "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        },
+        streamSid: this.streamSid
+      }
+      
+      console.log(`🛑 [CALL-DISCONNECT] Sending stop event:`, JSON.stringify(stopMessage, null, 2))
+      
+      // Execute all disconnection operations in parallel for minimal latency
+      const disconnectionPromises = []
+      
+      // 1. Send stop event immediately (non-blocking)
+      if (this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify(stopMessage))
+          console.log(`🛑 [CALL-DISCONNECT] Stop event sent successfully`)
+        } catch (error) {
+          console.log(`⚠️ [CALL-DISCONNECT] Error sending stop event: ${error.message}`)
+        }
+      }
+      
+      // 2. Send fallback close event after short delay (non-blocking)
+      const fallbackClosePromise = new Promise((resolve) => {
+        setTimeout(() => {
+          if (this.ws.readyState === WebSocket.OPEN) {
+            const closeMessage = {
+              event: "close",
+              streamSid: this.streamSid,
+              reason: reason
+            }
+            console.log(`🛑 [CALL-DISCONNECT] Sending fallback close event:`, JSON.stringify(closeMessage, null, 2))
+            
+            try {
+              this.ws.send(JSON.stringify(closeMessage))
+              console.log(`🛑 [CALL-DISCONNECT] Fallback close event sent`)
+            } catch (error) {
+              console.log(`⚠️ [CALL-DISCONNECT] Error sending fallback close: ${error.message}`)
+            }
+          }
+          resolve()
+        }, 500) // Reduced from 1000ms to 500ms for faster disconnection
+      })
+      disconnectionPromises.push(fallbackClosePromise)
+      
+      // 3. Force close WebSocket after delay (non-blocking)
+      const forceClosePromise = new Promise((resolve) => {
+        setTimeout(() => {
+          if (this.ws.readyState === WebSocket.OPEN) {
+            console.log(`🛑 [CALL-DISCONNECT] Force closing WebSocket connection`)
+            this.ws.close(1000, `Call terminated: ${reason}`)
+          }
+          resolve()
+        }, 1500) // Reduced from 2000ms to 1500ms for faster disconnection
+      })
+      disconnectionPromises.push(forceClosePromise)
+      
+      // 4. Update call log to mark as inactive (static implementation - just log)
+      const callLogUpdatePromise = Promise.resolve().then(() => {
+        console.log(`📝 [CALL-DISCONNECT] Call ${this.callLogId} marked as inactive (static mode)`)
+      }).catch(err => console.log(`⚠️ [CALL-DISCONNECT] Call log update error: ${err.message}`))
+      disconnectionPromises.push(callLogUpdatePromise)
+      
+      // Wait for all disconnection operations to complete
+      await Promise.allSettled(disconnectionPromises)
+      
+      console.log("✅ [CALL-DISCONNECT] Call disconnected successfully")
+      return true
+    } catch (error) {
+      console.log(`❌ [CALL-DISCONNECT] Error disconnecting call: ${error.message}`)
+      return false
+    }
+  }
+
+  // Method to get call information for external disconnection
+  getCallInfo() {
+    return {
+      streamSid: this.streamSid,
+      callSid: this.callSid,
+      accountSid: this.accountSid,
+      callLogId: this.callLogId,
+      clientId: this.clientId,
+      mobile: this.mobile,
+      isActive: this.isCallLogCreated && this.callLogId
+    }
+  }
+
+  // Method to gracefully end call with goodbye message - PARALLEL EXECUTION
+  async gracefulCallEnd(goodbyeMessage = "Thank you for your time. Have a great day!", language = "en") {
+    try {
+      console.log("👋 [GRACEFUL-END] Ending call gracefully with goodbye message")
+      
+      // Log the goodbye message
+      this.logAIResponse(goodbyeMessage, language)
+      
+      // Update call log immediately (static implementation)
+      const callLogUpdate = Promise.resolve().then(() => {
+        console.log(`📝 [GRACEFUL-END] Call log updated (static mode)`)
+      }).catch(err => console.log(`⚠️ [GRACEFUL-END] Call log update error: ${err.message}`))
+      
+      // Start TTS synthesis for goodbye message (non-blocking)
+      const ttsPromise = this.synthesizeGoodbyeMessage(goodbyeMessage, language)
+      
+      // Start disconnection process in parallel (non-blocking)
+      const disconnectPromise = this.disconnectCall('graceful_termination')
+      
+      // Execute all operations in parallel for minimal latency
+      await Promise.allSettled([
+        callLogUpdate,
+        ttsPromise,
+        disconnectPromise
+      ])
+      
+      console.log("✅ [GRACEFUL-END] All operations completed in parallel")
+      return true
+    } catch (error) {
+      console.log(`❌ [GRACEFUL-END] Error in graceful call end: ${error.message}`)
+      return false
+    }
+  }
+
+  // Synthesize goodbye message without waiting for completion
+  async synthesizeGoodbyeMessage(message, language) {
+    try {
+      console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
+      
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        
+        // Start TTS synthesis but don't wait for completion
+        tts.synthesizeAndStream(message).catch(err => 
+          console.log(`⚠️ [GRACEFUL-END] TTS error: ${err.message}`)
+        )
+        
+        console.log("✅ [GRACEFUL-END] Goodbye message TTS started")
+      } else {
+        console.log("⚠️ [GRACEFUL-END] WebSocket not available for TTS")
+      }
+    } catch (error) {
+      console.log(`❌ [GRACEFUL-END] TTS synthesis error: ${error.message}`)
+    }
+  }
+
+  // Fast parallel call termination for minimal latency
+  async fastTerminateCall(reason = 'fast_termination') {
+    try {
+      console.log(`⚡ [FAST-TERMINATE] Fast terminating call: ${reason}`)
+      
+      // Execute all termination operations in parallel for minimal latency
+      const terminationPromises = []
+      
+      // 1. Send stop event immediately (non-blocking)
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const stopMessage = {
+          event: "stop",
+          sequenceNumber: stopEventSequence++,
+          stop: {
+            accountSid: this.accountSid || "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            callSid: this.callSid || "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+          },
+          streamSid: this.streamSid
+        }
+        
+        try {
+          this.ws.send(JSON.stringify(stopMessage))
+          console.log(`⚡ [FAST-TERMINATE] Stop event sent immediately`)
+        } catch (error) {
+          console.log(`⚠️ [FAST-TERMINATE] Error sending stop event: ${error.message}`)
+        }
+      }
+      
+      // 2. Update call log (static implementation)
+      if (this.callLogId) {
+        const callLogUpdate = Promise.resolve().then(() => {
+          console.log(`📝 [FAST-TERMINATE] Call log updated (static mode)`)
+        }).catch(err => console.log(`⚠️ [FAST-TERMINATE] Call log update error: ${err.message}`))
+        
+        terminationPromises.push(callLogUpdate)
+      }
+      
+      // 3. Force close WebSocket after minimal delay (non-blocking)
+      const forceClosePromise = new Promise((resolve) => {
+        setTimeout(() => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log(`⚡ [FAST-TERMINATE] Force closing WebSocket connection`)
+            this.ws.close(1000, `Call terminated: ${reason}`)
+          }
+          resolve()
+        }, 300) // Reduced to 300ms for faster termination
+      })
+      terminationPromises.push(forceClosePromise)
+      
+      // Wait for all operations to complete
+      await Promise.allSettled(terminationPromises)
+      
+      console.log("✅ [FAST-TERMINATE] Call terminated with minimal latency")
+      return true
+    } catch (error) {
+      console.log(`❌ [FAST-TERMINATE] Error in fast termination: ${error.message}`)
+      return false
+    }
+  }
+
+  // Ultra-fast termination with goodbye message - minimal latency approach
+  async ultraFastTerminateWithMessage(goodbyeMessage = "Thank you, goodbye!", language = "en", reason = 'ultra_fast_termination') {
+    try {
+      console.log(`🚀 [ULTRA-FAST-TERMINATE] Ultra-fast termination with message: ${reason}`)
+      
+      // Execute all operations in parallel for absolute minimal latency
+      const allPromises = []
+      
+      // 1. Log the goodbye message (non-blocking)
+      this.logAIResponse(goodbyeMessage, language)
+      
+      // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
+      let ttsStarted = false
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        
+        // Start TTS and wait for it to begin
+        try {
+          await tts.synthesizeAndStream(goodbyeMessage)
+          ttsStarted = true
+          console.log(`🚀 [ULTRA-FAST-TERMINATE] Goodbye message TTS completed`)
+        } catch (err) {
+          console.log(`⚠️ [ULTRA-FAST-TERMINATE] TTS error: ${err.message}`)
+        }
+      }
+      
+      // 3. Send stop event after TTS starts (non-blocking)
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const stopMessage = {
+          event: "stop",
+          sequenceNumber: stopEventSequence++,
+          stop: {
+            accountSid: this.accountSid || "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            callSid: this.callSid || "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+          },
+          streamSid: this.streamSid
+        }
+        
+        try {
+          this.ws.send(JSON.stringify(stopMessage))
+          console.log(`🚀 [ULTRA-FAST-TERMINATE] Stop event sent after TTS`)
+        } catch (error) {
+          console.log(`⚠️ [ULTRA-FAST-TERMINATE] Error sending stop event: ${error.message}`)
+        }
+      }
+      
+      // 4. Update call log (static implementation)
+      if (this.callLogId) {
+        const callLogUpdate = Promise.resolve().then(() => {
+          console.log(`📝 [ULTRA-FAST-TERMINATE] Call log updated (static mode)`)
+        }).catch(err => console.log(`⚠️ [ULTRA-FAST-TERMINATE] Call log update error: ${err.message}`))
+        
+        allPromises.push(callLogUpdate)
+      }
+      
+      // 5. Force close WebSocket after ensuring TTS is sent (non-blocking)
+      const forceClosePromise = new Promise((resolve) => {
+        setTimeout(() => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log(`🚀 [ULTRA-FAST-TERMINATE] Force closing WebSocket connection`)
+            this.ws.close(1000, `Call terminated: ${reason}`)
+          }
+          resolve()
+        }, 500) // Increased delay to ensure TTS is sent
+      })
+      allPromises.push(forceClosePromise)
+      
+      // Wait for all operations to complete
+      await Promise.allSettled(allPromises)
+      
+      console.log("✅ [ULTRA-FAST-TERMINATE] Call terminated with ultra-minimal latency")
+      return true
+    } catch (error) {
+      console.log(`❌ [ULTRA-FAST-TERMINATE] Error in ultra-fast termination: ${error.message}`)
+      return false
+    }
+  }
+
+  // Controlled termination with proper timing - ensures message is sent before disconnection
+  async controlledTerminateWithMessage(goodbyeMessage = "Thank you, goodbye!", language = "en", reason = 'controlled_termination', delayMs = 2000) {
+    try {
+      console.log(`⏱️ [CONTROLLED-TERMINATE] Controlled termination with message: ${reason}, delay: ${delayMs}ms`)
+      
+      // 1. Log the goodbye message
+      this.logAIResponse(goodbyeMessage, language)
+      
+      // 2. Start TTS synthesis and wait for completion
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        
+        try {
+          console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
+          await tts.synthesizeAndStream(goodbyeMessage)
+          console.log(`⏱️ [CONTROLLED-TERMINATE] TTS synthesis completed`)
+        } catch (err) {
+          console.log(`⚠️ [CONTROLLED-TERMINATE] TTS error: ${err.message}`)
+        }
+      }
+      
+      // 3. Wait for specified delay to ensure message is processed
+      console.log(`⏱️ [CONTROLLED-TERMINATE] Waiting ${delayMs}ms before disconnection...`)
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      
+      // 4. Now terminate the call
+      console.log(`⏱️ [CONTROLLED-TERMINATE] Delay completed, now terminating call...`)
+      return await this.fastTerminateCall(reason)
+      
+    } catch (error) {
+      console.log(`❌ [CONTROLLED-TERMINATE] Error in controlled termination: ${error.message}`)
+      return false
+    }
+  }
+
+  // Add transcript with batched live saving
+  logUserTranscript(transcript, language, timestamp = new Date()) {
+    const entry = {
+      type: "user",
+      text: transcript,
+      language: language,
+      timestamp: timestamp,
+      source: "deepgram",
+    }
+
+    this.transcripts.push(entry)
+    this.pendingTranscripts.push(entry)
+    
+    // Trigger batch save
+    this.scheduleBatchSave()
+  }
+
+  // Add AI response with batched live saving
+  logAIResponse(response, language, timestamp = new Date()) {
+    const entry = {
+      type: "ai",
+      text: response,
+      language: language,
+      timestamp: timestamp,
+      source: "sarvam",
+    }
+
+    this.responses.push(entry)
+    this.pendingTranscripts.push(entry)
+    
+    // Trigger batch save
+    this.scheduleBatchSave()
+  }
+
+  // Schedule batched saving to reduce DB calls
+  scheduleBatchSave() {
+    // Clear existing timer
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer)
+    }
+
+    // Save immediately if batch size reached
+    if (this.pendingTranscripts.length >= this.batchSize) {
+      this.savePendingTranscripts()
       return
     }
 
-    const { event } = message
-    console.log(`📨 [SANPBX] Received event: ${event}`)
+    // Otherwise schedule save after timeout
+    this.batchTimer = setTimeout(() => {
+      this.savePendingTranscripts()
+    }, this.batchTimeout)
+  }
 
-    switch (event) {
-      case "connected":
-        await this.handleConnected(ws, message)
-        break
-      case "start":
-        await this.handleStart(ws, message)
-        break
-      case "answer":
-        await this.handleAnswer(ws, message)
-        break
-      case "media":
-        await this.handleMedia(ws, message)
-        break
-      case "dtmf":
-        await this.handleDTMF(ws, message)
-        break
-      case "stop":
-        await this.handleStop(ws, message)
-        break
-      case "transfer-call":
-        await this.handleTransferCall(ws, message)
-        break
-      case "hangup-call":
-        await this.handleHangupCall(ws, message)
-        break
-      default:
-        console.warn(`⚠️ [SANPBX] Unknown event: ${event}`)
+  // Save pending transcripts in background (non-blocking) - Static implementation
+  async savePendingTranscripts() {
+    if (!this.isCallLogCreated || this.pendingTranscripts.length === 0) {
+      return
+    }
+
+    // Create a copy and clear pending immediately to avoid blocking
+    const transcriptsToSave = [...this.pendingTranscripts]
+    this.pendingTranscripts = []
+    
+    // Clear timer
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer)
+      this.batchTimer = null
+    }
+
+    // Save asynchronously without awaiting (fire and forget) - Static implementation
+    setImmediate(async () => {
+      const timer = createTimer("LIVE_TRANSCRIPT_BATCH_SAVE")
+      try {
+        const currentTranscript = this.generateFullTranscript()
+        const currentDuration = Math.round((new Date() - this.callStartTime) / 1000)
+        
+        // Static implementation - just log the save operation
+        console.log(`📝 [STATIC-SAVE] Transcript batch saved - ${transcriptsToSave.length} entries`)
+        console.log(`📝 [STATIC-SAVE] Duration: ${currentDuration}s, User: ${this.transcripts.length}, AI: ${this.responses.length}`)
+
+        console.log(`🕐 [LIVE-TRANSCRIPT-SAVE] ${timer.end()}ms - Saved ${transcriptsToSave.length} entries (static mode)`)
+      } catch (error) {
+        console.log(`❌ [LIVE-TRANSCRIPT-SAVE] ${timer.end()}ms - Error: ${error.message}`)
+        // On error, add back to pending for retry
+        this.pendingTranscripts.unshift(...transcriptsToSave)
+      }
+    })
+  }
+
+  // Generate full transcript
+  generateFullTranscript() {
+    const allEntries = [...this.transcripts, ...this.responses].sort(
+      (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+    )
+
+    return allEntries
+      .map((entry) => {
+        const speaker = entry.type === "user" ? "User" : "AI"
+        const time = entry.timestamp.toISOString()
+        return `[${time}] ${speaker} (${entry.language}): ${entry.text}`
+      })
+      .join("\n")
+  }
+
+  // Final save with complete call data - Static implementation
+  async saveToDatabase(leadStatusInput = 'maybe') {
+    const timer = createTimer("FINAL_CALL_LOG_SAVE")
+    try {
+      const callEndTime = new Date()
+      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000)
+
+      // Save any remaining pending transcripts first
+      if (this.pendingTranscripts.length > 0) {
+        await this.savePendingTranscripts()
+        // Small delay to ensure batch save completes
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+
+      // Static implementation - just log the final save
+      const finalTranscript = this.generateFullTranscript()
+      
+      console.log(`📝 [STATIC-FINAL-SAVE] Call completed:`)
+      console.log(`📝 [STATIC-FINAL-SAVE] Duration: ${this.totalDuration}s`)
+      console.log(`📝 [STATIC-FINAL-SAVE] User messages: ${this.transcripts.length}`)
+      console.log(`📝 [STATIC-FINAL-SAVE] AI responses: ${this.responses.length}`)
+      console.log(`📝 [STATIC-FINAL-SAVE] Lead Status: ${leadStatusInput}`)
+      console.log(`📝 [STATIC-FINAL-SAVE] Full Transcript:\n${finalTranscript}`)
+
+      console.log(`🕐 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Logged: ${this.callLogId} (static mode)`)
+      return { _id: this.callLogId, transcript: finalTranscript, duration: this.totalDuration }
+    } catch (error) {
+      console.log(`❌ [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Error: ${error.message}`)
+      throw error
     }
   }
 
-  async handleConnected(ws, message) {
-    const { callId, streamId, channelId, callerId, callDirection } = message
+  // Cleanup method
+  cleanup() {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer)
+      this.batchTimer = null
+    }
+    
+    // Remove from active call loggers map
+    if (this.streamSid) {
+      activeCallLoggers.delete(this.streamSid)
+      console.log(`📋 [ACTIVE-CALL-LOGGERS] Removed call logger for streamSid: ${this.streamSid}`)
+    }
+  }
 
-    ws.callState.callId = callId
-    ws.callState.streamId = streamId
-    ws.callState.channelId = channelId
-    ws.callState.isActive = true
-    ws.callState.lastActivity = Date.now()
+  getStats() {
+    return {
+      duration: this.totalDuration,
+      userMessages: this.transcripts.length,
+      aiResponses: this.responses.length,
+      languages: [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
+      startTime: this.callStartTime,
+      callDirection: this.callDirection,
+      callLogId: this.callLogId,
+      pendingTranscripts: this.pendingTranscripts.length
+    }
+  }
+}
 
-    // Store active call
-    this.activeCalls.set(streamId, {
-      ws,
-      callId,
-      channelId,
-      callerId,
-      callDirection,
-      startTime: new Date(),
-    })
+// Simplified OpenAI processing - Static configuration
+const processWithOpenAI = async (
+  userMessage,
+  conversationHistory,
+  detectedLanguage,
+  callLogger,
+  agentConfig,
+  userName = null,
+) => {
+  const timer = createTimer("LLM_PROCESSING")
 
-    console.log(`📞 [SANPBX] Call connected - ID: ${callId}, Stream: ${streamId}`)
+  try {
+    // Use static configuration
+    const basePrompt = STATIC_CONFIG.systemPrompt
+    const firstMessage = STATIC_CONFIG.firstMessage
+    const knowledgeBlock = firstMessage
+      ? `FirstGreeting: "${firstMessage}"\n`
+      : ""
 
-    // Initialize conversation context
-    ws.callState.conversationHistory = [
-      {
-        role: "system",
-        content: `You are an AI assistant handling a ${callDirection.toLowerCase()} call. Be helpful, concise, and professional. Keep responses brief for voice conversation.`,
-      },
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
+      "If the information is not present, reply briefly that you don't have that information.",
+      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
+      "Keep the entire reply under 100 tokens.",
+    ].join(" ")
+
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
+      : null
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
+      ...conversationHistory.slice(-6),
+      { role: "user", content: userMessage },
     ]
 
-    this.sendMessage(ws, {
-      event: "connected_ack",
-      callId,
-      streamId,
-      message: "Call connection acknowledged",
-      timestamp: new Date().toISOString(),
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        max_tokens: 120,
+        temperature: 0.3,
+      }),
     })
-  }
 
-  async handleStart(ws, message) {
-    const { mediaFormat } = message
-    console.log(`🎵 [SANPBX] Media stream started:`, mediaFormat)
-
-    // Initialize Deepgram connection for real-time transcription
-    if (this.deepgramClient) {
-      try {
-        const deepgramLive = this.deepgramClient.listen.live({
-          model: "nova-2",
-          language: "en-US",
-          smart_format: true,
-          interim_results: true,
-          endpointing: 300,
-          utterance_end_ms: 1000,
-        })
-
-        // Handle transcription results
-        deepgramLive.on("Results", async (data) => {
-          const transcript = data.channel?.alternatives?.[0]?.transcript
-          if (transcript && data.is_final) {
-            console.log(`🎤 [SANPBX] Transcript: ${transcript}`)
-            await this.processTranscript(ws, transcript)
-          }
-        })
-
-        deepgramLive.on("error", (error) => {
-          console.error("❌ [SANPBX] Deepgram error:", error)
-        })
-
-        ws.callState.deepgramConnection = deepgramLive
-        console.log("✅ [SANPBX] Deepgram live connection established")
-      } catch (error) {
-        console.error("❌ [SANPBX] Failed to initialize Deepgram:", error)
-      }
+    if (!response.ok) {
+      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
+      return null
     }
 
-    this.sendMessage(ws, {
-      event: "start_ack",
-      callId: ws.callState.callId,
-      streamId: ws.callState.streamId,
-      message: "Media stream ready",
-      timestamp: new Date().toISOString(),
-    })
-  }
+    const data = await response.json()
+    let fullResponse = data.choices[0]?.message?.content?.trim()
 
-  async handleAnswer(ws, message) {
-    console.log(`📞 [SANPBX] Call answered - Stream: ${ws.callState.streamId}`)
+    console.log(`🕐 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
 
-    // Send welcome message
-    const welcomeMessage = "Hello! I'm your AI assistant. How can I help you today?"
-    await this.generateAndSendAudio(ws, welcomeMessage)
-
-    this.sendMessage(ws, {
-      event: "answer_ack",
-      callId: ws.callState.callId,
-      streamId: ws.callState.streamId,
-      message: "Call answered, AI assistant ready",
-      timestamp: new Date().toISOString(),
-    })
-  }
-
-  async handleMedia(ws, message) {
-    const { media } = message
-    if (!media || !media.payload) return
-
-    // Process base64 audio data
-    await this.processAudioData(ws, media.payload)
-  }
-
-  async processAudioData(ws, base64Audio) {
-    if (!ws.callState.deepgramConnection) return
-
-    try {
-      // Convert base64 to buffer and send to Deepgram
-      const audioBuffer = Buffer.from(base64Audio, "base64")
-      ws.callState.deepgramConnection.send(audioBuffer)
-      ws.callState.lastActivity = Date.now()
-    } catch (error) {
-      console.error("❌ [SANPBX] Error processing audio:", error)
-    }
-  }
-
-  async processTranscript(ws, transcript) {
-    if (!transcript.trim()) return
-
-    console.log(`💬 [SANPBX] Processing transcript: ${transcript}`)
-
-    // Add user message to conversation history
-    ws.callState.conversationHistory.push({
-      role: "user",
-      content: transcript,
-    })
-
-    // Generate AI response using OpenAI
-    if (this.openaiClient) {
-      try {
-        const completion = await this.openaiClient.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: ws.callState.conversationHistory,
-          max_tokens: 150,
-          temperature: 0.7,
-        })
-
-        const aiResponse = completion.choices[0]?.message?.content
-        if (aiResponse) {
-          console.log(`🤖 [SANPBX] AI Response: ${aiResponse}`)
-
-          // Add AI response to conversation history
-          ws.callState.conversationHistory.push({
-            role: "assistant",
-            content: aiResponse,
-          })
-
-          // Generate and send audio response
-          await this.generateAndSendAudio(ws, aiResponse)
+    // Ensure a follow-up question is present at the end
+    if (fullResponse) {
+      const needsFollowUp = !/[?]\s*$/.test(fullResponse)
+      if (needsFollowUp) {
+        const followUps = {
+          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूं?",
+          en: "Is there anything else I can help you with?",
+          bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
+          ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
+          te: "ఇంకేమైనా సహాయం కావాలా?",
+          mr: "आणखी काही मदत हवी आहे का?",
+          gu: "શું બીજી કોઈ મદદ કરી શકું?",
         }
-      } catch (error) {
-        console.error("❌ [SANPBX] OpenAI error:", error)
-        await this.generateAndSendAudio(ws, "I'm sorry, I'm having trouble processing that right now.")
+        const fu = followUps[detectedLanguage] || followUps.en
+        fullResponse = `${fullResponse} ${fu}`.trim()
       }
+    }
+
+    if (callLogger && fullResponse) {
+      callLogger.logAIResponse(fullResponse, detectedLanguage)
+    }
+
+    return fullResponse
+  } catch (error) {
+    console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+    return null
+  }
+}
+
+// Intelligent call disconnection detection using OpenAI
+const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("DISCONNECTION_DETECTION")
+  try {
+    const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
+- "thank you", "thanks", "bye", "goodbye", "end call", "hang up"
+- "hold on", "wait", "not available", "busy", "call back later"
+- "not interested", "no thanks", "stop calling"
+- Any indication they want to end the conversation
+
+User message: "${userMessage}"
+
+Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they want to continue.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: disconnectionPrompt },
+        ],
+        max_tokens: 10,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "CONTINUE" // Default to continue on error
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
+
+    if (result === "DISCONNECT") {
+      console.log(`🕐 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
+      return "DISCONNECT"
+    } else {
+      console.log(`🕐 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
+      return "CONTINUE"
+    }
+  } catch (error) {
+    console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "CONTINUE" // Default to continue on error
+  }
+}
+
+// Simplified TTS processor
+class SimplifiedSarvamTTSProcessor {
+  constructor(language, ws, streamSid, callLogger = null) {
+    this.language = language
+    this.ws = ws
+    this.streamSid = streamSid
+    this.callLogger = callLogger
+    this.sarvamLanguage = getSarvamLanguage(language)
+    this.voice = getValidSarvamVoice(STATIC_CONFIG.voiceSelection)
+    this.isInterrupted = false
+    this.currentAudioStreaming = null
+    this.totalAudioBytes = 0
+  }
+
+  interrupt() {
+    this.isInterrupted = true
+    if (this.currentAudioStreaming) {
+      this.currentAudioStreaming.interrupt = true
     }
   }
 
-  async generateAndSendAudio(ws, text) {
-    if (!this.sarvamConfig) {
-      console.warn("⚠️ [SANPBX] Sarvam not configured, skipping TTS")
-      return
+  reset(newLanguage) {
+    this.interrupt()
+    if (newLanguage) {
+      this.language = newLanguage
+      this.sarvamLanguage = getSarvamLanguage(newLanguage)
     }
+    this.isInterrupted = false
+    this.totalAudioBytes = 0
+  }
+
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
+
+    const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      console.log(`🔊 [SANPBX] Generating audio for: ${text}`)
-
-      const response = await fetch(this.sarvamConfig.baseUrl, {
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "API-Subscription-Key": this.sarvamConfig.apiKey,
+          "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: "en-IN",
-          speaker: "meera",
+          target_language_code: this.sarvamLanguage,
+          speaker: this.voice,
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 44100,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
       })
 
-      if (!response.ok) {
-        throw new Error(`Sarvam API error: ${response.status}`)
+      if (!response.ok || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+          throw new Error(`Sarvam API error: ${response.status}`)
+        }
+        return
       }
 
-      const audioData = await response.arrayBuffer()
-      const base64Audio = Buffer.from(audioData).toString("base64")
+      const responseData = await response.json()
+      const audioBase64 = responseData.audios?.[0]
 
-      // Send audio back to SanPBX
-      this.sendMessage(ws, {
-        event: "media",
-        streamId: ws.callState.streamId,
-        media: {
-          contentType: "audio/wav",
-          payload: base64Audio,
-        },
-        timestamp: new Date().toISOString(),
-      })
+      if (!audioBase64 || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
+          throw new Error("No audio data received from Sarvam API")
+        }
+        return
+      }
 
-      console.log("✅ [SANPBX] Audio sent successfully")
+      console.log(`🕐 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
+
+      if (!this.isInterrupted) {
+        await this.streamAudioOptimizedForSIP(audioBase64)
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+        this.totalAudioBytes += audioBuffer.length
+      }
     } catch (error) {
-      console.error("❌ [SANPBX] TTS generation failed:", error)
+      if (!this.isInterrupted) {
+        console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+        throw error
+      }
     }
   }
 
-  async handleDTMF(ws, message) {
-    const { digit, dtmfDurationMs } = message
-    console.log(`📱 [SANPBX] DTMF received: ${digit} (${dtmfDurationMs}ms)`)
+  async streamAudioOptimizedForSIP(audioBase64) {
+    if (this.isInterrupted) return
 
-    // Handle DTMF commands
-    switch (digit) {
-      case "0":
-        await this.generateAndSendAudio(ws, "You pressed zero. How can I assist you?")
-        break
-      case "1":
-        await this.generateAndSendAudio(ws, "You pressed one. Connecting you to support.")
-        break
-      case "*":
-        await this.generateAndSendAudio(ws, "You pressed star. Returning to main menu.")
-        break
-      case "#":
-        await this.generateAndSendAudio(ws, "You pressed hash. Thank you for calling.")
-        break
-      default:
-        await this.generateAndSendAudio(ws, `You pressed ${digit}.`)
-    }
+    const audioBuffer = Buffer.from(audioBase64, "base64")
+    const streamingSession = { interrupt: false }
+    this.currentAudioStreaming = streamingSession
 
-    this.sendMessage(ws, {
-      event: "dtmf_ack",
-      digit,
-      callId: ws.callState.callId,
-      streamId: ws.callState.streamId,
-      timestamp: new Date().toISOString(),
-    })
-  }
+    const SAMPLE_RATE = 8000
+    const BYTES_PER_SAMPLE = 2
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
 
-  async handleTransferCall(ws, message) {
-    const { transferTo, streamId } = message
-    console.log(`📞 [SANPBX] Transfer call request - Stream: ${streamId}, Transfer to: ${transferTo}`)
+    let position = 0
+    let chunkIndex = 0
+    let successfulChunks = 0
 
-    // Acknowledge transfer request
-    this.sendMessage(ws, {
-      event: "transfer-call-response",
-      status: true,
-      message: "Transfer request acknowledged",
-      data: { transferTo },
-      status_code: 200,
-      streamId,
-      callId: ws.callState.callId,
-      timestamp: new Date().toISOString(),
-    })
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = audioBuffer.length - position
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+      const chunk = audioBuffer.slice(position, position + chunkSize)
 
-    // Generate farewell message
-    await this.generateAndSendAudio(ws, "Transferring your call now. Please hold.")
-  }
+      const mediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: {
+          payload: chunk.toString("base64"),
+        },
+      }
 
-  async handleHangupCall(ws, message) {
-    const { streamId } = message
-    console.log(`📞 [SANPBX] Hangup call request - Stream: ${streamId}`)
-
-    // Acknowledge hangup request
-    this.sendMessage(ws, {
-      event: "hangup-call-response",
-      status: true,
-      message: "Call hangup acknowledged",
-      data: {},
-      status_code: 200,
-      streamId,
-      callId: ws.callState.callId,
-      timestamp: new Date().toISOString(),
-    })
-
-    // Cleanup connection
-    this.cleanupConnection(ws)
-  }
-
-  async handleStop(ws, message) {
-    const { disconnectedBy } = message
-    console.log(`📞 [SANPBX] Call stopped - Disconnected by: ${disconnectedBy}`)
-
-    this.cleanupConnection(ws)
-
-    this.sendMessage(ws, {
-      event: "stop_ack",
-      callId: ws.callState.callId,
-      streamId: ws.callState.streamId,
-      message: "Call termination acknowledged",
-      timestamp: new Date().toISOString(),
-    })
-  }
-
-  cleanupConnection(ws) {
-    if (ws.callState) {
-      // Close Deepgram connection
-      if (ws.callState.deepgramConnection) {
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
-          ws.callState.deepgramConnection.finish()
+          this.ws.send(JSON.stringify(mediaMessage))
+          successfulChunks++
         } catch (error) {
-          console.error("❌ [SANPBX] Error closing Deepgram connection:", error)
+          break
+        }
+      } else {
+        break
+      }
+
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
+        const delayMs = Math.max(chunkDurationMs - 2, 10)
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
+
+      position += chunkSize
+      chunkIndex++
+    }
+
+    this.currentAudioStreaming = null
+  }
+
+  getStats() {
+    return {
+      totalAudioBytes: this.totalAudioBytes,
+    }
+  }
+}
+
+// Static agent configuration - No database lookup needed
+const getStaticAgentConfig = () => {
+  return {
+    ...STATIC_CONFIG,
+    _id: "static_agent_001",
+    accountSid: "static_account",
+    callerId: "static_caller"
+  }
+}
+
+// Main WebSocket server setup with enhanced live transcript functionality
+const setupSanPbxWebSocketServer = (wss) => {
+  wss.on("connection", (ws, req) => {
+    const url = new URL(req.url, `http://${req.headers.host}`)
+    const urlParams = Object.fromEntries(url.searchParams.entries())
+
+    // Session state
+    let streamSid = null
+    let conversationHistory = []
+    let isProcessing = false
+    let userUtteranceBuffer = ""
+    let lastProcessedText = ""
+    let currentTTS = null
+    let currentLanguage = STATIC_CONFIG.language // Use static language
+    let processingRequestId = 0
+    let callLogger = null
+    let callDirection = "inbound"
+    let agentConfig = null
+    let userName = null
+
+    // Deepgram WebSocket connection
+    let deepgramWs = null
+    let deepgramReady = false
+    let deepgramAudioQueue = []
+    let sttTimer = null
+
+    const connectToDeepgram = async () => {
+      try {
+        const deepgramLanguage = getDeepgramLanguage(currentLanguage)
+
+        const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
+        deepgramUrl.searchParams.append("sample_rate", "8000")
+        deepgramUrl.searchParams.append("channels", "1")
+        deepgramUrl.searchParams.append("encoding", "linear16")
+        deepgramUrl.searchParams.append("model", "nova-2")
+        deepgramUrl.searchParams.append("language", deepgramLanguage)
+        deepgramUrl.searchParams.append("interim_results", "true")
+        deepgramUrl.searchParams.append("smart_format", "true")
+        deepgramUrl.searchParams.append("endpointing", "300")
+
+        deepgramWs = new WebSocket(deepgramUrl.toString(), {
+          headers: { Authorization: `Token ${API_KEYS.deepgram}` },
+        })
+
+        deepgramWs.onopen = () => {
+          console.log("🎤 [DEEPGRAM] Connection established")
+          deepgramReady = true
+          console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
+          deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
+          deepgramAudioQueue = []
+        }
+
+        deepgramWs.onmessage = async (event) => {
+          const data = JSON.parse(event.data)
+          await handleDeepgramResponse(data)
+        }
+
+        deepgramWs.onerror = (error) => {
+          console.log("❌ [DEEPGRAM] Connection error:", error.message)
+          deepgramReady = false
+        }
+
+        deepgramWs.onclose = () => {
+          console.log("🔌 [DEEPGRAM] Connection closed")
+          deepgramReady = false
+        }
+      } catch (error) {
+        // Silent error handling
+      }
+    }
+
+    const handleDeepgramResponse = async (data) => {
+      if (data.type === "Results") {
+        if (!sttTimer) {
+          sttTimer = createTimer("STT_TRANSCRIPTION")
+        }
+
+        const transcript = data.channel?.alternatives?.[0]?.transcript
+        const is_final = data.is_final
+
+        if (transcript?.trim()) {
+          if (currentTTS && isProcessing) {
+            currentTTS.interrupt()
+            isProcessing = false
+            processingRequestId++
+          }
+
+          if (is_final) {
+            console.log(`🕐 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+            sttTimer = null
+
+            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
+
+            if (callLogger && transcript.trim()) {
+              const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
+              callLogger.logUserTranscript(transcript.trim(), detectedLang)
+            }
+
+            await processUserUtterance(userUtteranceBuffer)
+            userUtteranceBuffer = ""
+          }
+        }
+      } else if (data.type === "UtteranceEnd") {
+        if (sttTimer) {
+          console.log(`🕐 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${userUtteranceBuffer.trim()}"`)
+          sttTimer = null
+        }
+
+        if (userUtteranceBuffer.trim()) {
+          if (callLogger && userUtteranceBuffer.trim()) {
+            const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
+            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
+          }
+
+          await processUserUtterance(userUtteranceBuffer)
+          userUtteranceBuffer = ""
+        }
+      }
+    }
+
+    const processUserUtterance = async (text) => {
+      if (!text.trim() || text === lastProcessedText) return
+
+      console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
+      console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
+      console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
+
+      if (currentTTS) {
+        console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
+        currentTTS.interrupt()
+      }
+
+      isProcessing = true
+      lastProcessedText = text
+      const currentRequestId = ++processingRequestId
+
+      try {
+        const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
+        console.log("🌍 [USER-UTTERANCE] Detected Language:", detectedLanguage)
+
+        if (detectedLanguage !== currentLanguage) {
+          console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
+          currentLanguage = detectedLanguage
+        }
+
+        // Check if user wants to disconnect (fast detection to minimize latency)
+        console.log("🔍 [USER-UTTERANCE] Checking disconnection intent...")
+        
+        // Start disconnection detection in parallel with other processing
+        const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
+        
+        // Continue with other processing while checking disconnection
+        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
+        const openaiPromise = processWithOpenAI(
+          text,
+          conversationHistory,
+          detectedLanguage,
+          callLogger,
+          agentConfig,
+        )
+        
+        // Wait for both operations to complete
+        const [disconnectionIntent, aiResponse] = await Promise.all([
+          disconnectionCheckPromise,
+          openaiPromise
+        ])
+        
+        if (disconnectionIntent === "DISCONNECT") {
+          console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
+          
+          // Wait 2 seconds to ensure last message is processed, then terminate
+          setTimeout(async () => {
+            if (callLogger) {
+              try {
+                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
+                console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
+              } catch (err) {
+                console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
+              }
+            }
+          }, 2000)
+          
+          return
+        }
+
+        if (processingRequestId === currentRequestId && aiResponse) {
+          console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
+          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+          
+          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          await currentTTS.synthesizeAndStream(aiResponse)
+
+          conversationHistory.push(
+            { role: "user", content: text },
+            { role: "assistant", content: aiResponse }
+          )
+
+          if (conversationHistory.length > 10) {
+            conversationHistory = conversationHistory.slice(-10)
+          }
+          
+          console.log("✅ [USER-UTTERANCE] Processing completed")
+        } else {
+          console.log("⭐️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
+        }
+      } catch (error) {
+        console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
+      } finally {
+        if (processingRequestId === currentRequestId) {
+          isProcessing = false
+        }
+        console.log("🗣️ [USER-UTTERANCE] ======================================")
+      }
+    }
+
+    ws.on("message", async (message) => {
+      try {
+        const messageStr = message.toString()
+
+        if (messageStr === "EOS" || messageStr === "BOS" || !messageStr.startsWith("{")) {
+          return
+        }
+
+        const data = JSON.parse(messageStr)
+
+        switch (data.event) {
+          case "connected":
+            console.log("🔗 [SIP-CONNECTION] WebSocket connected")
+            break
+
+          case "start": {
+            streamSid = data.streamSid || data.start?.streamSid
+            const accountSid = data.start?.accountSid
+
+            // Log all incoming SIP data
+            console.log("📞 [SIP-START] ========== CALL START DATA ==========")
+            console.log("📞 [SIP-START] Raw data:", JSON.stringify(data, null, 2))
+            console.log("📞 [SIP-START] URL Parameters:", JSON.stringify(urlParams, null, 2))
+            console.log("📞 [SIP-START] StreamSID:", streamSid)
+            console.log("📞 [SIP-START] AccountSID:", accountSid)
+
+            let mobile = null;
+            let callerId = null;
+            let customParams = {};
+            let czdataDecoded = null;
+            if (urlParams.czdata) {
+              czdataDecoded = decodeCzdata(urlParams.czdata);
+              if (czdataDecoded) {
+                customParams = czdataDecoded;
+                userName = (
+                  czdataDecoded.name ||
+                  czdataDecoded.Name ||
+                  czdataDecoded.full_name ||
+                  czdataDecoded.fullName ||
+                  czdataDecoded.customer_name ||
+                  czdataDecoded.customerName ||
+                  czdataDecoded.CustomerName ||
+                  czdataDecoded.candidate_name ||
+                  czdataDecoded.contactName ||
+                  null
+                );
+                console.log("[SIP-START] Decoded czdata customParams:", customParams);
+                if (userName) {
+                  console.log("[SIP-START] User Name (czdata):", userName);
+                }
+              }
+            }
+
+            if (data.start?.from) {
+              mobile = data.start.from;
+            } else if (urlParams.caller_id) {
+              mobile = urlParams.caller_id;
+            } else if (data.start?.extraData?.CallCli) {
+              mobile = data.start.extraData.CallCli;
+            }
+
+            let to = null
+            if (data.start?.to) {
+              to = data.start.to
+            } else if (urlParams.did) {
+              to = urlParams.did
+            } else if (data.start?.extraData?.DID) {
+              to = data.start.extraData.DID
+            }
+
+            let extraData = null;
+
+            if (data.start?.extraData) {
+              extraData = decodeExtraData(data.start.extraData);
+            } else if (urlParams.extra) {
+              extraData = decodeExtraData(urlParams.extra);
+            }
+
+            if (extraData?.CallCli) {
+              mobile = extraData.CallCli;
+            }
+            if (extraData?.CallVaId) {
+              callerId = extraData.CallVaId;
+            }
+            if (!userName && extraData) {
+              userName = (
+                extraData.name ||
+                extraData.Name ||
+                extraData.full_name ||
+                extraData.fullName ||
+                extraData.customer_name ||
+                extraData.customerName ||
+                extraData.CustomerName ||
+                extraData.candidate_name ||
+                extraData.candidateName ||
+                null
+              );
+              if (userName) {
+                console.log("[SIP-START] User Name (extraData):", userName);
+              }
+            }
+
+            if (!userName && urlParams.name) {
+              userName = urlParams.name;
+              console.log("[SIP-START] User Name (url param):", userName);
+            }
+
+            if (extraData && extraData.CallDirection === "OutDial") {
+              callDirection = "outbound";
+            } else if (urlParams.direction === "OutDial") {
+              callDirection = "outbound";
+              if (!extraData && urlParams.extra) {
+                extraData = decodeExtraData(urlParams.extra);
+              }
+            } else {
+              callDirection = "inbound";
+            }
+
+            // Log parsed call information
+            console.log("📞 [SIP-START] ========== PARSED CALL INFO ==========")
+            console.log("📞 [SIP-START] Call Direction:", callDirection)
+            console.log("📞 [SIP-START] From/Mobile:", mobile)
+            console.log("📞 [SIP-START] To/DID:", to)
+            console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
+            console.log("📞 [SIP-START] ======================================")
+
+            // Use static agent configuration instead of database lookup
+            console.log("🔍 [SIP-AGENT-CONFIG] ========== USING STATIC CONFIG ==========")
+            console.log("🔍 [SIP-AGENT-CONFIG] Agent Name:", STATIC_CONFIG.agentName)
+            console.log("🔍 [SIP-AGENT-CONFIG] Language:", STATIC_CONFIG.language)
+            console.log("🔍 [SIP-AGENT-CONFIG] Voice Selection:", STATIC_CONFIG.voiceSelection)
+            console.log("🔍 [SIP-AGENT-CONFIG] First Message:", STATIC_CONFIG.firstMessage)
+            console.log("🔍 [SIP-AGENT-CONFIG] System Prompt:", STATIC_CONFIG.systemPrompt)
+            console.log("✅ [SIP-AGENT-CONFIG] Static configuration loaded successfully")
+            console.log("✅ [SIP-AGENT-CONFIG] ======================================")
+
+            agentConfig = getStaticAgentConfig()
+            ws.sessionAgentConfig = agentConfig
+            currentLanguage = agentConfig.language || "en"
+
+            console.log("🎯 [SIP-CALL-SETUP] ========== CALL SETUP ==========")
+            console.log("🎯 [SIP-CALL-SETUP] Current Language:", currentLanguage)
+            console.log("🎯 [SIP-CALL-SETUP] Mobile Number:", mobile)
+            console.log("🎯 [SIP-CALL-SETUP] Call Direction:", callDirection)
+            console.log("🎯 [SIP-CALL-SETUP] Client ID:", agentConfig.clientId || accountSid)
+            console.log("🎯 [SIP-CALL-SETUP] StreamSID:", streamSid)
+            console.log("🎯 [SIP-CALL-SETUP] CallSID:", data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid)
+
+            // Create enhanced call logger with live transcript capability
+            callLogger = new EnhancedCallLogger(
+              agentConfig.clientId || accountSid,
+              mobile,
+              callDirection
+            );
+            callLogger.customParams = customParams;
+            callLogger.callerId = callerId || undefined;
+            callLogger.streamSid = streamSid;
+            callLogger.callSid = data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid;
+            callLogger.accountSid = accountSid;
+            callLogger.ws = ws; // Store WebSocket reference
+
+            // Create initial call log entry immediately (static implementation)
+            try {
+              await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
+              console.log("✅ [SIP-CALL-SETUP] Initial call log created successfully")
+              console.log("✅ [SIP-CALL-SETUP] Call Log ID:", callLogger.callLogId)
+            } catch (error) {
+              console.log("❌ [SIP-CALL-SETUP] Failed to create initial call log:", error.message)
+              // Continue anyway - fallback will create log at end
+            }
+
+            console.log("🎯 [SIP-CALL-SETUP] Call Logger initialized")
+            console.log("🎯 [SIP-CALL-SETUP] Connecting to Deepgram...")
+
+            await connectToDeepgram()
+
+            let greeting = agentConfig.firstMessage || STATIC_CONFIG.firstMessage
+            if (userName && userName.trim()) {
+              const base = agentConfig.firstMessage || STATIC_CONFIG.firstMessage
+              greeting = `Hello ${userName.trim()}! ${base}`
+            }
+
+            console.log("🎯 [SIP-CALL-SETUP] Greeting Message:", greeting)
+            console.log("🎯 [SIP-CALL-SETUP] ======================================")
+
+            if (callLogger) {
+              callLogger.logAIResponse(greeting, currentLanguage)
+            }
+
+            console.log("🎤 [SIP-TTS] Starting greeting TTS...")
+            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            await tts.synthesizeAndStream(greeting)
+            console.log("✅ [SIP-TTS] Greeting TTS completed")
+            break
+          }
+
+          case "media":
+            if (data.media?.payload) {
+              const audioBuffer = Buffer.from(data.media.payload, "base64")
+              
+              // Log media stats periodically (every 1000 packets to avoid spam)
+              if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
+              ws.mediaPacketCount++
+              
+              if (ws.mediaPacketCount % 1000 === 0) {
+                console.log("🎵 [SIP-MEDIA] Audio packets received:", ws.mediaPacketCount)
+              }
+
+              if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+                deepgramWs.send(audioBuffer)
+              } else {
+                deepgramAudioQueue.push(audioBuffer)
+                if (deepgramAudioQueue.length % 100 === 0) {
+                  console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+                }
+              }
+            }
+            break
+
+          case "stop":
+            console.log("🛑 [SIP-STOP] ========== CALL END ==========")
+            console.log("🛑 [SIP-STOP] StreamSID:", streamSid)
+            console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
+            console.log("🛑 [SIP-STOP] Mobile:", mobile)
+            
+            if (callLogger) {
+              const stats = callLogger.getStats()
+              console.log("🛑 [SIP-STOP] Call Stats:", JSON.stringify(stats, null, 2))
+              
+              try {
+                console.log("💾 [SIP-STOP] Saving final call log...")
+                const savedLog = await callLogger.saveToDatabase("maybe")
+                console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
+              } catch (error) {
+                console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
+              } finally {
+                callLogger.cleanup()
+              }
+            }
+
+            if (deepgramWs?.readyState === WebSocket.OPEN) {
+              console.log("🛑 [SIP-STOP] Closing Deepgram connection...")
+              deepgramWs.close()
+            }
+            
+            console.log("🛑 [SIP-STOP] ======================================")
+            break
+
+          default:
+            break
+        }
+      } catch (error) {
+        // Silent error handling
+      }
+    })
+
+    ws.on("close", async () => {
+      console.log("🔌 [SIP-CLOSE] ========== WEBSOCKET CLOSED ==========")
+      console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
+      console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
+      
+      if (callLogger) {
+        const stats = callLogger.getStats()
+        console.log("🔌 [SIP-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
+        
+        try {
+          console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
+          const savedLog = await callLogger.saveToDatabase("maybe")
+          console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
+        } catch (error) {
+          console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
+        } finally {
+          callLogger.cleanup()
         }
       }
 
-      // Remove from active calls
-      if (ws.callState.streamId) {
-        this.activeCalls.delete(ws.callState.streamId)
+      if (deepgramWs?.readyState === WebSocket.OPEN) {
+        console.log("🔌 [SIP-CLOSE] Closing Deepgram connection...")
+        deepgramWs.close()
       }
 
-      // Reset call state
-      ws.callState.isActive = false
-    }
-
-    console.log("🧹 [SANPBX] Connection cleanup completed")
-  }
-
-  sendMessage(ws, message) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message))
-    }
-  }
-
-  sendError(ws, error, details) {
-    this.sendMessage(ws, {
-      event: "error",
-      error,
-      details,
-      timestamp: new Date().toISOString(),
+      console.log("🔌 [SIP-CLOSE] Resetting session state...")
+      
+      // Reset state
+      streamSid = null
+      conversationHistory = []
+      isProcessing = false
+      userUtteranceBuffer = ""
+      lastProcessedText = ""
+      deepgramReady = false
+      deepgramAudioQueue = []
+      currentTTS = null
+      currentLanguage = STATIC_CONFIG.language
+      processingRequestId = 0
+      callLogger = null
+      callDirection = "inbound"
+      agentConfig = null
+      sttTimer = null
+      
+      console.log("🔌 [SIP-CLOSE] ======================================")
     })
-  }
 
-  // Get active calls statistics
-  getStats() {
+    ws.on("error", (error) => {
+      console.log("❌ [SIP-ERROR] WebSocket error:", error.message)
+      console.log("❌ [SIP-ERROR] StreamSID:", streamSid)
+      console.log("❌ [SIP-ERROR] Call Direction:", callDirection)
+    })
+  })
+}
+
+// Global map to store active call loggers by streamSid
+const activeCallLoggers = new Map()
+
+// Global sequence counter for stop events
+let stopEventSequence = 1
+
+/**
+ * Terminate a call by streamSid - Static implementation
+ * @param {string} streamSid - The stream SID to terminate
+ * @param {string} reason - Reason for termination
+ * @returns {Object} Result of termination attempt
+ */
+const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination') => {
+  try {
+    console.log(`🛑 [MANUAL-TERMINATION] Attempting to terminate call with streamSid: ${streamSid}`)
+    
+    // Check if we have an active call logger for this streamSid
+    const callLogger = activeCallLoggers.get(streamSid)
+    
+    if (callLogger) {
+      console.log(`🛑 [MANUAL-TERMINATION] Found active call logger, terminating gracefully...`)
+      console.log(`🛑 [MANUAL-TERMINATION] Call Logger Info:`, callLogger.getCallInfo())
+      
+      // Check WebSocket state
+      if (callLogger.ws) {
+        console.log(`🛑 [MANUAL-TERMINATION] WebSocket State: ${callLogger.ws.readyState} (0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)`)
+      }
+      
+      await callLogger.disconnectCall(reason)
+      return {
+        success: true,
+        message: 'Call terminated successfully',
+        streamSid,
+        reason,
+        method: 'graceful_termination'
+      }
+    } else {
+      console.log(`🛑 [MANUAL-TERMINATION] No active call logger found for streamSid: ${streamSid}`)
+      
+      return {
+        success: false,
+        message: 'No active calls found with this streamSid (static mode - no database)',
+        streamSid,
+        reason,
+        method: 'static_mode'
+      }
+    }
+  } catch (error) {
+    console.error(`❌ [MANUAL-TERMINATION] Error terminating call:`, error.message)
     return {
-      activeCalls: this.activeCalls.size,
-      calls: Array.from(this.activeCalls.values()).map((call) => ({
-        callId: call.callId,
-        channelId: call.channelId,
-        callerId: call.callerId,
-        callDirection: call.callDirection,
-        duration: Date.now() - call.startTime.getTime(),
-      })),
+      success: false,
+      message: 'Failed to terminate call',
+      streamSid,
+      reason,
+      method: 'error',
+      error: error.message
     }
   }
 }
 
-// Export setup function
-function setupSanPbxWebSocketServer(wss) {
-  const sanpbxServer = new SanPBXWebSocketServer()
-  sanpbxServer.setupWebSocketServer(wss)
-  return sanpbxServer
-}
-
-module.exports = {
-  setupSanPbxWebSocketServer,
-  SanPBXWebSocketServer,
+module.exports = { 
+  setupSanPbxWebSocketServer, 
+  terminateCallByStreamSid,
+  // Export termination methods for external use
+  terminationMethods: {
+    graceful: (callLogger, message, language) => callLogger?.gracefulCallEnd(message, language),
+    fast: (callLogger, reason) => callLogger?.fastTerminateCall(reason),
+    ultraFast: (callLogger, message, language, reason) => callLogger?.ultraFastTerminateWithMessage(message, language, reason)
+  },
+  // Export static configuration for external use
+  STATIC_CONFIG
 }
