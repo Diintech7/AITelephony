@@ -71,6 +71,42 @@ const setupUnifiedVoiceServer = (ws) => {
   let sttFailed = false; // Track STT failure state
 
   /**
+   * Alternative streaming method - try different formats
+   */
+  const streamAudioAlternative = async (audioBase64) => {
+    console.log('[STREAM-ALT] Trying alternative streaming method');
+    
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+    
+    // Try method 1: Larger chunks (20ms)
+    const CHUNK_SIZE = 320; // 20ms chunks
+    let position = 0;
+    
+    while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+      const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
+      
+      const mediaMessage = {
+        event: 'media',
+        streamSid: streamSid,
+        media: {
+          payload: chunk.toString('base64')
+        }
+      };
+
+      try {
+        ws.send(JSON.stringify(mediaMessage));
+        position += CHUNK_SIZE;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      } catch (error) {
+        console.error('[STREAM-ALT] Error:', error.message);
+        break;
+      }
+    }
+    
+    console.log('[STREAM-ALT] Alternative streaming completed');
+  };
+
+  /**
    * Generate a simple tone as fallback audio
    */
   const generateSimpleTone = (frequency = 440, duration = 0.5) => {
@@ -148,7 +184,14 @@ const setupUnifiedVoiceServer = (ws) => {
       // Add a small delay before streaming to ensure call is ready
       await new Promise(resolve => setTimeout(resolve, 100));
       
+      // Try primary streaming method
       await streamAudioToCall(audioBase64);
+      
+      // If that didn't work, try alternative after a delay
+      setTimeout(async () => {
+        console.log('[TTS] Trying alternative streaming method in case primary failed');
+        await streamAudioAlternative(audioBase64);
+      }, 500);
       
     } catch (error) {
       console.error('[TTS] Error:', error.message);
@@ -174,6 +217,24 @@ const setupUnifiedVoiceServer = (ws) => {
     const streamStart = Date.now();
     
     console.log(`[STREAM] Starting audio stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`);
+    console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`);
+    
+    // Send a test message first to verify WebSocket is working
+    const testMessage = {
+      event: 'test',
+      streamSid: streamSid,
+      timestamp: Date.now()
+    };
+    
+    try {
+      ws.send(JSON.stringify(testMessage));
+      console.log('[STREAM] Test message sent successfully');
+    } catch (error) {
+      console.error('[STREAM] Failed to send test message:', error.message);
+      return;
+    }
+    
+    let chunksSuccessfullySent = 0;
     
     while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
       const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
@@ -190,7 +251,19 @@ const setupUnifiedVoiceServer = (ws) => {
         }
       };
 
-      ws.send(JSON.stringify(mediaMessage));
+      try {
+        ws.send(JSON.stringify(mediaMessage));
+        chunksSuccessfullySent++;
+        
+        // Log every 50th chunk to monitor progress
+        if (chunksSuccessfullySent % 50 === 0) {
+          console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`);
+        }
+      } catch (error) {
+        console.error(`[STREAM] Failed to send chunk ${chunksSuccessfullySent}:`, error.message);
+        break;
+      }
+
       position += CHUNK_SIZE;
       
       // Maintain real-time streaming pace
@@ -200,18 +273,23 @@ const setupUnifiedVoiceServer = (ws) => {
     }
     
     // Add a small silence buffer at the end
-    const silenceChunk = Buffer.alloc(CHUNK_SIZE);
-    const silenceMessage = {
-      event: 'media',
-      streamSid: streamSid,
-      media: {
-        payload: silenceChunk.toString('base64')
-      }
-    };
-    ws.send(JSON.stringify(silenceMessage));
+    try {
+      const silenceChunk = Buffer.alloc(CHUNK_SIZE);
+      const silenceMessage = {
+        event: 'media',
+        streamSid: streamSid,
+        media: {
+          payload: silenceChunk.toString('base64')
+        }
+      };
+      ws.send(JSON.stringify(silenceMessage));
+      console.log('[STREAM] End silence sent');
+    } catch (error) {
+      console.error('[STREAM] Failed to send end silence:', error.message);
+    }
     
     const streamDuration = Date.now() - streamStart;
-    console.log(`[STREAM] Completed in ${streamDuration}ms`);
+    console.log(`[STREAM] Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`);
   };
 
   /**
@@ -308,7 +386,7 @@ const setupUnifiedVoiceServer = (ws) => {
       }
     });
 
-    deepgramWs.on('error', async (error) => {
+    deepgramWs.on('error', (error) => {
       console.error(`[STT] Deepgram error (attempt ${attemptCount + 1}):`, error.message);
       
       // Try different connection approaches
@@ -321,9 +399,11 @@ const setupUnifiedVoiceServer = (ws) => {
         console.error('[STT] All Deepgram connection attempts failed. Check API key and permissions.');
         sttFailed = true;
         
-        // Provide feedback to user about STT failure
+        // Provide feedback to user about STT failure (without await - fire and forget)
         const fallbackMessage = "I'm having trouble with speech recognition right now, but I can still help you. Please use the keypad to navigate options.";
-        await synthesizeAndStreamAudio(fallbackMessage);
+        synthesizeAndStreamAudio(fallbackMessage).catch(err => 
+          console.error('[STT] Fallback message error:', err.message)
+        );
       }
     });
 
@@ -479,7 +559,16 @@ const setupUnifiedVoiceServer = (ws) => {
           accountSid = data.start?.accountSid;
           
           console.log('[CZ] StreamSID:', streamSid);
+          console.log('[CZ] CallSID:', callSid);
+          console.log('[CZ] AccountSID:', accountSid);
+          console.log('[CZ] Tracks:', JSON.stringify(data.start?.tracks));
+          console.log('[CZ] Media Format:', JSON.stringify(data.start?.mediaFormat));
           
+          // Log custom parameters if present
+          if (data.start?.customParameters) {
+            console.log('[CZ] Custom Parameters:', data.start.customParameters);
+          }
+
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0);
           
