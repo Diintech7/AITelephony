@@ -243,64 +243,6 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
   }
 }
 
-// Fallback to OpenAI for uncertain cases
-const detectLanguageWithOpenAI = async (text) => {
-  const timer = createTimer("LLM_LANGUAGE_DETECTION")
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code (hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur). 
-
-Examples:
-- "Hello, how are you?" → en
-- "What's our name?" → en
-- "नमस्ते, आप कैसे हैं?" → hi
-- "আপনি কেমন আছেন?" → bn
-- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
-- "तुम्ही कसे आहात?" → mr
-- "તમે કેમ છો?" → gu
-
-Return only the language code, nothing else.`,
-          },
-          {
-            role: "user",
-            content: text,
-          },
-        ],
-        max_tokens: 10,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`Language detection failed: ${response.status}`)
-    }
-
-    const data = await response.json()
-    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
-
-    const validLanguages = Object.keys(LANGUAGE_MAPPING)
-    if (validLanguages.includes(detectedLang)) {
-      console.log(`🕐 [LLM-LANG-DETECT] ${timer.end()}ms - Detected: ${detectedLang}`)
-      return detectedLang
-    }
-
-    return "en"
-  } catch (error) {
-    console.log(`❌ [LLM-LANG-DETECT] ${timer.end()}ms - Error: ${error.message}`)
-    return "en"
-  }
-}
-
 // Enhanced hybrid language detection
 const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
   const francResult = detectLanguageWithFranc(text)
@@ -318,10 +260,6 @@ const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
   
   if (francResult === 'hi' || francResult === 'en') {
     return francResult
-  }
-  
-  if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
-    return await detectLanguageWithOpenAI(text)
   }
   
   return francResult
@@ -385,94 +323,6 @@ class EnhancedCallLogger {
     }
   }
 
-  // Method to disconnect the call - OPTIMIZED FOR PARALLEL EXECUTION
-  async disconnectCall(reason = 'user_disconnected') {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.log("⚠️ [CALL-DISCONNECT] WebSocket not available for disconnection")
-      return false
-    }
-
-    try {
-      console.log(`🛑 [CALL-DISCONNECT] Disconnecting call: ${reason}`)
-      
-      // Send stop event to terminate the call with proper structure
-      const stopMessage = {
-        event: "stop",
-        sequenceNumber: stopEventSequence++,
-        stop: {
-          accountSid: this.accountSid || "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-          callSid: this.callSid || "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-        },
-        streamSid: this.streamSid
-      }
-      
-      console.log(`🛑 [CALL-DISCONNECT] Sending stop event:`, JSON.stringify(stopMessage, null, 2))
-      
-      // Execute all disconnection operations in parallel for minimal latency
-      const disconnectionPromises = []
-      
-      // 1. Send stop event immediately (non-blocking)
-      if (this.ws.readyState === WebSocket.OPEN) {
-        try {
-          this.ws.send(JSON.stringify(stopMessage))
-          console.log(`🛑 [CALL-DISCONNECT] Stop event sent successfully`)
-        } catch (error) {
-          console.log(`⚠️ [CALL-DISCONNECT] Error sending stop event: ${error.message}`)
-        }
-      }
-      
-      // 2. Send fallback close event after short delay (non-blocking)
-      const fallbackClosePromise = new Promise((resolve) => {
-        setTimeout(() => {
-          if (this.ws.readyState === WebSocket.OPEN) {
-            const closeMessage = {
-              event: "close",
-              streamSid: this.streamSid,
-              reason: reason
-            }
-            console.log(`🛑 [CALL-DISCONNECT] Sending fallback close event:`, JSON.stringify(closeMessage, null, 2))
-            
-            try {
-              this.ws.send(JSON.stringify(closeMessage))
-              console.log(`🛑 [CALL-DISCONNECT] Fallback close event sent`)
-            } catch (error) {
-              console.log(`⚠️ [CALL-DISCONNECT] Error sending fallback close: ${error.message}`)
-            }
-          }
-          resolve()
-        }, 500) // Reduced from 1000ms to 500ms for faster disconnection
-      })
-      disconnectionPromises.push(fallbackClosePromise)
-      
-      // 3. Force close WebSocket after delay (non-blocking)
-      const forceClosePromise = new Promise((resolve) => {
-        setTimeout(() => {
-          if (this.ws.readyState === WebSocket.OPEN) {
-            console.log(`🛑 [CALL-DISCONNECT] Force closing WebSocket connection`)
-            this.ws.close(1000, `Call terminated: ${reason}`)
-          }
-          resolve()
-        }, 1500) // Reduced from 2000ms to 1500ms for faster disconnection
-      })
-      disconnectionPromises.push(forceClosePromise)
-      
-      // 4. Update call log to mark as inactive (static implementation - just log)
-      const callLogUpdatePromise = Promise.resolve().then(() => {
-        console.log(`📝 [CALL-DISCONNECT] Call ${this.callLogId} marked as inactive (static mode)`)
-      }).catch(err => console.log(`⚠️ [CALL-DISCONNECT] Call log update error: ${err.message}`))
-      disconnectionPromises.push(callLogUpdatePromise)
-      
-      // Wait for all disconnection operations to complete
-      await Promise.allSettled(disconnectionPromises)
-      
-      console.log("✅ [CALL-DISCONNECT] Call disconnected successfully")
-      return true
-    } catch (error) {
-      console.log(`❌ [CALL-DISCONNECT] Error disconnecting call: ${error.message}`)
-      return false
-    }
-  }
-
   // Method to get call information for external disconnection
   getCallInfo() {
     return {
@@ -483,235 +333,6 @@ class EnhancedCallLogger {
       clientId: this.clientId,
       mobile: this.mobile,
       isActive: this.isCallLogCreated && this.callLogId
-    }
-  }
-
-  // Method to gracefully end call with goodbye message - PARALLEL EXECUTION
-  async gracefulCallEnd(goodbyeMessage = "Thank you for your time. Have a great day!", language = "en") {
-    try {
-      console.log("👋 [GRACEFUL-END] Ending call gracefully with goodbye message")
-      
-      // Log the goodbye message
-      this.logAIResponse(goodbyeMessage, language)
-      
-      // Update call log immediately (static implementation)
-      const callLogUpdate = Promise.resolve().then(() => {
-        console.log(`📝 [GRACEFUL-END] Call log updated (static mode)`)
-      }).catch(err => console.log(`⚠️ [GRACEFUL-END] Call log update error: ${err.message}`))
-      
-      // Start TTS synthesis for goodbye message (non-blocking)
-      const ttsPromise = this.synthesizeGoodbyeMessage(goodbyeMessage, language)
-      
-      // Start disconnection process in parallel (non-blocking)
-      const disconnectPromise = this.disconnectCall('graceful_termination')
-      
-      // Execute all operations in parallel for minimal latency
-      await Promise.allSettled([
-        callLogUpdate,
-        ttsPromise,
-        disconnectPromise
-      ])
-      
-      console.log("✅ [GRACEFUL-END] All operations completed in parallel")
-      return true
-    } catch (error) {
-      console.log(`❌ [GRACEFUL-END] Error in graceful call end: ${error.message}`)
-      return false
-    }
-  }
-
-  // Synthesize goodbye message without waiting for completion
-  async synthesizeGoodbyeMessage(message, language) {
-    try {
-      console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
-      
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
-        
-        // Start TTS synthesis but don't wait for completion
-        tts.synthesizeAndStream(message).catch(err => 
-          console.log(`⚠️ [GRACEFUL-END] TTS error: ${err.message}`)
-        )
-        
-        console.log("✅ [GRACEFUL-END] Goodbye message TTS started")
-      } else {
-        console.log("⚠️ [GRACEFUL-END] WebSocket not available for TTS")
-      }
-    } catch (error) {
-      console.log(`❌ [GRACEFUL-END] TTS synthesis error: ${error.message}`)
-    }
-  }
-
-  // Fast parallel call termination for minimal latency
-  async fastTerminateCall(reason = 'fast_termination') {
-    try {
-      console.log(`⚡ [FAST-TERMINATE] Fast terminating call: ${reason}`)
-      
-      // Execute all termination operations in parallel for minimal latency
-      const terminationPromises = []
-      
-      // 1. Send stop event immediately (non-blocking)
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const stopMessage = {
-          event: "stop",
-          sequenceNumber: stopEventSequence++,
-          stop: {
-            accountSid: this.accountSid || "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-            callSid: this.callSid || "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-          },
-          streamSid: this.streamSid
-        }
-        
-        try {
-          this.ws.send(JSON.stringify(stopMessage))
-          console.log(`⚡ [FAST-TERMINATE] Stop event sent immediately`)
-        } catch (error) {
-          console.log(`⚠️ [FAST-TERMINATE] Error sending stop event: ${error.message}`)
-        }
-      }
-      
-      // 2. Update call log (static implementation)
-      if (this.callLogId) {
-        const callLogUpdate = Promise.resolve().then(() => {
-          console.log(`📝 [FAST-TERMINATE] Call log updated (static mode)`)
-        }).catch(err => console.log(`⚠️ [FAST-TERMINATE] Call log update error: ${err.message}`))
-        
-        terminationPromises.push(callLogUpdate)
-      }
-      
-      // 3. Force close WebSocket after minimal delay (non-blocking)
-      const forceClosePromise = new Promise((resolve) => {
-        setTimeout(() => {
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            console.log(`⚡ [FAST-TERMINATE] Force closing WebSocket connection`)
-            this.ws.close(1000, `Call terminated: ${reason}`)
-          }
-          resolve()
-        }, 300) // Reduced to 300ms for faster termination
-      })
-      terminationPromises.push(forceClosePromise)
-      
-      // Wait for all operations to complete
-      await Promise.allSettled(terminationPromises)
-      
-      console.log("✅ [FAST-TERMINATE] Call terminated with minimal latency")
-      return true
-    } catch (error) {
-      console.log(`❌ [FAST-TERMINATE] Error in fast termination: ${error.message}`)
-      return false
-    }
-  }
-
-  // Ultra-fast termination with goodbye message - minimal latency approach
-  async ultraFastTerminateWithMessage(goodbyeMessage = "Thank you, goodbye!", language = "en", reason = 'ultra_fast_termination') {
-    try {
-      console.log(`🚀 [ULTRA-FAST-TERMINATE] Ultra-fast termination with message: ${reason}`)
-      
-      // Execute all operations in parallel for absolute minimal latency
-      const allPromises = []
-      
-      // 1. Log the goodbye message (non-blocking)
-      this.logAIResponse(goodbyeMessage, language)
-      
-      // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
-      let ttsStarted = false
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
-        
-        // Start TTS and wait for it to begin
-        try {
-          await tts.synthesizeAndStream(goodbyeMessage)
-          ttsStarted = true
-          console.log(`🚀 [ULTRA-FAST-TERMINATE] Goodbye message TTS completed`)
-        } catch (err) {
-          console.log(`⚠️ [ULTRA-FAST-TERMINATE] TTS error: ${err.message}`)
-        }
-      }
-      
-      // 3. Send stop event after TTS starts (non-blocking)
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const stopMessage = {
-          event: "stop",
-          sequenceNumber: stopEventSequence++,
-          stop: {
-            accountSid: this.accountSid || "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-            callSid: this.callSid || "CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-          },
-          streamSid: this.streamSid
-        }
-        
-        try {
-          this.ws.send(JSON.stringify(stopMessage))
-          console.log(`🚀 [ULTRA-FAST-TERMINATE] Stop event sent after TTS`)
-        } catch (error) {
-          console.log(`⚠️ [ULTRA-FAST-TERMINATE] Error sending stop event: ${error.message}`)
-        }
-      }
-      
-      // 4. Update call log (static implementation)
-      if (this.callLogId) {
-        const callLogUpdate = Promise.resolve().then(() => {
-          console.log(`📝 [ULTRA-FAST-TERMINATE] Call log updated (static mode)`)
-        }).catch(err => console.log(`⚠️ [ULTRA-FAST-TERMINATE] Call log update error: ${err.message}`))
-        
-        allPromises.push(callLogUpdate)
-      }
-      
-      // 5. Force close WebSocket after ensuring TTS is sent (non-blocking)
-      const forceClosePromise = new Promise((resolve) => {
-        setTimeout(() => {
-          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            console.log(`🚀 [ULTRA-FAST-TERMINATE] Force closing WebSocket connection`)
-            this.ws.close(1000, `Call terminated: ${reason}`)
-          }
-          resolve()
-        }, 500) // Increased delay to ensure TTS is sent
-      })
-      allPromises.push(forceClosePromise)
-      
-      // Wait for all operations to complete
-      await Promise.allSettled(allPromises)
-      
-      console.log("✅ [ULTRA-FAST-TERMINATE] Call terminated with ultra-minimal latency")
-      return true
-    } catch (error) {
-      console.log(`❌ [ULTRA-FAST-TERMINATE] Error in ultra-fast termination: ${error.message}`)
-      return false
-    }
-  }
-
-  // Controlled termination with proper timing - ensures message is sent before disconnection
-  async controlledTerminateWithMessage(goodbyeMessage = "Thank you, goodbye!", language = "en", reason = 'controlled_termination', delayMs = 2000) {
-    try {
-      console.log(`⏱️ [CONTROLLED-TERMINATE] Controlled termination with message: ${reason}, delay: ${delayMs}ms`)
-      
-      // 1. Log the goodbye message
-      this.logAIResponse(goodbyeMessage, language)
-      
-      // 2. Start TTS synthesis and wait for completion
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
-        
-        try {
-          console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
-          await tts.synthesizeAndStream(goodbyeMessage)
-          console.log(`⏱️ [CONTROLLED-TERMINATE] TTS synthesis completed`)
-        } catch (err) {
-          console.log(`⚠️ [CONTROLLED-TERMINATE] TTS error: ${err.message}`)
-        }
-      }
-      
-      // 3. Wait for specified delay to ensure message is processed
-      console.log(`⏱️ [CONTROLLED-TERMINATE] Waiting ${delayMs}ms before disconnection...`)
-      await new Promise(resolve => setTimeout(resolve, delayMs))
-      
-      // 4. Now terminate the call
-      console.log(`⏱️ [CONTROLLED-TERMINATE] Delay completed, now terminating call...`)
-      return await this.fastTerminateCall(reason)
-      
-    } catch (error) {
-      console.log(`❌ [CONTROLLED-TERMINATE] Error in controlled termination: ${error.message}`)
-      return false
     }
   }
 
@@ -948,7 +569,7 @@ const processWithOpenAI = async (
       const needsFollowUp = !/[?]\s*$/.test(fullResponse)
       if (needsFollowUp) {
         const followUps = {
-          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूं?",
+          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
           en: "Is there anything else I can help you with?",
           bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
           ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
@@ -969,57 +590,6 @@ const processWithOpenAI = async (
   } catch (error) {
     console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
     return null
-  }
-}
-
-// Intelligent call disconnection detection using OpenAI
-const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
-  const timer = createTimer("DISCONNECTION_DETECTION")
-  try {
-    const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
-- "thank you", "thanks", "bye", "goodbye", "end call", "hang up"
-- "hold on", "wait", "not available", "busy", "call back later"
-- "not interested", "no thanks", "stop calling"
-- Any indication they want to end the conversation
-
-User message: "${userMessage}"
-
-Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they want to continue.`
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: disconnectionPrompt },
-        ],
-        max_tokens: 10,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
-      return "CONTINUE" // Default to continue on error
-    }
-
-    const data = await response.json()
-    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
-
-    if (result === "DISCONNECT") {
-      console.log(`🕐 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
-      return "DISCONNECT"
-    } else {
-      console.log(`🕐 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
-      return "CONTINUE"
-    }
-  } catch (error) {
-    console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
-    return "CONTINUE" // Default to continue on error
   }
 }
 
@@ -1322,52 +892,22 @@ const setupSanPbxWebSocketServer = (wss) => {
 
       try {
         const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
-        console.log("🌍 [USER-UTTERANCE] Detected Language:", detectedLanguage)
+        console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
 
         if (detectedLanguage !== currentLanguage) {
           console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
           currentLanguage = detectedLanguage
         }
 
-        // Check if user wants to disconnect (fast detection to minimize latency)
-        console.log("🔍 [USER-UTTERANCE] Checking disconnection intent...")
-        
-        // Start disconnection detection in parallel with other processing
-        const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
-        
-        // Continue with other processing while checking disconnection
         console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
-        const openaiPromise = processWithOpenAI(
+        const aiResponse = await processWithOpenAI(
           text,
           conversationHistory,
           detectedLanguage,
           callLogger,
           agentConfig,
+          userName,
         )
-        
-        // Wait for both operations to complete
-        const [disconnectionIntent, aiResponse] = await Promise.all([
-          disconnectionCheckPromise,
-          openaiPromise
-        ])
-        
-        if (disconnectionIntent === "DISCONNECT") {
-          console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
-          
-          // Wait 2 seconds to ensure last message is processed, then terminate
-          setTimeout(async () => {
-            if (callLogger) {
-              try {
-                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
-                console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
-              } catch (err) {
-                console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
-              }
-            }
-          }, 2000)
-          
-          return
-        }
 
         if (processingRequestId === currentRequestId && aiResponse) {
           console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
@@ -1387,7 +927,7 @@ const setupSanPbxWebSocketServer = (wss) => {
           
           console.log("✅ [USER-UTTERANCE] Processing completed")
         } else {
-          console.log("⭐️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
+          console.log("⭕ [USER-UTTERANCE] Processing skipped (newer request in progress)")
         }
       } catch (error) {
         console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
@@ -1526,12 +1066,12 @@ const setupSanPbxWebSocketServer = (wss) => {
             console.log("📞 [SIP-START] ======================================")
 
             // Use static agent configuration instead of database lookup
-            console.log("🔍 [SIP-AGENT-CONFIG] ========== USING STATIC CONFIG ==========")
-            console.log("🔍 [SIP-AGENT-CONFIG] Agent Name:", STATIC_CONFIG.agentName)
-            console.log("🔍 [SIP-AGENT-CONFIG] Language:", STATIC_CONFIG.language)
-            console.log("🔍 [SIP-AGENT-CONFIG] Voice Selection:", STATIC_CONFIG.voiceSelection)
-            console.log("🔍 [SIP-AGENT-CONFIG] First Message:", STATIC_CONFIG.firstMessage)
-            console.log("🔍 [SIP-AGENT-CONFIG] System Prompt:", STATIC_CONFIG.systemPrompt)
+            console.log("📋 [SIP-AGENT-CONFIG] ========== USING STATIC CONFIG ==========")
+            console.log("📋 [SIP-AGENT-CONFIG] Agent Name:", STATIC_CONFIG.agentName)
+            console.log("📋 [SIP-AGENT-CONFIG] Language:", STATIC_CONFIG.language)
+            console.log("📋 [SIP-AGENT-CONFIG] Voice Selection:", STATIC_CONFIG.voiceSelection)
+            console.log("📋 [SIP-AGENT-CONFIG] First Message:", STATIC_CONFIG.firstMessage)
+            console.log("📋 [SIP-AGENT-CONFIG] System Prompt:", STATIC_CONFIG.systemPrompt)
             console.log("✅ [SIP-AGENT-CONFIG] Static configuration loaded successfully")
             console.log("✅ [SIP-AGENT-CONFIG] ======================================")
 
@@ -1712,72 +1252,7 @@ const setupSanPbxWebSocketServer = (wss) => {
 // Global map to store active call loggers by streamSid
 const activeCallLoggers = new Map()
 
-// Global sequence counter for stop events
-let stopEventSequence = 1
-
-/**
- * Terminate a call by streamSid - Static implementation
- * @param {string} streamSid - The stream SID to terminate
- * @param {string} reason - Reason for termination
- * @returns {Object} Result of termination attempt
- */
-const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination') => {
-  try {
-    console.log(`🛑 [MANUAL-TERMINATION] Attempting to terminate call with streamSid: ${streamSid}`)
-    
-    // Check if we have an active call logger for this streamSid
-    const callLogger = activeCallLoggers.get(streamSid)
-    
-    if (callLogger) {
-      console.log(`🛑 [MANUAL-TERMINATION] Found active call logger, terminating gracefully...`)
-      console.log(`🛑 [MANUAL-TERMINATION] Call Logger Info:`, callLogger.getCallInfo())
-      
-      // Check WebSocket state
-      if (callLogger.ws) {
-        console.log(`🛑 [MANUAL-TERMINATION] WebSocket State: ${callLogger.ws.readyState} (0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)`)
-      }
-      
-      await callLogger.disconnectCall(reason)
-      return {
-        success: true,
-        message: 'Call terminated successfully',
-        streamSid,
-        reason,
-        method: 'graceful_termination'
-      }
-    } else {
-      console.log(`🛑 [MANUAL-TERMINATION] No active call logger found for streamSid: ${streamSid}`)
-      
-      return {
-        success: false,
-        message: 'No active calls found with this streamSid (static mode - no database)',
-        streamSid,
-        reason,
-        method: 'static_mode'
-      }
-    }
-  } catch (error) {
-    console.error(`❌ [MANUAL-TERMINATION] Error terminating call:`, error.message)
-    return {
-      success: false,
-      message: 'Failed to terminate call',
-      streamSid,
-      reason,
-      method: 'error',
-      error: error.message
-    }
-  }
-}
-
 module.exports = { 
   setupSanPbxWebSocketServer, 
-  terminateCallByStreamSid,
-  // Export termination methods for external use
-  terminationMethods: {
-    graceful: (callLogger, message, language) => callLogger?.gracefulCallEnd(message, language),
-    fast: (callLogger, reason) => callLogger?.fastTerminateCall(reason),
-    ultraFast: (callLogger, message, language, reason) => callLogger?.ultraFastTerminateWithMessage(message, language, reason)
-  },
-  // Export static configuration for external use
   STATIC_CONFIG
 }
