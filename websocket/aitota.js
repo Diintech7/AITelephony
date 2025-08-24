@@ -125,6 +125,9 @@ const setupUnifiedVoiceServer = (ws) => {
    */
   const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
     try {
+      const ttsStartTime = new Date().toISOString()
+      console.log(`[TTS-START] ${ttsStartTime} - Starting TTS streaming for: "${text}"`)
+
       console.log(`[TTS] Synthesizing: "${text}"`)
       const startTime = Date.now()
 
@@ -170,40 +173,41 @@ const setupUnifiedVoiceServer = (ws) => {
       const ttsTime = Date.now() - startTime
       console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`)
 
-      await new Promise((resolve) => setTimeout(resolve, 50)) // Reduced from 100ms
+      const streamStartTime = new Date().toISOString()
+      console.log(`[STREAM-START] ${streamStartTime} - Starting immediate streaming to SIP`)
 
-      // Try optimized primary streaming method
-      await streamAudioToCall(audioBase64)
+      await streamAudioToCallRealtime(audioBase64)
 
       setTimeout(async () => {
         console.log("[TTS] Trying alternative streaming method in case primary failed")
         await streamAudioAlternative(audioBase64)
-      }, 200) // Reduced from 500ms
+      }, 100) // Reduced from 200ms
     } catch (error) {
       console.error("[TTS] Error:", error.message)
 
       // Send a simple beep or tone as fallback
       const fallbackAudio = generateSimpleTone(440, 0.5)
-      await streamAudioToCall(fallbackAudio)
+      await streamAudioToCallRealtime(fallbackAudio)
     }
   }
 
   /**
-   * Optimized audio streaming with reduced latency for C-Zentrix
+   * Real-time audio streaming - sends each chunk immediately to SIP
    */
-  const streamAudioToCall = async (audioBase64) => {
+  const streamAudioToCallRealtime = async (audioBase64) => {
     const audioBuffer = Buffer.from(audioBase64, "base64")
 
     // C-Zentrix expects specific audio format
     // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
     const CHUNK_SIZE = 160 // 10ms chunks for 8kHz 16-bit mono
-    const CHUNK_DURATION_MS = 10 // Increased back to 10ms for proper timing
+    const CHUNK_DELAY = 5 // Reduced delay for immediate sending
 
     let position = 0
     const streamStart = Date.now()
+    const streamStartTime = new Date().toISOString()
 
     console.log(
-      `[STREAM] Starting audio stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
+      `[STREAM-REALTIME] ${streamStartTime} - Starting real-time stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
     )
     console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`)
 
@@ -243,6 +247,9 @@ const setupUnifiedVoiceServer = (ws) => {
         ws.send(JSON.stringify(mediaMessage))
         chunksSuccessfullySent++
 
+        const chunkTime = new Date().toISOString()
+        console.log(`[CHUNK-SENT] ${chunkTime} - Chunk ${chunksSuccessfullySent} sent to SIP immediately`)
+
         if (chunksSuccessfullySent % 10 === 0) {
           console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`)
         }
@@ -254,7 +261,7 @@ const setupUnifiedVoiceServer = (ws) => {
       position += CHUNK_SIZE
 
       if (position < audioBuffer.length) {
-        await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
+        await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY))
       }
     }
 
@@ -269,13 +276,24 @@ const setupUnifiedVoiceServer = (ws) => {
         },
       }
       ws.send(JSON.stringify(silenceMessage))
-      console.log("[STREAM] End silence sent")
+      const endTime = new Date().toISOString()
+      console.log(`[STREAM-END] ${endTime} - End silence sent`)
     } catch (error) {
       console.error("[STREAM] Failed to send end silence:", error.message)
     }
 
     const streamDuration = Date.now() - streamStart
-    console.log(`[STREAM] Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`)
+    const completionTime = new Date().toISOString()
+    console.log(
+      `[STREAM-COMPLETE] ${completionTime} - Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`,
+    )
+  }
+
+  /**
+   * Optimized audio streaming with reduced latency for C-Zentrix
+   */
+  const streamAudioToCall = async (audioBase64) => {
+    return await streamAudioToCallRealtime(audioBase64)
   }
 
   /**
