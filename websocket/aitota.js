@@ -12,29 +12,6 @@ if (!DEEPGRAM_API_KEY || !SARVAM_API_KEY || !OPENAI_API_KEY) {
   process.exit(1)
 }
 
-// Test Deepgram API key on startup
-const testDeepgramConnection = async () => {
-  try {
-    const response = await fetch("https://api.deepgram.com/v1/projects", {
-      headers: {
-        Authorization: `Token ${DEEPGRAM_API_KEY}`,
-      },
-    })
-
-    if (response.ok) {
-      console.log("✅ Deepgram API key is valid")
-    } else {
-      console.error(`❌ Deepgram API key test failed: ${response.status}`)
-      const errorText = await response.text()
-      console.error("Error details:", errorText)
-    }
-  } catch (error) {
-    console.error("❌ Deepgram API key test error:", error.message)
-  }
-}
-
-// Run test on startup
-testDeepgramConnection()
 
 const fetch = globalThis.fetch || require("node-fetch")
 
@@ -63,7 +40,6 @@ const setupUnifiedVoiceServer = (ws) => {
   let accountSid = null
   let conversationHistory = []
   let deepgramWs = null
-  let sarvamWs = null // Added Sarvam WebSocket connection
   let isProcessing = false
   let userUtteranceBuffer = ""
   let silenceTimer = null
@@ -75,36 +51,57 @@ const setupUnifiedVoiceServer = (ws) => {
    * Alternative streaming method - try different formats
    */
   const streamAudioAlternative = async (audioBase64) => {
-    console.log("[STREAM-ALT] Trying alternative streaming method")
+    console.log("[STREAM-ALT] Trying high-speed streaming method")
 
     const audioBuffer = Buffer.from(audioBase64, "base64")
 
-    // Try method 1: Larger chunks (20ms)
-    const CHUNK_SIZE = 320 // 20ms chunks
+    const CHUNK_SIZE = 320 // 20ms chunks for faster transmission
+    const CHUNK_DELAY = 1 // Minimal 1ms delay
     let position = 0
 
-    while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+    const chunks = []
+    while (position < audioBuffer.length) {
       const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
+      chunks.push(chunk)
+      position += CHUNK_SIZE
+    }
 
-      const mediaMessage = {
-        event: "media",
-        streamSid: streamSid,
-        media: {
-          payload: chunk.toString("base64"),
-        },
-      }
+    const BATCH_SIZE = 10
+    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+      const batch = chunks.slice(i, i + BATCH_SIZE)
+
+      const batchPromises = batch.map((chunk) => {
+        const mediaMessage = {
+          event: "media",
+          streamSid: streamSid,
+          media: {
+            payload: chunk.toString("base64"),
+          },
+        }
+
+        return new Promise((resolve, reject) => {
+          try {
+            ws.send(JSON.stringify(mediaMessage))
+            resolve()
+          } catch (error) {
+            reject(error)
+          }
+        })
+      })
 
       try {
-        ws.send(JSON.stringify(mediaMessage))
-        position += CHUNK_SIZE
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        await Promise.all(batchPromises)
+        // Minimal delay between batches
+        if (i + BATCH_SIZE < chunks.length) {
+          await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY))
+        }
       } catch (error) {
-        console.error("[STREAM-ALT] Error:", error.message)
+        console.error("[STREAM-ALT] Batch error:", error.message)
         break
       }
     }
 
-    console.log("[STREAM-ALT] Alternative streaming completed")
+    console.log("[STREAM-ALT] High-speed streaming completed")
   }
 
   /**
@@ -133,54 +130,14 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * WebSocket-based TTS with real-time streaming
+   * Optimized text-to-speech with faster streaming
    */
   const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
     try {
-      console.log(`[TTS-WS] Synthesizing via WebSocket: "${text}"`)
+      console.log(`[TTS] Synthesizing: "${text}"`)
       const startTime = Date.now()
 
-      // Check if Sarvam WebSocket is connected
-      if (!sarvamWs || sarvamWs.readyState !== WebSocket.OPEN) {
-        console.log("[TTS-WS] WebSocket not ready, connecting...")
-        connectToSarvamWebSocket()
-
-        // Wait a moment for connection, then fallback to HTTP
-        await new Promise((resolve) => setTimeout(resolve, 1000))
-
-        if (!sarvamWs || sarvamWs.readyState !== WebSocket.OPEN) {
-          console.log("[TTS-WS] WebSocket still not ready, using HTTP fallback")
-          return await synthesizeAndStreamAudioHTTP(text, language)
-        }
-      }
-
-      // Send text for synthesis via WebSocket
-      const ttsRequest = {
-        type: "synthesize",
-        text: text,
-        target_language_code: language,
-        timestamp: Date.now(),
-      }
-
-      sarvamWs.send(JSON.stringify(ttsRequest))
-
-      const requestTime = Date.now() - startTime
-      console.log(`[TTS-WS] Synthesis request sent in ${requestTime}ms`)
-    } catch (error) {
-      console.error("[TTS-WS] WebSocket synthesis error:", error.message)
-      // Fallback to HTTP method
-      await synthesizeAndStreamAudioHTTP(text, language)
-    }
-  }
-
-  /**
-   * HTTP fallback method (renamed from original synthesizeAndStreamAudio)
-   */
-  const synthesizeAndStreamAudioHTTP = async (text, language = "en-IN") => {
-    try {
-      console.log(`[TTS-HTTP] Fallback synthesis: "${text}"`)
-      const startTime = Date.now()
-
+      // Use fetch with timeout and optimized parameters for C-Zentrix
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 5000)
 
@@ -196,7 +153,7 @@ const setupUnifiedVoiceServer = (ws) => {
           target_language_code: language,
           speaker: "meera",
           pitch: 0,
-          pace: 1.1,
+          pace: 1.2, // Slightly faster pace for quicker responses
           loudness: 1.0,
           speech_sample_rate: 8000,
           enable_preprocessing: true,
@@ -220,179 +177,68 @@ const setupUnifiedVoiceServer = (ws) => {
       }
 
       const ttsTime = Date.now() - startTime
-      console.log(`[TTS-HTTP] Audio generated in ${ttsTime}ms`)
+      console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`)
 
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      await streamAudioToCallOptimized(audioBase64)
+      await new Promise((resolve) => setTimeout(resolve, 50)) // Reduced from 100ms
+
+      // Try optimized primary streaming method
+      await streamAudioToCall(audioBase64)
+
+      setTimeout(async () => {
+        console.log("[TTS] Trying alternative streaming method in case primary failed")
+        await streamAudioAlternative(audioBase64)
+      }, 200) // Reduced from 500ms
     } catch (error) {
-      console.error("[TTS-HTTP] Error:", error.message)
+      console.error("[TTS] Error:", error.message)
+
+      // Send a simple beep or tone as fallback
       const fallbackAudio = generateSimpleTone(440, 0.5)
-      await streamAudioToCallOptimized(fallbackAudio)
+      await streamAudioToCall(fallbackAudio)
     }
   }
 
   /**
-   * Optimized batch streaming for HTTP fallback
+   * Optimized audio streaming with reduced latency for C-Zentrix
    */
-  const streamAudioToCallOptimized = async (audioBase64) => {
+  const streamAudioToCall = async (audioBase64) => {
     const audioBuffer = Buffer.from(audioBase64, "base64")
-    const CHUNK_SIZE = 160 // 10ms chunks
-    const BATCH_SIZE = 5 // Send 5 chunks at once (50ms batches)
+
+    // C-Zentrix expects specific audio format
+    // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
+    const CHUNK_SIZE = 160 // 10ms chunks for 8kHz 16-bit mono
+    const CHUNK_DURATION_MS = 2 // Reduced from 10ms to 2ms for faster streaming
+    const BATCH_SIZE = 5 // Send multiple chunks in quick succession
 
     let position = 0
     const streamStart = Date.now()
 
-    console.log(`[STREAM-OPT] Starting optimized stream: ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`)
+    console.log(
+      `[STREAM] Starting audio stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
+    )
+    console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`)
 
-    while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
-      // Prepare batch of chunks
-      const batch = []
-
-      for (let i = 0; i < BATCH_SIZE && position < audioBuffer.length; i++) {
-        const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
-        const paddedChunk =
-          chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
-
-        batch.push({
-          event: "media",
-          streamSid: streamSid,
-          media: {
-            payload: paddedChunk.toString("base64"),
-          },
-        })
-
-        position += CHUNK_SIZE
-      }
-
-      // Send batch in parallel
-      try {
-        await Promise.all(
-          batch.map((message) => {
-            return new Promise((resolve, reject) => {
-              try {
-                ws.send(JSON.stringify(message))
-                resolve()
-              } catch (error) {
-                reject(error)
-              }
-            })
-          }),
-        )
-
-        // Small delay between batches
-        if (position < audioBuffer.length) {
-          await new Promise((resolve) => setTimeout(resolve, 2))
-        }
-      } catch (error) {
-        console.error("[STREAM-OPT] Batch send error:", error.message)
-        break
-      }
+    // Send a test message first to verify WebSocket is working
+    const testMessage = {
+      event: "test",
+      streamSid: streamSid,
+      timestamp: Date.now(),
     }
-
-    const streamDuration = Date.now() - streamStart
-    console.log(`[STREAM-OPT] Completed in ${streamDuration}ms`)
-  }
-
-  /**
-   * Connect to Sarvam WebSocket for real-time TTS streaming
-   */
-  const connectToSarvamWebSocket = () => {
-    console.log("[TTS-WS] Connecting to Sarvam WebSocket...")
 
     try {
-      // Sarvam WebSocket endpoint for TTS streaming
-      const sarvamWsUrl = "wss://api.sarvam.ai/text-to-speech-websocket"
-
-      sarvamWs = new WebSocket(sarvamWsUrl, {
-        headers: {
-          "API-Subscription-Key": SARVAM_API_KEY,
-          "Content-Type": "application/json",
-        },
-      })
-
-      sarvamWs.on("open", () => {
-        console.log("[TTS-WS] Connected to Sarvam WebSocket successfully")
-
-        // Send initial configuration
-        const config = {
-          type: "config",
-          target_language_code: "en-IN",
-          speaker: "meera",
-          pitch: 0,
-          pace: 1.1,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: true,
-          model: "bulbul:v1",
-          output_format: "pcm_s16le", // Raw PCM format for direct streaming
-        }
-
-        sarvamWs.send(JSON.stringify(config))
-      })
-
-      sarvamWs.on("message", async (data) => {
-        try {
-          const response = JSON.parse(data)
-
-          if (response.type === "audio_chunk") {
-            const audioBase64 = response.audio_data
-            if (audioBase64) {
-              console.log("[TTS-WS] Received audio chunk, streaming immediately")
-              await streamAudioChunkToCall(audioBase64)
-            }
-          } else if (response.type === "audio_complete") {
-            console.log("[TTS-WS] Audio synthesis complete")
-          } else if (response.type === "error") {
-            console.error("[TTS-WS] Sarvam error:", response.message)
-            // Fallback to HTTP method
-            await synthesizeAndStreamAudioHTTP(response.original_text || "Sorry, there was an audio issue.")
-          }
-        } catch (error) {
-          console.error("[TTS-WS] Error processing Sarvam message:", error.message)
-        }
-      })
-
-      sarvamWs.on("error", (error) => {
-        console.error("[TTS-WS] Sarvam WebSocket error:", error.message)
-        // Reconnect after delay
-        setTimeout(() => {
-          if (!sarvamWs || sarvamWs.readyState === WebSocket.CLOSED) {
-            connectToSarvamWebSocket()
-          }
-        }, 2000)
-      })
-
-      sarvamWs.on("close", (code, reason) => {
-        console.log(`[TTS-WS] Sarvam WebSocket closed: ${code} - ${reason}`)
-        // Auto-reconnect if not intentionally closed
-        if (code !== 1000) {
-          setTimeout(() => {
-            connectToSarvamWebSocket()
-          }, 1000)
-        }
-      })
+      ws.send(JSON.stringify(testMessage))
+      console.log("[STREAM] Test message sent successfully")
     } catch (error) {
-      console.error("[TTS-WS] Failed to connect to Sarvam WebSocket:", error.message)
-    }
-  }
-
-  /**
-   * Stream individual audio chunks immediately to reduce latency
-   */
-  const streamAudioChunkToCall = async (audioBase64) => {
-    if (!streamSid || ws.readyState !== WebSocket.OPEN) {
-      console.log("[STREAM-CHUNK] WebSocket not ready, skipping chunk")
+      console.error("[STREAM] Failed to send test message:", error.message)
       return
     }
 
-    try {
-      const audioBuffer = Buffer.from(audioBase64, "base64")
+    let chunksSuccessfullySent = 0
 
-      // Send in optimized chunks for real-time streaming
-      const CHUNK_SIZE = 160 // 10ms chunks for 8kHz 16-bit mono
-      let position = 0
+    while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+      // Send multiple chunks in a batch to reduce overall delay
+      const batchPromises = []
 
-      while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+      for (let i = 0; i < BATCH_SIZE && position < audioBuffer.length; i++) {
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
 
         // Pad smaller chunks with silence if needed
@@ -407,17 +253,57 @@ const setupUnifiedVoiceServer = (ws) => {
           },
         }
 
-        ws.send(JSON.stringify(mediaMessage))
-        position += CHUNK_SIZE
+        batchPromises.push(
+          new Promise((resolve, reject) => {
+            try {
+              ws.send(JSON.stringify(mediaMessage))
+              chunksSuccessfullySent++
+              resolve()
+            } catch (error) {
+              reject(error)
+            }
+          }),
+        )
 
-        if (position % (CHUNK_SIZE * 5) === 0) {
-          // Every 5 chunks (50ms)
-          await new Promise((resolve) => setTimeout(resolve, 2))
-        }
+        position += CHUNK_SIZE
       }
-    } catch (error) {
-      console.error("[STREAM-CHUNK] Error streaming chunk:", error.message)
+
+      // Wait for the batch to complete
+      try {
+        await Promise.all(batchPromises)
+
+        // Log every 50th chunk to monitor progress
+        if (chunksSuccessfullySent % 50 === 0) {
+          console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`)
+        }
+      } catch (error) {
+        console.error(`[STREAM] Failed to send batch at chunk ${chunksSuccessfullySent}:`, error.message)
+        break
+      }
+
+      if (position < audioBuffer.length) {
+        await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
+      }
     }
+
+    // Add a small silence buffer at the end
+    try {
+      const silenceChunk = Buffer.alloc(CHUNK_SIZE)
+      const silenceMessage = {
+        event: "media",
+        streamSid: streamSid,
+        media: {
+          payload: silenceChunk.toString("base64"),
+        },
+      }
+      ws.send(JSON.stringify(silenceMessage))
+      console.log("[STREAM] End silence sent")
+    } catch (error) {
+      console.error("[STREAM] Failed to send end silence:", error.message)
+    }
+
+    const streamDuration = Date.now() - streamStart
+    console.log(`[STREAM] Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`)
   }
 
   /**
@@ -698,15 +584,14 @@ const setupUnifiedVoiceServer = (ws) => {
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0)
 
-          connectToSarvamWebSocket()
-
+          // Send optimized greeting with proper timing
           const greeting = "Hi! How can I help you?"
           console.log("[CZ] Sending greeting:", greeting)
 
           // Wait a moment for call to stabilize before sending audio
           setTimeout(async () => {
             await synthesizeAndStreamAudio(greeting)
-          }, 300) // Reduced delay for faster response
+          }, 500)
           break
 
         case "media":
@@ -725,10 +610,6 @@ const setupUnifiedVoiceServer = (ws) => {
 
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             deepgramWs.close()
-          }
-
-          if (sarvamWs && sarvamWs.readyState === WebSocket.OPEN) {
-            sarvamWs.close()
           }
 
           if (silenceTimer) {
@@ -753,12 +634,13 @@ const setupUnifiedVoiceServer = (ws) => {
   ws.on("close", () => {
     console.log("[CZ] WebSocket connection closed")
 
+    // Cleanup
     if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.close()
     }
 
-    if (sarvamWs && sarvamWs.readyState === WebSocket.OPEN) {
-      sarvamWs.close()
+    if (silenceTimer) {
+      clearTimeout(silenceTimer)
     }
 
     // Reset session state
