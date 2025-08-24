@@ -210,36 +210,44 @@ class OptimizedSanIPPBXSession extends EventEmitter {
   }
 
   processIncomingAudio(base64Audio) {
+    // Use a queue to batch audio processing
+    if (!this.audioQueue) this.audioQueue = [];
+    this.audioQueue.push(base64Audio);
+    if (!this.processingAudioQueue) {
+      this.processingAudioQueue = true;
+      this._processAudioQueue();
+    }
+  }
+
+  _processAudioQueue() {
+    if (!this.audioQueue || this.audioQueue.length === 0) {
+      this.processingAudioQueue = false;
+      return;
+    }
+    const base64Audio = this.audioQueue.shift();
     const audioStartTime = performance.now();
     this.metrics.packetsReceived++;
     this.lastActivityTime = Date.now();
-    
     try {
-      // Always ensure base64 PCM is sent to Deepgram
       const processedAudio = this.audioProcessor.processIncomingAudio(base64Audio);
-      
       if (processedAudio && this.deepgram && !this.isSpeaking) {
-        // Send as base64 PCM
         const base64Pcm = processedAudio.toString('base64');
         this.deepgram.send(Buffer.from(base64Pcm, 'base64'));
         console.log(`🎤 [DEEPGRAM] Sent base64 PCM audio for session: ${this.callId}`);
         this.metrics.packetsProcessed++;
-        
-        // Record audio processing latency
         const audioLatency = performance.now() - audioStartTime;
         performanceMonitor.recordAudioLatency(audioStartTime, performance.now());
         this.metrics.audioLatency.push(audioLatency);
-        
-        // Keep latency history manageable
         if (this.metrics.audioLatency.length > 100) {
           this.metrics.audioLatency.shift();
         }
       }
-      
     } catch (error) {
       console.error(`❌ [AUDIO-PROCESSING] Error:`, error.message);
       this.metrics.errors++;
     }
+    // Yield to event loop before processing next chunk
+    setImmediate(() => this._processAudioQueue());
   }
 
   async processConversation(transcript) {
