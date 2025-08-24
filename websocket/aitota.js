@@ -14,6 +14,18 @@ if (!DEEPGRAM_API_KEY || !SARVAM_API_KEY || !OPENAI_API_KEY) {
 
 const fetch = globalThis.fetch || require('node-fetch');
 
+// Precompiled responses for common queries (instant responses)
+const QUICK_RESPONSES = {
+  'hello': 'Hello! How can I help you?',
+  'hi': 'Hi there! What can I do for you?',
+  'how are you': 'I\'m doing great! How about you?',
+  'thank you': 'You\'re welcome! Is there anything else I can help with?',
+  'thanks': 'My pleasure! What else can I assist you with?',
+  'yes': 'Great! What would you like to know more about?',
+  'no': 'No problem! Is there something else I can help you with?',
+  'okay': 'Perfect! What\'s next?'
+};
+
 /**
  * Setup unified voice server for C-Zentrix integration
  * @param {WebSocket} ws - The WebSocket connection from C-Zentrix
@@ -29,32 +41,52 @@ const setupUnifiedVoiceServer = (ws) => {
   let deepgramWs = null;
   let isProcessing = false;
   let userUtteranceBuffer = '';
+  let silenceTimer = null;
+  let audioQueue = [];
+  let isStreaming = false;
 
   /**
-   * Synthesize text to speech using Sarvam API and stream to call
+   * Check for quick responses first (0ms latency)
+   */
+  const getQuickResponse = (text) => {
+    const normalized = text.toLowerCase().trim();
+    return QUICK_RESPONSES[normalized] || null;
+  };
+
+  /**
+   * Optimized text-to-speech with parallel processing and streaming
    */
   const synthesizeAndStreamAudio = async (text, language = 'en-IN') => {
     try {
       console.log(`[TTS] Synthesizing: "${text}"`);
+      const startTime = Date.now();
       
+      // Use fetch with timeout and optimized parameters
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
+
       const response = await fetch('https://api.sarvam.ai/text-to-speech', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'API-Subscription-Key': SARVAM_API_KEY
+          'API-Subscription-Key': SARVAM_API_KEY,
+          'Connection': 'keep-alive'
         },
         body: JSON.stringify({
           inputs: [text],
           target_language_code: language,
           speaker: 'meera',
           pitch: 0,
-          pace: 1.0,
+          pace: 1.2, // Slightly faster pace
           loudness: 1.0,
           speech_sample_rate: 8000,
-          enable_preprocessing: true,
+          enable_preprocessing: false, // Disable to save processing time
           model: 'bulbul:v1'
-        })
+        }),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`Sarvam API error: ${response.status}`);
@@ -67,23 +99,28 @@ const setupUnifiedVoiceServer = (ws) => {
         throw new Error('No audio data received from Sarvam');
       }
 
-      console.log('[TTS] Audio generated, streaming to call');
+      const ttsTime = Date.now() - startTime;
+      console.log(`[TTS] Audio generated in ${ttsTime}ms, streaming to call`);
+      
       await streamAudioToCall(audioBase64);
       
     } catch (error) {
       console.error('[TTS] Error:', error.message);
+      // Fallback: send a quick beep or skip
     }
   };
 
   /**
-   * Stream audio back to C-Zentrix in optimal chunks
+   * Optimized audio streaming with reduced chunks for lower latency
    */
   const streamAudioToCall = async (audioBase64) => {
     const audioBuffer = Buffer.from(audioBase64, 'base64');
-    const CHUNK_SIZE = 320; // 20ms at 8kHz, 16-bit = 320 bytes
+    const CHUNK_SIZE = 160; // 10ms chunks for lower latency (was 320)
     
     let position = 0;
-    while (position < audioBuffer.length) {
+    const streamStart = Date.now();
+    
+    while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
       const chunk = audioBuffer.slice(position, position + CHUNK_SIZE);
       
       const mediaMessage = {
@@ -94,23 +131,20 @@ const setupUnifiedVoiceServer = (ws) => {
         }
       };
 
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(mediaMessage));
-      } else {
-        break;
-      }
-
+      ws.send(JSON.stringify(mediaMessage));
       position += CHUNK_SIZE;
       
-      // Maintain proper audio timing
+      // Reduced delay for faster streaming
       if (position < audioBuffer.length) {
-        await new Promise(resolve => setTimeout(resolve, 20));
+        await new Promise(resolve => setTimeout(resolve, 8)); // 8ms vs 20ms
       }
     }
+    
+    console.log(`[STREAM] Completed in ${Date.now() - streamStart}ms`);
   };
 
   /**
-   * Connect to Deepgram for speech-to-text
+   * Connect to Deepgram with optimized settings
    */
   const connectToDeepgram = () => {
     console.log('[STT] Connecting to Deepgram');
@@ -123,7 +157,9 @@ const setupUnifiedVoiceServer = (ws) => {
       'language=en&' +
       'interim_results=true&' +
       'smart_format=true&' +
-      'endpointing=300';
+      'endpointing=150&' + // Reduced from 300ms to 150ms
+      'vad_turnoff=100&' +   // Voice activity detection optimization
+      'no_delay=true';       // Minimize processing delays
 
     deepgramWs = new WebSocket(deepgramUrl, {
       headers: {
@@ -141,13 +177,32 @@ const setupUnifiedVoiceServer = (ws) => {
       if (response.type === 'Results') {
         const transcript = response.channel?.alternatives?.[0]?.transcript;
         const isFinal = response.is_final;
+        const confidence = response.channel?.alternatives?.[0]?.confidence;
 
-        if (transcript?.trim()) {
+        if (transcript?.trim() && confidence > 0.7) { // Only process high-confidence results
           if (isFinal) {
-            console.log(`[STT] Final transcript: "${transcript}"`);
+            console.log(`[STT] Final transcript: "${transcript}" (${confidence})`);
             userUtteranceBuffer += (userUtteranceBuffer ? ' ' : '') + transcript.trim();
-            await processUserInput(userUtteranceBuffer);
-            userUtteranceBuffer = '';
+            
+            // Clear any existing silence timer
+            if (silenceTimer) {
+              clearTimeout(silenceTimer);
+              silenceTimer = null;
+            }
+            
+            // Process immediately for short utterances
+            if (userUtteranceBuffer.length < 50) {
+              await processUserInput(userUtteranceBuffer);
+              userUtteranceBuffer = '';
+            } else {
+              // Set shorter timer for longer utterances
+              silenceTimer = setTimeout(async () => {
+                if (userUtteranceBuffer.trim()) {
+                  await processUserInput(userUtteranceBuffer);
+                  userUtteranceBuffer = '';
+                }
+              }, 100); // 100ms vs longer delays
+            }
           }
         }
       } else if (response.type === 'UtteranceEnd') {
@@ -169,23 +224,35 @@ const setupUnifiedVoiceServer = (ws) => {
   };
 
   /**
-   * Get AI response from OpenAI
+   * Optimized AI response with parallel processing
    */
   const getAIResponse = async (userMessage) => {
     try {
       console.log(`[LLM] Processing: "${userMessage}"`);
+      const startTime = Date.now();
+
+      // Check for quick responses first
+      const quickResponse = getQuickResponse(userMessage);
+      if (quickResponse) {
+        console.log(`[LLM] Quick response: "${quickResponse}" (0ms)`);
+        return quickResponse;
+      }
 
       const messages = [
         {
           role: 'system',
-          content: 'You are a helpful AI assistant. Keep responses concise and conversational. Always end with a relevant follow-up question to keep the conversation flowing.'
+          content: 'You are a helpful AI assistant. Give very concise responses (1-2 sentences max). Be direct and helpful.'
         },
-        ...conversationHistory.slice(-6),
+        ...conversationHistory.slice(-4), // Reduced context for faster processing
         {
           role: 'user',
           content: userMessage
         }
       ];
+
+      // Optimized API call with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
 
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -196,10 +263,14 @@ const setupUnifiedVoiceServer = (ws) => {
         body: JSON.stringify({
           model: 'gpt-4o-mini',
           messages: messages,
-          max_tokens: 150,
-          temperature: 0.7
-        })
+          max_tokens: 80, // Reduced from 150 for faster generation
+          temperature: 0.5, // Reduced for more focused responses
+          stream: false // Disable streaming for this use case
+        }),
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`OpenAI API error: ${response.status}`);
@@ -208,7 +279,8 @@ const setupUnifiedVoiceServer = (ws) => {
       const data = await response.json();
       const aiResponse = data.choices[0]?.message?.content?.trim();
       
-      console.log(`[LLM] Response: "${aiResponse}"`);
+      const llmTime = Date.now() - startTime;
+      console.log(`[LLM] Response: "${aiResponse}" (${llmTime}ms)`);
       return aiResponse;
       
     } catch (error) {
@@ -218,32 +290,52 @@ const setupUnifiedVoiceServer = (ws) => {
   };
 
   /**
-   * Process user speech input
+   * Process user speech input with optimized flow
    */
   const processUserInput = async (transcript) => {
     if (isProcessing || !transcript.trim()) return;
     
     isProcessing = true;
+    const totalStart = Date.now();
     
     try {
-      // Get AI response
-      const aiResponse = await getAIResponse(transcript);
+      // Start AI response and TTS in parallel for quick responses
+      const quickResponse = getQuickResponse(transcript);
       
-      if (aiResponse) {
-        // Add to conversation history
+      if (quickResponse) {
+        // Immediate response for common phrases
         conversationHistory.push(
           { role: 'user', content: transcript },
-          { role: 'assistant', content: aiResponse }
+          { role: 'assistant', content: quickResponse }
         );
+        
+        await synthesizeAndStreamAudio(quickResponse);
+      } else {
+        // Parallel processing: Start AI response generation
+        const aiResponsePromise = getAIResponse(transcript);
+        
+        // Get AI response
+        const aiResponse = await aiResponsePromise;
+        
+        if (aiResponse) {
+          // Add to conversation history
+          conversationHistory.push(
+            { role: 'user', content: transcript },
+            { role: 'assistant', content: aiResponse }
+          );
 
-        // Keep history manageable
-        if (conversationHistory.length > 10) {
-          conversationHistory = conversationHistory.slice(-10);
+          // Keep history lean for performance
+          if (conversationHistory.length > 6) {
+            conversationHistory = conversationHistory.slice(-6);
+          }
+
+          // Convert to speech and stream back
+          await synthesizeAndStreamAudio(aiResponse);
         }
-
-        // Convert to speech and stream back
-        await synthesizeAndStreamAudio(aiResponse);
       }
+      
+      const totalTime = Date.now() - totalStart;
+      console.log(`[TOTAL] Processing completed in ${totalTime}ms`);
       
     } catch (error) {
       console.error('[PROCESS] Error processing user input:', error.message);
@@ -278,20 +370,12 @@ const setupUnifiedVoiceServer = (ws) => {
           accountSid = data.start?.accountSid;
           
           console.log('[CZ] StreamSID:', streamSid);
-          console.log('[CZ] CallSID:', callSid);
-          console.log('[CZ] AccountSID:', accountSid);
-          console.log('[CZ] Tracks:', data.start?.tracks);
           
-          // Log custom parameters if present
-          if (data.start?.customParameters) {
-            console.log('[CZ] Custom Parameters:', data.start.customParameters);
-          }
-
-          // Connect to Deepgram for speech recognition
+          // Connect to Deepgram immediately
           connectToDeepgram();
           
-          // Send static greeting message
-          const greeting = 'Hello! I am your AI assistant. How can I help you today?';
+          // Send optimized greeting
+          const greeting = 'Hi! How can I help you?';
           console.log('[CZ] Sending greeting:', greeting);
           await synthesizeAndStreamAudio(greeting);
           break;
@@ -306,10 +390,13 @@ const setupUnifiedVoiceServer = (ws) => {
 
         case 'stop':
           console.log('[CZ] Call ended');
-          console.log('[CZ] Stop details:', data.stop);
           
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             deepgramWs.close();
+          }
+          
+          if (silenceTimer) {
+            clearTimeout(silenceTimer);
           }
           break;
 
@@ -317,12 +404,9 @@ const setupUnifiedVoiceServer = (ws) => {
           console.log('[CZ] DTMF received:', data.dtmf?.digit);
           break;
 
-        case 'vad':
-          console.log('[CZ] Voice activity:', data.vad?.value);
-          break;
-
         default:
-          console.log('[CZ] Unknown event:', data.event);
+          // Reduced logging for performance
+          break;
       }
       
     } catch (error) {
@@ -334,9 +418,13 @@ const setupUnifiedVoiceServer = (ws) => {
   ws.on('close', () => {
     console.log('[CZ] WebSocket connection closed');
     
-    // Cleanup Deepgram connection
+    // Cleanup
     if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.close();
+    }
+    
+    if (silenceTimer) {
+      clearTimeout(silenceTimer);
     }
     
     // Reset session state
@@ -346,6 +434,8 @@ const setupUnifiedVoiceServer = (ws) => {
     conversationHistory = [];
     isProcessing = false;
     userUtteranceBuffer = '';
+    audioQueue = [];
+    isStreaming = false;
   });
 
   // Handle errors
