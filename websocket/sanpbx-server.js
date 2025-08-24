@@ -419,7 +419,6 @@ class SanPbxCallSession extends EventEmitter {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": API_KEYS.sarvam,
           "API-Subscription-Key": API_KEYS.sarvam,
         },
         body: JSON.stringify({

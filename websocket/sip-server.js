@@ -549,7 +549,8 @@ class SipCallSession extends EventEmitter {
 
       if (audioBase64) {
         // Sarvam typically returns WAV PCM. Convert to µ-law/8000 base64 for SIP client.
-        this.sendAudioToClient(audioBase64)
+        const muLawBase64 = wavPcm16ToMuLawBase64(audioBase64) || audioBase64
+        this.sendAudioToClient(muLawBase64)
       } else {
         throw new Error("No audio data received from Sarvam API")
       }
