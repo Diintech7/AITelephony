@@ -123,7 +123,7 @@ class OptimizedSanIPPBXSession extends EventEmitter {
       alternatives: 1,
       numerals: true,
       filler_words: false,
-      utterance_end_ms: 800, // Shorter utterance detection
+      utterance_end_ms: 1000, // Changed from 800 to 1000 for Deepgram API compliance
       encoding: 'linear16',
       sample_rate: 8000,
       channels: 1
