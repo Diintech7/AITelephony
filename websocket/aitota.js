@@ -264,7 +264,9 @@ const setupUnifiedVoiceServer = (wss) => {
 
   // Handle each WebSocket connection
   wss.on("connection", (ws, req) => {
-    console.log("🔌 [WEBSOCKET] New voice AI connection established")
+    const clientIP = req.socket.remoteAddress
+    console.log(`🔌 [WEBSOCKET] New voice AI connection established from ${clientIP}`)
+    console.log(`🔌 [WEBSOCKET] Connection headers:`, req.headers)
 
     let streamSid = null
     let accountSid = null
@@ -285,6 +287,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const connectToDeepgram = async () => {
       try {
         const deepgramLanguage = getDeepgramLanguage(currentLanguage)
+        console.log(`🎤 [DEEPGRAM] Attempting connection with language: ${deepgramLanguage}`)
 
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
         deepgramUrl.searchParams.append("sample_rate", "8000")
@@ -295,41 +298,50 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("smart_format", "true")
         deepgramUrl.searchParams.append("interim_results", "false")
 
+        console.log(`🎤 [DEEPGRAM] Connection URL: ${deepgramUrl.toString()}`)
+
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         })
 
         deepgramWs.onopen = () => {
-          console.log("🎤 [DEEPGRAM] Connection established")
+          console.log("🎤 [DEEPGRAM] Connection established successfully")
           deepgramReady = true
           console.log("🎤 [DEEPGRAM] Ready to process audio")
         }
 
         deepgramWs.onmessage = async (event) => {
+          console.log(`🎤 [DEEPGRAM] Received message: ${event.data}`)
           const data = JSON.parse(event.data)
           await handleDeepgramResponse(data)
         }
 
         deepgramWs.onerror = (error) => {
           console.log("❌ [DEEPGRAM] Connection error:", error.message)
+          console.log("❌ [DEEPGRAM] Error details:", error)
           deepgramReady = false
           setTimeout(connectToDeepgram, 2000)
         }
 
-        deepgramWs.onclose = () => {
-          console.log("🎤 [DEEPGRAM] Connection closed")
+        deepgramWs.onclose = (event) => {
+          console.log(`🎤 [DEEPGRAM] Connection closed - Code: ${event.code}, Reason: ${event.reason}`)
           deepgramReady = false
         }
       } catch (error) {
         console.log("❌ [DEEPGRAM] Connection failed:", error.message)
+        console.log("❌ [DEEPGRAM] Stack trace:", error.stack)
         deepgramReady = false
         setTimeout(connectToDeepgram, 2000)
       }
     }
 
     const handleDeepgramResponse = async (data) => {
+      console.log(`🎤 [DEEPGRAM] Response type: ${data.type}, is_final: ${data.is_final}`)
+
       if (data.type === "Results" && data.is_final) {
         const transcript = data.channel?.alternatives?.[0]?.transcript
+        console.log(`🎤 [DEEPGRAM] Raw transcript: "${transcript}"`)
+
         if (transcript && transcript.trim()) {
           if (!sttTimer) {
             sttTimer = createTimer("STT_TRANSCRIPTION")
@@ -339,6 +351,8 @@ const setupUnifiedVoiceServer = (wss) => {
           sttTimer = null
 
           await processUserUtterance(transcript.trim())
+        } else {
+          console.log(`🎤 [DEEPGRAM] Empty or invalid transcript received`)
         }
       }
     }
@@ -387,12 +401,19 @@ const setupUnifiedVoiceServer = (wss) => {
     // WebSocket message handling
     ws.on("message", async (message) => {
       try {
+        console.log(
+          `📨 [C-ZENTRIX] Raw message received (${message.length} bytes):`,
+          message.toString().substring(0, 200) + "...",
+        )
+
         const data = JSON.parse(message)
-        console.log(`📨 [C-ZENTRIX] Received event: ${data.event}`)
+        console.log(`📨 [C-ZENTRIX] Parsed event: ${data.event}`)
+        console.log(`📨 [C-ZENTRIX] Full message structure:`, JSON.stringify(data, null, 2))
 
         switch (data.event) {
           case "connected":
             console.log("📞 [C-ZENTRIX] Call connected - Protocol:", data.protocol, "Version:", data.version)
+            console.log("📞 [C-ZENTRIX] Sending connection acknowledgment")
             break
 
           case "start":
@@ -407,35 +428,64 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("  - CallSid:", callSid)
             console.log("  - Tracks:", data.start.tracks)
             console.log("  - Media Format:", data.start.mediaFormat)
+            console.log("  - Custom Parameters:", data.start.customParameters)
 
+            if (!streamSid) {
+              console.log("❌ [C-ZENTRIX] No streamSid received in start message")
+              return
+            }
+
+            console.log("🎤 [C-ZENTRIX] Initiating Deepgram connection...")
             await connectToDeepgram()
+
+            console.log("🎤 [FIRST-MESSAGE] Sending welcome audio message to call team...")
+            try {
+              const welcomeMessage = "Hello! I'm your AI assistant. How can I help you today?"
+              const firstMessageTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid)
+              await firstMessageTTS.synthesizeAndStream(welcomeMessage)
+
+              // Add to conversation history
+              conversationHistory.push({ role: "assistant", content: welcomeMessage })
+              console.log("✅ [FIRST-MESSAGE] Welcome message sent successfully")
+            } catch (error) {
+              console.log("❌ [FIRST-MESSAGE] Failed to send welcome message:", error.message)
+            }
             break
 
           case "media":
             if (data.media && data.media.payload && data.media.track === "inbound") {
               const audioBuffer = Buffer.from(data.media.payload, "base64")
               console.log(
-                `🎵 [C-ZENTRIX] Received audio chunk: ${data.media.chunk}, timestamp: ${data.media.timestamp}`,
+                `🎵 [C-ZENTRIX] Received audio chunk: ${data.media.chunk}, timestamp: ${data.media.timestamp}, size: ${audioBuffer.length} bytes`,
               )
 
+              console.log(`🎤 [DEEPGRAM] Status - Ready: ${deepgramReady}, WebSocket state: ${deepgramWs?.readyState}`)
+
               if (deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-                // Send audio directly to Deepgram (C-Zentrix already sends slinear16)
+                console.log(`🎤 [DEEPGRAM] Sending ${audioBuffer.length} bytes to Deepgram`)
                 deepgramWs.send(audioBuffer)
-              } else if (!deepgramReady) {
-                console.log("⚠️ [DEEPGRAM] Not ready, attempting reconnection...")
-                await connectToDeepgram()
+              } else {
+                console.log("⚠️ [DEEPGRAM] Not ready for audio processing")
+                console.log(
+                  `⚠️ [DEEPGRAM] Ready: ${deepgramReady}, WebSocket exists: ${!!deepgramWs}, State: ${deepgramWs?.readyState}`,
+                )
+
+                if (!deepgramReady) {
+                  console.log("⚠️ [DEEPGRAM] Attempting reconnection...")
+                  await connectToDeepgram()
+                }
               }
+            } else {
+              console.log(`🎵 [C-ZENTRIX] Skipping non-inbound track: ${data.media?.track}`)
             }
             break
 
           case "dtmf":
             console.log(`📞 [C-ZENTRIX] DTMF detected: ${data.dtmf.digit} on track: ${data.dtmf.track}`)
-            // Could be used for menu navigation or interruption
             break
 
           case "vad":
             console.log(`🎤 [C-ZENTRIX] VAD event: ${data.vad.value} on track: ${data.vad.track}`)
-            // Could be used for better conversation flow
             break
 
           case "stop":
@@ -444,29 +494,36 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("  - CallSid:", data.stop.callSid)
 
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+              console.log("🎤 [DEEPGRAM] Closing connection due to stream stop")
               deepgramWs.close()
             }
             break
 
           default:
             console.log("📨 [C-ZENTRIX] Unknown event:", data.event)
+            console.log("📨 [C-ZENTRIX] Unknown event data:", JSON.stringify(data, null, 2))
         }
       } catch (error) {
         console.log("❌ [WEBSOCKET] Message parsing error:", error.message)
-        console.log("Raw message:", message.toString())
+        console.log("❌ [WEBSOCKET] Error stack:", error.stack)
+        console.log("❌ [WEBSOCKET] Raw message:", message.toString())
       }
     })
 
-    ws.on("close", () => {
-      console.log("🔌 [WEBSOCKET] Connection closed")
+    ws.on("close", (code, reason) => {
+      console.log(`🔌 [WEBSOCKET] Connection closed - Code: ${code}, Reason: ${reason}`)
       if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+        console.log("🎤 [DEEPGRAM] Closing Deepgram connection due to WebSocket close")
         deepgramWs.close()
       }
     })
 
     ws.on("error", (error) => {
       console.log("❌ [WEBSOCKET] Connection error:", error.message)
+      console.log("❌ [WEBSOCKET] Error details:", error)
     })
+
+    console.log("🔌 [WEBSOCKET] Connection handlers set up, waiting for messages...")
   })
 }
 
