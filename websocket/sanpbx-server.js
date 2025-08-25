@@ -558,7 +558,6 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
 
       const data = JSON.parse(messageStr)
-      console.log(`📨 [SANPBX] Received event: ${data.event}`)
 
       switch (data.event) {
         case "connected":
