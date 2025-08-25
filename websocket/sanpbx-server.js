@@ -546,7 +546,7 @@ function setupSanPbxWebSocketServer(ws) {
       return
     }
     
-    console.log(`\n📨 [SANPBX] Received event: ${data.event.media}`)
+    console.log(`\n📨 [SANPBX] Received event: ${data.event}`)
     
     switch (data.event) {
       case "connected":
@@ -653,6 +653,7 @@ function setupSanPbxWebSocketServer(ws) {
         break
 
       case "media": {
+        console.log(data)
         incomingMediaCount++
         const b64 = data?.media?.payload
         
