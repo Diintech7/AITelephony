@@ -18,6 +18,42 @@ if (!ELEVEN_API_KEY || !DEEPGRAM_API_KEY || !OPENAI_API_KEY) {
 const ts = () => new Date().toISOString()
 const wait = (ms) => new Promise((res) => setTimeout(res, ms))
 
+// -------- Enhanced Base64 Validation --------
+function validateBase64Audio(base64String, label = "AUDIO") {
+  try {
+    if (!base64String || typeof base64String !== 'string') {
+      console.log(`[${label}] ❌ Invalid base64 string: ${typeof base64String}`)
+      return false
+    }
+    
+    // Check if it's valid base64
+    const buffer = Buffer.from(base64String, 'base64')
+    if (buffer.length === 0) {
+      console.log(`[${label}] ❌ Empty buffer from base64`)
+      return false
+    }
+    
+    // Check if buffer length is even (for 16-bit PCM)
+    if (buffer.length % 2 !== 0) {
+      console.log(`[${label}] ⚠️  Odd buffer length: ${buffer.length} bytes`)
+    }
+    
+    console.log(`[${label}] ✅ Valid base64: ${base64String.length} chars -> ${buffer.length} bytes`)
+    
+    // Sample first few values
+    const samples = []
+    for (let i = 0; i < Math.min(8, buffer.length - 1); i += 2) {
+      samples.push(buffer.readInt16LE(i))
+    }
+    console.log(`[${label}] First samples: [${samples.join(', ')}]`)
+    
+    return true
+  } catch (err) {
+    console.log(`[${label}] ❌ Base64 validation error: ${err.message}`)
+    return false
+  }
+}
+
 // -------- Logging utilities --------
 function logFullData(label, data) {
   console.log(`\n=== ${label} ===`)
@@ -76,20 +112,20 @@ function bytesPer10ms(rate, channels = 1) {
   return bytes
 }
 
-// -------- Enhanced STREAM audio to PBX --------
+// -------- CRITICAL: Enhanced Base64 Audio Streaming --------
 async function streamAudioToCallRealtime({ ws, streamId, pcmBuffer, sampleRate, channels }) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.error("[STREAM-ERROR] WebSocket not open")
+    console.error("[STREAM-ERROR] ❌ WebSocket not open")
     return 0
   }
 
   if (!streamId) {
-    console.error("[STREAM-ERROR] No streamId provided")
+    console.error("[STREAM-ERROR] ❌ No streamId provided")
     return 0
   }
 
   if (!pcmBuffer || pcmBuffer.length === 0) {
-    console.error("[STREAM-ERROR] Empty PCM buffer")
+    console.error("[STREAM-ERROR] ❌ Empty PCM buffer")
     return 0
   }
 
@@ -98,85 +134,183 @@ async function streamAudioToCallRealtime({ ws, streamId, pcmBuffer, sampleRate, 
   let sentCount = 0
   
   console.log(`\n[STREAM-START] ${ts()}`)
-  console.log(`  Total chunks: ${totalChunks}`)
-  console.log(`  Chunk size: ${chunkBytes} bytes`)
-  console.log(`  Sample rate: ${sampleRate}Hz`)
-  console.log(`  Channels: ${channels}`)
-  console.log(`  Buffer size: ${pcmBuffer.length} bytes`)
-  console.log(`  Expected duration: ${(pcmBuffer.length / (sampleRate * 2 * channels)).toFixed(2)}s`)
+  console.log(`  📊 Total chunks: ${totalChunks}`)
+  console.log(`  📦 Chunk size: ${chunkBytes} bytes`)
+  console.log(`  🎵 Sample rate: ${sampleRate}Hz`)
+  console.log(`  🔊 Channels: ${channels}`)
+  console.log(`  💾 Buffer size: ${pcmBuffer.length} bytes`)
+  console.log(`  ⏱️  Expected duration: ${(pcmBuffer.length / (sampleRate * 2 * channels)).toFixed(2)}s`)
   
   logAudioSample("STREAM-INPUT", pcmBuffer, 32)
 
   for (let pos = 0; pos < pcmBuffer.length && ws.readyState === WebSocket.OPEN; pos += chunkBytes) {
     const slice = pcmBuffer.slice(pos, pos + chunkBytes)
-    const padded = slice.length < chunkBytes ? Buffer.concat([slice, Buffer.alloc(chunkBytes - slice.length)]) : slice
+    
+    // Ensure chunk is exactly the right size (pad with zeros if needed)
+    const paddedSlice = slice.length < chunkBytes ? 
+      Buffer.concat([slice, Buffer.alloc(chunkBytes - slice.length, 0)]) : 
+      slice
+
+    // CRITICAL: Convert to base64 and validate
+    const base64Payload = paddedSlice.toString("base64")
+    
+    if (!validateBase64Audio(base64Payload, `CHUNK-${sentCount}`)) {
+      console.error(`[STREAM-ERROR] ❌ Invalid base64 for chunk ${sentCount}`)
+      continue
+    }
     
     const mediaEvent = {
       event: "media",
-      streamId,
+      streamId: streamId,
       media: { 
-        payload: padded.toString("base64")
+        payload: base64Payload
       }
     }
     
-    // Log first few chunks in detail
-    if (sentCount < 3) {
-      console.log(`\n[CHUNK-${sentCount}] Size: ${slice.length}/${chunkBytes} bytes`)
-      logAudioSample(`CHUNK-${sentCount}`, slice, 16)
-      console.log(`[CHUNK-${sentCount}] Base64 length: ${mediaEvent.media.payload.length}`)
-      console.log(`[CHUNK-${sentCount}] Media event:`)
+    // Enhanced logging for first few chunks
+    if (sentCount < 5) {
+      console.log(`\n[CHUNK-${sentCount}] 📦 Processing chunk`)
+      console.log(`  Raw size: ${slice.length}/${chunkBytes} bytes`)
+      console.log(`  Padded size: ${paddedSlice.length} bytes`)
+      console.log(`  Base64 length: ${base64Payload.length} characters`)
+      console.log(`  StreamId: ${streamId}`)
+      
+      logAudioSample(`CHUNK-${sentCount}`, paddedSlice, 16)
+      
+      // Log the exact JSON being sent
+      console.log(`[CHUNK-${sentCount}] 📤 Media event JSON:`)
       console.log(JSON.stringify(mediaEvent, null, 2))
+      
+      // Verify the base64 can be decoded back
+      const testDecode = Buffer.from(base64Payload, 'base64')
+      console.log(`[CHUNK-${sentCount}] 🔍 Base64 decode test: ${testDecode.length} bytes`)
     }
     
     try {
-      ws.send(JSON.stringify(mediaEvent))
+      const jsonString = JSON.stringify(mediaEvent)
+      console.log(`[CHUNK-${sentCount}] 📡 Sending ${jsonString.length} bytes to WebSocket`)
+      
+      ws.send(jsonString)
       sentCount++
+      
+      console.log(`[CHUNK-${sentCount-1}] ✅ Sent successfully`)
+      
     } catch (err) {
-      console.error(`[STREAM-ERROR] Failed to send chunk ${sentCount}: ${err.message}`)
+      console.error(`[STREAM-ERROR] ❌ Failed to send chunk ${sentCount}: ${err.message}`)
+      console.error(`[STREAM-ERROR] WebSocket state: ${ws.readyState}`)
       break
     }
     
+    // Progress logging
     if (sentCount % 20 === 0 || sentCount === totalChunks) {
-      console.log(`[STREAM-PROGRESS] ${ts()} - Sent ${sentCount}/${totalChunks}`)
+      console.log(`[STREAM-PROGRESS] ${ts()} - 📊 Sent ${sentCount}/${totalChunks} chunks`)
     }
     
-    if (sentCount < totalChunks) await wait(10)
+    // Critical timing: 10ms delay between chunks
+    if (sentCount < totalChunks) {
+      await wait(10)
+    }
   }
   
-  console.log(`[STREAM-COMPLETE] ${ts()} - Sent ${sentCount}/${totalChunks} chunks\n`)
+  console.log(`[STREAM-COMPLETE] ${ts()} - 🎯 Final count: ${sentCount}/${totalChunks} chunks sent`)
+  
+  // Final validation
+  if (sentCount === totalChunks) {
+    console.log(`[STREAM-COMPLETE] ✅ All chunks sent successfully`)
+  } else {
+    console.log(`[STREAM-COMPLETE] ⚠️  Incomplete: ${sentCount}/${totalChunks} chunks sent`)
+  }
+  
   return sentCount
+}
+
+// -------- Enhanced Test Audio Generation --------
+async function testAudioGeneration(sampleRate, duration = 4.0) {
+  console.log(`\n[TEST-AUDIO] 🎵 Generating test tone for ${sampleRate}Hz`)
+  
+  const frequency = 800 // 800Hz tone - easily audible
+  const samples = Math.floor(sampleRate * duration)
+  const buffer = Buffer.alloc(samples * 2)
+  
+  console.log(`[TEST-AUDIO] 📊 Generating ${samples} samples for ${duration}s`)
+  
+  for (let i = 0; i < samples; i++) {
+    // Generate a clear sine wave with good amplitude
+    const amplitude = 16000 // Strong signal
+    const sample = Math.sin(2 * Math.PI * frequency * i / sampleRate) * amplitude
+    
+    // Add envelope to prevent clicks (fade in/out)
+    const fadeLength = Math.floor(sampleRate * 0.1) // 100ms fade
+    let envelope = 1.0
+    
+    if (i < fadeLength) {
+      envelope = i / fadeLength
+    } else if (i > samples - fadeLength) {
+      envelope = (samples - i) / fadeLength
+    }
+    
+    const finalSample = Math.round(sample * envelope)
+    buffer.writeInt16LE(finalSample, i * 2)
+  }
+  
+  console.log(`[TEST-AUDIO] ✅ Generated ${buffer.length} bytes (${duration}s @ ${frequency}Hz)`)
+  logAudioSample("TEST-AUDIO", buffer, 32)
+  
+  // Validate the test audio
+  const testBase64 = buffer.toString('base64')
+  validateBase64Audio(testBase64, "TEST-AUDIO-BASE64")
+  
+  // Save test audio for debugging
+  try {
+    const filename = `/tmp/debug_test_${sampleRate}hz_${Date.now()}.pcm`
+    fs.writeFileSync(filename, buffer)
+    console.log(`[TEST-AUDIO] 💾 Saved test audio to ${filename}`)
+  } catch (err) {
+    console.log(`[TEST-AUDIO] ⚠️  Could not save test file: ${err.message}`)
+  }
+  
+  return buffer
 }
 
 // -------- Enhanced ElevenLabs TTS --------
 async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channels }) {
   console.log(`\n[TTS-START] ${ts()}`)
-  console.log(`  Text: "${text}"`)
-  console.log(`  Target: ${sampleRate}Hz, ${channels} channels`)
+  console.log(`  📝 Text: "${text}"`)
+  console.log(`  🎵 Target: ${sampleRate}Hz, ${channels} channels`)
 
   if (!text || text.trim().length === 0) {
-    console.error("[TTS] Empty text provided")
+    console.error("[TTS] ❌ Empty text provided")
     return
   }
 
   try {
-    // Use appropriate output format based on target sample rate
-    const outputFormat = sampleRate === 8000 ? "pcm_16000" : "pcm_44100"
-    const elevenlabsRate = sampleRate === 8000 ? 16000 : 44100
+    // Choose appropriate format based on sample rate
+    let outputFormat, elevenlabsRate
+    if (sampleRate <= 8000) {
+      outputFormat = "pcm_16000"
+      elevenlabsRate = 16000
+    } else if (sampleRate <= 22050) {
+      outputFormat = "pcm_22050"
+      elevenlabsRate = 22050
+    } else {
+      outputFormat = "pcm_44100"
+      elevenlabsRate = 44100
+    }
     
-    console.log(`[TTS] Requesting ElevenLabs format: ${outputFormat}`)
+    console.log(`[TTS] 🎧 Using ElevenLabs format: ${outputFormat} (${elevenlabsRate}Hz)`)
     
     const requestBody = {
       text: text.trim(),
       output_format: outputFormat,
       voice_settings: {
-        stability: 0.5,
+        stability: 0.7,
         similarity_boost: 0.8,
-        style: 0.0,
+        style: 0.2,
         use_speaker_boost: true
       }
     }
     
-    console.log("[TTS] Request body:", JSON.stringify(requestBody, null, 2))
+    console.log("[TTS] 📤 Request body:", JSON.stringify(requestBody, null, 2))
     
     const resp = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}`,
@@ -191,8 +325,8 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channe
       }
     )
     
-    console.log(`[TTS] Response status: ${resp.status}`)
-    console.log(`[TTS] Response headers:`, Object.fromEntries(resp.headers))
+    console.log(`[TTS] 📥 Response status: ${resp.status}`)
+    console.log(`[TTS] 📋 Response headers:`, Object.fromEntries(resp.headers))
     
     if (!resp.ok) {
       const errorText = await resp.text()
@@ -200,41 +334,55 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channe
     }
 
     let audioBuf = Buffer.from(await resp.arrayBuffer())
-    console.log(`[TTS] ElevenLabs returned ${audioBuf.length} bytes`)
+    console.log(`[TTS] 📦 ElevenLabs returned ${audioBuf.length} bytes`)
     
     if (audioBuf.length === 0) {
-      console.error("[TTS] ERROR: Empty audio buffer from ElevenLabs")
+      console.error("[TTS] ❌ Empty audio buffer from ElevenLabs")
       return
     }
 
     logAudioSample("TTS-ORIGINAL", audioBuf, 32)
 
-    // Check for valid PCM data
+    // Validate audio quality
     const maxSample = Math.max(...Array.from({length: Math.min(100, audioBuf.length/2)}, (_, i) => Math.abs(audioBuf.readInt16LE(i * 2))))
-    console.log(`[TTS] Max sample value: ${maxSample} (should be > 100 for audible content)`)
+    console.log(`[TTS] 🔊 Max sample value: ${maxSample} (should be > 1000 for good audio)`)
 
-    // Save original audio for debugging
+    if (maxSample < 100) {
+      console.warn("[TTS] ⚠️  Audio seems very quiet or silent")
+    }
+
+    // Save original for debugging
     try {
-      fs.writeFileSync(`/tmp/debug_original_${Date.now()}.pcm`, audioBuf)
-      console.log("[TTS] Saved original audio to /tmp/debug_original_*.pcm")
+      const filename = `/tmp/debug_tts_original_${elevenlabsRate}hz_${Date.now()}.pcm`
+      fs.writeFileSync(filename, audioBuf)
+      console.log(`[TTS] 💾 Saved original to ${filename}`)
     } catch (err) {
-      console.log("[TTS] Could not save debug file:", err.message)
+      console.log(`[TTS] ⚠️  Could not save debug file: ${err.message}`)
     }
 
     // Resample if needed
     if (sampleRate !== elevenlabsRate) {
-      console.log(`[TTS] Resampling from ${elevenlabsRate}Hz to ${sampleRate}Hz`)
+      console.log(`[TTS] 🔄 Resampling from ${elevenlabsRate}Hz to ${sampleRate}Hz`)
       audioBuf = resampleAudio(audioBuf, elevenlabsRate, sampleRate)
       
-      // Save resampled audio
       try {
-        fs.writeFileSync(`/tmp/debug_resampled_${Date.now()}.pcm`, audioBuf)
-        console.log("[TTS] Saved resampled audio to /tmp/debug_resampled_*.pcm")
+        const filename = `/tmp/debug_tts_resampled_${sampleRate}hz_${Date.now()}.pcm`
+        fs.writeFileSync(filename, audioBuf)
+        console.log(`[TTS] 💾 Saved resampled to ${filename}`)
       } catch (err) {
-        console.log("[TTS] Could not save resampled debug file:", err.message)
+        console.log(`[TTS] ⚠️  Could not save resampled file: ${err.message}`)
       }
     }
 
+    // Validate final buffer before streaming
+    const finalBase64 = audioBuf.toString('base64')
+    if (!validateBase64Audio(finalBase64, "TTS-FINAL")) {
+      console.error("[TTS] ❌ Final audio buffer failed base64 validation")
+      return
+    }
+
+    console.log(`[TTS] 🚀 Starting audio stream...`)
+    
     const sentChunks = await streamAudioToCallRealtime({
       ws,
       streamId,
@@ -243,60 +391,22 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channe
       channels,
     })
 
-    console.log(`[TTS] Successfully sent ${sentChunks} audio chunks`)
+    console.log(`[TTS] ✅ Successfully sent ${sentChunks} audio chunks`)
+    
+    if (sentChunks === 0) {
+      console.error("[TTS] ❌ No chunks were sent!")
+    }
     
   } catch (err) {
-    console.error(`[TTS] ElevenLabs error: ${err.message}`)
+    console.error(`[TTS] ❌ ElevenLabs error: ${err.message}`)
     console.error(`[TTS] Stack trace:`, err.stack)
   }
 }
 
-// Enhanced test audio generation with multiple frequencies
-async function testAudioGeneration(sampleRate) {
-  console.log(`\n[TEST-AUDIO] Generating test tone for ${sampleRate}Hz`)
-  
-  const duration = 3.0 // 3 seconds for easier detection
-  const frequencies = [440, 880, 1320] // A4, A5, E6 notes
-  const samples = Math.floor(sampleRate * duration)
-  const buffer = Buffer.alloc(samples * 2)
-  
-  for (let i = 0; i < samples; i++) {
-    let sample = 0
-    // Mix multiple frequencies for a richer test tone
-    frequencies.forEach((freq, idx) => {
-      const amplitude = 8192 / frequencies.length // Divide amplitude to prevent clipping
-      sample += Math.sin(2 * Math.PI * freq * i / sampleRate) * amplitude
-    })
-    
-    // Add envelope to prevent clicks
-    const fadeLength = Math.floor(sampleRate * 0.1) // 100ms fade
-    if (i < fadeLength) {
-      sample *= i / fadeLength
-    } else if (i > samples - fadeLength) {
-      sample *= (samples - i) / fadeLength
-    }
-    
-    buffer.writeInt16LE(Math.round(sample), i * 2)
-  }
-  
-  console.log(`[TEST-AUDIO] Generated ${buffer.length} bytes (${duration}s @ ${frequencies.join('+')}Hz)`)
-  logAudioSample("TEST-AUDIO", buffer, 32)
-  
-  // Save test audio
-  try {
-    fs.writeFileSync(`/tmp/debug_test_${Date.now()}.pcm`, buffer)
-    console.log("[TEST-AUDIO] Saved test audio to /tmp/debug_test_*.pcm")
-  } catch (err) {
-    console.log("[TEST-AUDIO] Could not save test file:", err.message)
-  }
-  
-  return buffer
-}
-
-// -------- Enhanced OpenAI GPT --------
+// -------- OpenAI GPT --------
 async function getAiResponse(prompt) {
   try {
-    console.log(`[AI] Processing prompt: "${prompt}"`)
+    console.log(`[AI] 🤖 Processing prompt: "${prompt}"`)
     
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -309,11 +419,11 @@ async function getAiResponse(prompt) {
         messages: [
           { 
             role: "system", 
-            content: "You are a helpful voice assistant for phone calls. Keep responses very short and conversational, under 20 words. Be friendly and natural."
+            content: "You are a helpful voice assistant for phone calls. Keep responses short and natural, under 25 words. Be friendly and conversational."
           },
           { role: "user", content: prompt },
         ],
-        max_tokens: 50,
+        max_tokens: 60,
         temperature: 0.7
       }),
     })
@@ -325,21 +435,21 @@ async function getAiResponse(prompt) {
     
     const data = await resp.json()
     const response = data.choices[0].message.content.trim()
-    console.log(`[AI] Generated response: "${response}"`)
+    console.log(`[AI] 💬 Generated response: "${response}"`)
     return response
     
   } catch (err) {
-    console.error(`[AI] Error: ${err.message}`)
+    console.error(`[AI] ❌ Error: ${err.message}`)
     return "I understand. How can I help you?"
   }
 }
 
-// -------- Enhanced SanPBX Handler --------
+// -------- MAIN SanPBX Handler --------
 function setupSanPbxWebSocketServer(ws) {
   console.log("\n🚀 Setting up SanIPPBX voice server connection")
 
   let streamId = null
-  let mediaFormat = { encoding: "LINEAR16", sampleRate: 8000, channels: 1 } // Default to 8kHz
+  let mediaFormat = { encoding: "LINEAR16", sampleRate: 8000, channels: 1 }
   let dgWs = null
   let callAnswered = false
   let isProcessing = false
@@ -348,7 +458,7 @@ function setupSanPbxWebSocketServer(ws) {
 
   const connectDeepgram = (sampleRate, encoding) => {
     const dgEncoding = 'linear16'
-    console.log(`\n[STT-SETUP] Connecting to Deepgram`)
+    console.log(`\n[STT-SETUP] 🎤 Connecting to Deepgram`)
     console.log(`  Encoding: ${dgEncoding} (from PBX: ${encoding})`)
     console.log(`  Sample rate: ${sampleRate}Hz`)
     
@@ -357,7 +467,7 @@ function setupSanPbxWebSocketServer(ws) {
     }
     
     dgWs = new DGWebSocket(
-      `wss://api.deepgram.com/v1/listen?encoding=${dgEncoding}&sample_rate=${sampleRate}&channels=1&model=nova-2&interim_results=false&smart_format=true&endpointing=300&utterance_end_ms=1000`,
+      `wss://api.deepgram.com/v1/listen?encoding=${dgEncoding}&sample_rate=${sampleRate}&channels=1&model=nova-2&interim_results=false&smart_format=true&endpointing=300&utterance_end_ms=1000&punctuate=true`,
       { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
     )
     
@@ -368,18 +478,22 @@ function setupSanPbxWebSocketServer(ws) {
     dgWs.on("message", async (msg) => {
       try {
         const data = JSON.parse(msg.toString())
-        console.log("[STT] Raw Deepgram response:", JSON.stringify(data, null, 2))
         
-        const transcript = data.channel?.alternatives?.[0]?.transcript
+        // Only log non-empty responses
+        if (data.channel?.alternatives?.[0]?.transcript) {
+          console.log("[STT] 📥 Deepgram response:", JSON.stringify(data, null, 2))
+        }
         
-        if (transcript && transcript.trim() && !isProcessing) {
+        const transcript = data.channel?.alternatives?.[0]?.transcript?.trim()
+        
+        if (transcript && transcript.length > 0 && !isProcessing) {
           console.log(`\n🎤 [STT] Transcript: "${transcript}"`)
           isProcessing = true
           
           try {
             const lowerTranscript = transcript.toLowerCase()
             
-            if (lowerTranscript.includes('test audio') || lowerTranscript.includes('test tone')) {
+            if (lowerTranscript.includes('test') || lowerTranscript.includes('tone')) {
               console.log("[DEBUG] 🔊 Test audio command detected")
               const testBuffer = await testAudioGeneration(mediaFormat.sampleRate)
               await streamAudioToCallRealtime({
@@ -402,10 +516,10 @@ function setupSanPbxWebSocketServer(ws) {
               })
             }
           } finally {
-            // Add a small delay before allowing next processing
+            // Longer delay to prevent overlap
             setTimeout(() => {
               isProcessing = false
-            }, 1000)
+            }, 2000)
           }
         }
       } catch (error) {
@@ -429,7 +543,6 @@ function setupSanPbxWebSocketServer(ws) {
       data = JSON.parse(raw.toString())
     } catch (parseError) {
       console.error("[SANPBX] ❌ Failed to parse message:", parseError.message)
-      console.error("[SANPBX] Raw message:", raw.toString().substring(0, 200))
       return
     }
     
@@ -437,7 +550,7 @@ function setupSanPbxWebSocketServer(ws) {
     
     switch (data.event) {
       case "connected":
-        console.log("🔗 [SANPBX] Connected event:")
+        console.log("🔗 [SANPBX] Connected event")
         logFullData("CONNECTED", data)
         break
         
@@ -450,7 +563,7 @@ function setupSanPbxWebSocketServer(ws) {
         if (data.mediaFormat) {
           mediaFormat = {
             encoding: data.mediaFormat.encoding || "LINEAR16",
-            sampleRate: data.mediaFormat.sampleRate || 8000, // Default to 8kHz for telephony
+            sampleRate: data.mediaFormat.sampleRate || 8000,
             channels: data.mediaFormat.channels || 1
           }
         }
@@ -474,7 +587,7 @@ function setupSanPbxWebSocketServer(ws) {
           console.log(`[SANPBX] 🆔 Updated Stream ID: ${streamId}`)
         }
         
-        // Send ACK
+        // Send ACK immediately
         const ack = {
           event: "answer",
           callId,
@@ -487,22 +600,22 @@ function setupSanPbxWebSocketServer(ws) {
         
         try {
           ws.send(JSON.stringify(ack))
-          console.log("[SANPBX] ✅ Sent answer ACK back to PBX")
+          console.log("[SANPBX] ✅ Sent answer ACK")
         } catch (err) {
-          console.error("[SANPBX] ❌ Failed to send answer ACK:", err.message)
+          console.error("[SANPBX] ❌ Failed to send ACK:", err.message)
         }
 
-        // Enhanced greeting sequence with delay
+        // Start greeting sequence
         setTimeout(async () => {
-          if (!isProcessing && callAnswered) {
+          if (!isProcessing && callAnswered && streamId) {
             isProcessing = true
             
             try {
-              console.log("\n🔊 [DEBUG] Starting enhanced audio test sequence...")
+              console.log("\n🔊 [DEBUG] Starting audio sequence...")
               
-              // Step 1: Send test tone first
+              // Send a strong test tone first
               console.log("1️⃣ Sending test tone...")
-              const testBuffer = await testAudioGeneration(mediaFormat.sampleRate)
+              const testBuffer = await testAudioGeneration(mediaFormat.sampleRate, 3.0)
               const testSent = await streamAudioToCallRealtime({
                 ws,
                 streamId,
@@ -511,13 +624,12 @@ function setupSanPbxWebSocketServer(ws) {
                 channels: mediaFormat.channels,
               })
               
-              console.log(`[DEBUG] Test tone sent: ${testSent} chunks`)
+              console.log(`[DEBUG] ✅ Test tone: ${testSent} chunks sent`)
               
-              // Step 2: Wait longer and send greeting
-              console.log("2️⃣ Waiting 4 seconds before greeting...")
+              // Wait then send greeting
               setTimeout(async () => {
-                const greeting = "Hello! I'm your AI assistant. I can hear you clearly. How can I help you today?"
-                console.log(`3️⃣ Sending greeting: "${greeting}"`)
+                console.log("2️⃣ Sending greeting...")
+                const greeting = "Hello! This is your AI assistant. I'm sending audio now. Can you hear me clearly?"
                 await synthesizeAndStreamAudio({
                   text: greeting,
                   ws,
@@ -528,47 +640,49 @@ function setupSanPbxWebSocketServer(ws) {
                 
                 setTimeout(() => {
                   isProcessing = false
-                }, 1000)
-              }, 4000)
+                  console.log("✅ [DEBUG] Audio sequence complete")
+                }, 2000)
+              }, 3000)
               
             } catch (err) {
-              console.error("[DEBUG] ❌ Error in test sequence:", err.message)
+              console.error("[DEBUG] ❌ Error in audio sequence:", err.message)
               isProcessing = false
             }
           }
-        }, 3000) // Wait 3 seconds after answer
+        }, 2000)
         break
 
       case "media": {
         incomingMediaCount++
         const b64 = data?.media?.payload
         
-        if (incomingMediaCount <= 5) {
+        if (incomingMediaCount <= 3) {
           console.log(`\n🎵 [MEDIA-${incomingMediaCount}] Received media packet`)
-          if (b64) {
+          if (b64 && b64.length > 0) {
             const buffer = Buffer.from(b64, "base64")
-            console.log(`[MEDIA-${incomingMediaCount}] Payload size: ${buffer.length} bytes`)
+            console.log(`[MEDIA-${incomingMediaCount}] ✅ Payload: ${b64.length} chars -> ${buffer.length} bytes`)
             logAudioSample(`MEDIA-${incomingMediaCount}`, buffer, 16)
             
-            if (buffer.length > 0 && !hasReceivedAudio) {
+            if (!hasReceivedAudio) {
               hasReceivedAudio = true
-              console.log("✅ [MEDIA] First non-empty audio packet received!")
+              console.log("🎉 [MEDIA] First audio received!")
             }
           } else {
-            console.log(`[MEDIA-${incomingMediaCount}] No payload in media packet`)
+            console.log(`[MEDIA-${incomingMediaCount}] ❌ No payload`)
           }
-        } else if (incomingMediaCount === 6) {
-          console.log(`[MEDIA] ... (suppressing further media logs, received ${incomingMediaCount}+ packets)`)
+        } else if (incomingMediaCount === 4) {
+          console.log(`[MEDIA] ... (received ${incomingMediaCount}+ packets)`)
         }
         
-        if (b64 && dgWs && dgWs.readyState === WebSocket.OPEN && callAnswered) {
+        // Forward to Deepgram if we have audio
+        if (b64 && b64.length > 0 && dgWs && dgWs.readyState === WebSocket.OPEN && callAnswered) {
           try {
             const audioBuffer = Buffer.from(b64, "base64")
             if (audioBuffer.length > 0) {
               dgWs.send(audioBuffer)
             }
           } catch (err) {
-            console.error("[STT] ❌ Error sending audio to Deepgram:", err.message)
+            console.error("[STT] ❌ Error forwarding to Deepgram:", err.message)
           }
         }
         break
@@ -576,16 +690,15 @@ function setupSanPbxWebSocketServer(ws) {
       
       case "dtmf":
         console.log(`📱 [SANPBX] DTMF: ${data.digit}`)
-        logFullData("DTMF", data)
         
-        // Enhanced DTMF testing with immediate response
         if (!isProcessing) {
           isProcessing = true
-          console.log(`[DEBUG] 🔊 DTMF ${data.digit} pressed - sending test audio`)
+          console.log(`[DEBUG] 🔊 DTMF ${data.digit} - immediate audio response`)
           
           setTimeout(async () => {
             try {
-              const testBuffer = await testAudioGeneration(mediaFormat.sampleRate)
+              // Send test tone
+              const testBuffer = await testAudioGeneration(mediaFormat.sampleRate, 2.0)
               await streamAudioToCallRealtime({
                 ws,
                 streamId,
@@ -594,8 +707,8 @@ function setupSanPbxWebSocketServer(ws) {
                 channels: mediaFormat.channels,
               })
               
-              // Also send a voice response
-              const dtmfResponse = `You pressed ${data.digit}. I received it clearly.`
+              // Send voice response
+              const dtmfResponse = `You pressed ${data.digit}. Audio test complete.`
               await synthesizeAndStreamAudio({
                 text: dtmfResponse,
                 ws,
@@ -604,19 +717,18 @@ function setupSanPbxWebSocketServer(ws) {
                 channels: mediaFormat.channels,
               })
             } catch (err) {
-              console.error("[DEBUG] Error in DTMF response:", err.message)
+              console.error("[DEBUG] ❌ DTMF response error:", err.message)
             } finally {
               setTimeout(() => {
                 isProcessing = false
               }, 1000)
             }
-          }, 500) // Small delay before responding
+          }, 200)
         }
         break
         
       case "stop":
         console.log("🛑 [SANPBX] Call stopped")
-        logFullData("STOP", data)
         
         callAnswered = false
         isProcessing = false
@@ -626,12 +738,10 @@ function setupSanPbxWebSocketServer(ws) {
         if (dgWs) {
           try { dgWs.close() } catch {}
         }
-        try { ws.close() } catch {}
         break
         
       default:
         console.log(`❓ [SANPBX] Unknown event: ${data.event}`)
-        logFullData("UNKNOWN", data)
         break
     }
   })
