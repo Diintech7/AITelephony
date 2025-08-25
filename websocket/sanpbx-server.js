@@ -546,7 +546,7 @@ function setupSanPbxWebSocketServer(ws) {
       return
     }
     
-    console.log(`\n📨 [SANPBX] Received event: ${data.event}`)
+    console.log(`\n📨 [SANPBX] Received event: ${data.event.media}`)
     
     switch (data.event) {
       case "connected":
