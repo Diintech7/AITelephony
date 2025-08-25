@@ -14,6 +14,7 @@ if (!ELEVEN_API_KEY || !DEEPGRAM_API_KEY || !OPENAI_API_KEY) {
   process.exit(1)
 }
 
+
 const ts = () => new Date().toISOString()
 const wait = (ms) => new Promise((res) => setTimeout(res, ms))
 
