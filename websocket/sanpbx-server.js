@@ -60,7 +60,7 @@ async function streamAudioToCallRealtime({ ws, streamId, pcmBuffer, sampleRate, 
     }
     
     const mediaEvent = {
-      event: "media",
+      event: "answer",
       streamId,
       media: { 
         payload: padded.toString("base64")
