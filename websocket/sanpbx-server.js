@@ -49,6 +49,9 @@ const setupSanPbxWebSocketServer = (ws) => {
   let inputSampleRateHz = 8000
   let inputChannels = 1
   let inputEncoding = "linear16"
+  let callerIdValue = ""
+  let callDirectionValue = ""
+  let didValue = ""
   let conversationHistory = []
   let deepgramWs = null
   let isProcessing = false
@@ -169,11 +172,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           channelId: channelId,
           callId: callId,
           streamId: streamId,
-          callerId: "", // Will be filled by SanIPPBX
-          callDirection: "Outgoing", // Our response is outgoing
+          callerId: callerIdValue || "",
+          callDirection: callDirectionValue || "Outgoing",
           extraParams: "",
           cid: "0",
-          did: "6745647", // Will be filled by SanIPPBX
+          did: didValue || "",
           timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
         }
 
@@ -212,11 +215,11 @@ const setupSanPbxWebSocketServer = (ws) => {
             channelId: channelId,
             callId: callId,
             streamId: streamId,
-            callerId: "",
-            callDirection: "Outgoing",
+            callerId: callerIdValue || "",
+            callDirection: callDirectionValue || "Outgoing",
             extraParams: "",
             cid: "0",
-            did: "6745647",
+            did: didValue || "",
             timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
           }
 
@@ -566,6 +569,10 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("CallerID:", data.callerId)
           console.log("Call Direction:", data.callDirection)
           console.log("DID:", data.did)
+          // Cache identifiers if provided
+          callerIdValue = data.callerId || callerIdValue
+          callDirectionValue = data.callDirection || callDirectionValue
+          didValue = data.did || didValue
           break
 
         case "start":
@@ -579,6 +586,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("[SANPBX] CallID:", callId)
           console.log("[SANPBX] ChannelID:", channelId)
           console.log("[SANPBX] Media Format:", JSON.stringify(data.mediaFormat))
+
+          // Cache identifiers if provided (prefer start values if present)
+          callerIdValue = data.callerId || callerIdValue
+          callDirectionValue = data.callDirection || callDirectionValue
+          didValue = data.did || didValue
 
           // Apply media format to Deepgram params when available
           try {
