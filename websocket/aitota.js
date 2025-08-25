@@ -24,6 +24,15 @@ const QUICK_RESPONSES = {
   yes: "Great! What would you like to know more about?",
   no: "No problem! Is there something else I can help you with?",
   okay: "Perfect! What's next?",
+  "good morning": "Good morning! How can I assist you today?",
+  "good afternoon": "Good afternoon! What can I help you with?",
+  "good evening": "Good evening! How may I help you?",
+  "bye": "Goodbye! Have a great day!",
+  "goodbye": "Goodbye! Take care!",
+  "see you": "See you later!",
+  "that's all": "Alright! Is there anything else you need?",
+  "nothing else": "Perfect! Have a wonderful day!",
+  "that's it": "Great! Feel free to call back if you need anything else.",
 }
 
 /**
@@ -117,7 +126,33 @@ const setupUnifiedVoiceServer = (ws) => {
    */
   const getQuickResponse = (text) => {
     const normalized = text.toLowerCase().trim()
-    return QUICK_RESPONSES[normalized] || null
+    
+    // Direct match
+    if (QUICK_RESPONSES[normalized]) {
+      return QUICK_RESPONSES[normalized]
+    }
+    
+    // Partial match for common variations
+    for (const [key, response] of Object.entries(QUICK_RESPONSES)) {
+      if (normalized.includes(key) || key.includes(normalized)) {
+        return response
+      }
+    }
+    
+    // Handle common variations
+    if (normalized.includes("hello") || normalized.includes("hi")) {
+      return QUICK_RESPONSES.hello
+    }
+    
+    if (normalized.includes("thank")) {
+      return QUICK_RESPONSES["thank you"]
+    }
+    
+    if (normalized.includes("bye") || normalized.includes("goodbye")) {
+      return QUICK_RESPONSES.bye
+    }
+    
+    return null
   }
 
   /**
@@ -133,7 +168,7 @@ const setupUnifiedVoiceServer = (ws) => {
 
       // Use fetch with timeout and optimized parameters for C-Zentrix
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 5000)
+      const timeoutId = setTimeout(() => controller.abort(), 3000) // Reduced from 5s to 3s
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -147,10 +182,10 @@ const setupUnifiedVoiceServer = (ws) => {
           target_language_code: language,
           speaker: "meera",
           pitch: 0,
-          pace: 1.2, // Slightly faster pace for quicker responses
+          pace: 1.4, // Increased pace for faster speech
           loudness: 1.0,
           speech_sample_rate: 8000,
-          enable_preprocessing: true,
+          enable_preprocessing: false, // Disable preprocessing for speed
           model: "bulbul:v1",
         }),
         signal: controller.signal,
@@ -181,7 +216,7 @@ const setupUnifiedVoiceServer = (ws) => {
       setTimeout(async () => {
         console.log("[TTS] Trying alternative streaming method in case primary failed")
         await streamAudioAlternative(audioBase64)
-      }, 100) // Reduced from 200ms
+      }, 50) // Reduced from 100ms for faster fallback
     } catch (error) {
       console.error("[TTS] Error:", error.message)
 
@@ -297,7 +332,7 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Connect to Deepgram with optimized settings and fallback
+   * Connect to Deepgram with optimized settings for low latency
    */
   const connectToDeepgram = (attemptCount = 0) => {
     console.log(`[STT] Connecting to Deepgram (attempt ${attemptCount + 1})`)
@@ -311,23 +346,26 @@ const setupUnifiedVoiceServer = (ws) => {
 
     // Add additional parameters based on attempt
     if (attemptCount === 0) {
-      // First attempt: Full feature set
+      // First attempt: Ultra-low latency settings
       params = {
         ...params,
         model: "nova-2",
         language: "en",
         interim_results: "true",
         smart_format: "true",
-        endpointing: "300",
+        endpointing: "100", // Reduced from 300ms to 100ms for faster response
         punctuate: "true",
+        diarize: "false", // Disable diarization for speed
+        multichannel: "false", // Disable multichannel for speed
       }
     } else if (attemptCount === 1) {
-      // Second attempt: Basic features
+      // Second attempt: Basic features with low latency
       params = {
         ...params,
         model: "base",
         language: "en",
         interim_results: "true",
+        endpointing: "50", // Even lower for fallback
       }
     }
     // Third attempt uses minimal params only
@@ -355,34 +393,39 @@ const setupUnifiedVoiceServer = (ws) => {
         const isFinal = response.is_final
         const confidence = response.channel?.alternatives?.[0]?.confidence
 
-        if (transcript?.trim() && confidence > 0.7) {
-          // Only process high-confidence results
-          if (isFinal) {
-            console.log(`[STT] Final transcript: "${transcript}" (${confidence})`)
-            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
+        if (transcript?.trim()) {
+          // Lower confidence threshold for faster response
+          if (confidence > 0.5) {
+            console.log(`[STT] ${isFinal ? 'Final' : 'Interim'} transcript: "${transcript}" (${confidence})`)
+            
+            if (isFinal) {
+              // Clear any existing silence timer
+              if (silenceTimer) {
+                clearTimeout(silenceTimer)
+                silenceTimer = null
+              }
 
-            // Clear any existing silence timer
-            if (silenceTimer) {
-              clearTimeout(silenceTimer)
-              silenceTimer = null
-            }
-
-            // Process immediately for short utterances
-            if (userUtteranceBuffer.length < 50) {
-              await processUserInput(userUtteranceBuffer)
-              userUtteranceBuffer = ""
+              // Process immediately for all final results
+              await processUserInput(transcript.trim())
             } else {
-              // Set shorter timer for longer utterances
-              silenceTimer = setTimeout(async () => {
-                if (userUtteranceBuffer.trim()) {
-                  await processUserInput(userUtteranceBuffer)
-                  userUtteranceBuffer = ""
+              // For interim results, only process if they're substantial and confident
+              if (transcript.length > 3 && confidence > 0.8) {
+                // Clear any existing silence timer
+                if (silenceTimer) {
+                  clearTimeout(silenceTimer)
+                  silenceTimer = null
                 }
-              }, 100) // 100ms vs longer delays
+
+                // Process interim results for very confident short phrases
+                if (transcript.length < 20) {
+                  await processUserInput(transcript.trim())
+                }
+              }
             }
           }
         }
       } else if (response.type === "UtteranceEnd") {
+        // Process any remaining buffer immediately
         if (userUtteranceBuffer.trim()) {
           console.log(`[STT] Utterance end: "${userUtteranceBuffer}"`)
           await processUserInput(userUtteranceBuffer)
@@ -488,50 +531,63 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Process user speech input with optimized flow
+   * Process user speech input with ultra-low latency flow
    */
   const processUserInput = async (transcript) => {
     if (isProcessing || !transcript.trim()) return
 
     isProcessing = true
     const totalStart = Date.now()
+    console.log(`[PROCESS] Starting processing for: "${transcript}"`)
 
     try {
-      // Start AI response and TTS in parallel for quick responses
+      // Check for quick responses first (0ms latency)
       const quickResponse = getQuickResponse(transcript)
 
       if (quickResponse) {
         // Immediate response for common phrases
+        console.log(`[PROCESS] Quick response found: "${quickResponse}"`)
         conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: quickResponse })
 
-        await synthesizeAndStreamAudio(quickResponse)
+        // Start TTS immediately without waiting
+        synthesizeAndStreamAudio(quickResponse).catch(err => 
+          console.error("[PROCESS] Quick response TTS error:", err.message)
+        )
       } else {
-        // Parallel processing: Start AI response generation
-        const aiResponsePromise = getAIResponse(transcript)
+        // For non-quick responses, start AI processing immediately
+        console.log(`[PROCESS] Getting AI response for: "${transcript}"`)
+        
+        // Start AI response generation (don't await here for faster response)
+        getAIResponse(transcript).then(async (aiResponse) => {
+          if (aiResponse) {
+            console.log(`[PROCESS] AI response received: "${aiResponse}"`)
+            
+            // Add to conversation history
+            conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
 
-        // Get AI response
-        const aiResponse = await aiResponsePromise
+            // Keep history lean for performance
+            if (conversationHistory.length > 6) {
+              conversationHistory = conversationHistory.slice(-6)
+            }
 
-        if (aiResponse) {
-          // Add to conversation history
-          conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
-
-          // Keep history lean for performance
-          if (conversationHistory.length > 6) {
-            conversationHistory = conversationHistory.slice(-6)
+            // Convert to speech and stream back
+            await synthesizeAndStreamAudio(aiResponse)
           }
-
-          // Convert to speech and stream back
-          await synthesizeAndStreamAudio(aiResponse)
-        }
+        }).catch(error => {
+          console.error("[PROCESS] AI response error:", error.message)
+        })
       }
 
       const totalTime = Date.now() - totalStart
-      console.log(`[TOTAL] Processing completed in ${totalTime}ms`)
+      console.log(`[PROCESS] Initial processing completed in ${totalTime}ms`)
     } catch (error) {
       console.error("[PROCESS] Error processing user input:", error.message)
     } finally {
-      isProcessing = false
+      // Don't set isProcessing to false immediately for quick responses
+      // Allow parallel processing of multiple inputs
+      setTimeout(() => {
+        isProcessing = false
+      }, 100) // Small delay to prevent rapid-fire processing
     }
   }
 
