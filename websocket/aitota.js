@@ -55,14 +55,6 @@ const setupUnifiedVoiceServer = (ws) => {
   let isStreaming = false
   let sttFailed = false
   
-  // Enhanced debugging variables
-  let audioReceived = false
-  let inboundAudioCount = 0
-  let outboundAudioCount = 0
-  let deepgramConnectTime = null
-  let lastAudioReceived = null
-  let deepgramAudioChunkCount = 0
-  
   // Add duplicate prevention tracking
   let lastProcessedTranscript = ""
   let lastProcessedTime = 0
@@ -137,6 +129,7 @@ const setupUnifiedVoiceServer = (ws) => {
 
   /**
    * Real-time audio streaming - sends each chunk immediately to SIP
+   * FIXED: Single streaming method to prevent audio duplication
    */
   const streamAudioToCallRealtime = async (audioBase64) => {
     const audioBuffer = Buffer.from(audioBase64, "base64")
@@ -144,7 +137,7 @@ const setupUnifiedVoiceServer = (ws) => {
     // C-Zentrix expects specific audio format
     // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
     const CHUNK_SIZE = 160 // 10ms chunks for 8kHz 16-bit mono
-    const CHUNK_DELAY = 5
+    const CHUNK_DELAY = 10
 
     let position = 0
     const streamStart = Date.now()
@@ -214,7 +207,7 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Enhanced text-to-speech with single streaming method
+   * FIXED: Optimized text-to-speech with single streaming method
    */
   const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
     try {
@@ -268,7 +261,14 @@ const setupUnifiedVoiceServer = (ws) => {
       const streamStartTime = new Date().toISOString()
       console.log(`[STREAM-START] ${streamStartTime} - Starting streaming to SIP`)
 
+      // FIXED: Only call ONE streaming method to prevent duplication
       await streamAudioToCallRealtime(audioBase64)
+
+      // REMOVED: Secondary streaming method that was causing duplication
+      // setTimeout(async () => {
+      //   console.log("[TTS] Trying alternative streaming method in case primary failed")
+      //   await streamAudioAlternative(audioBase64)
+      // }, 50)
       
     } catch (error) {
       console.error("[TTS] Error:", error.message)
@@ -280,14 +280,13 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Enhanced Deepgram connection with comprehensive debugging
+   * Connect to Deepgram with optimized settings for low latency
    */
   const connectToDeepgram = (attemptCount = 0) => {
     console.log(`[STT] Connecting to Deepgram (attempt ${attemptCount + 1})`)
 
-    // C-Zentrix sends slinear16 (16-bit signed linear PCM) at 8kHz
     let params = {
-      encoding: "linear16",  // This matches slinear16 from C-Zentrix
+      encoding: "linear16",
       sample_rate: "8000",
       channels: "1",
     }
@@ -299,12 +298,10 @@ const setupUnifiedVoiceServer = (ws) => {
         language: "en",
         interim_results: "true",
         smart_format: "true",
-        endpointing: "500",    // Increased for better silence detection
+        endpointing: "300", // Increased for more stable detection
         punctuate: "true",
         diarize: "false",
         multichannel: "false",
-        utterance_end_ms: "1000",  // Add utterance end detection
-        vad_turnoff: "500"     // Voice activity detection
       }
     } else if (attemptCount === 1) {
       params = {
@@ -312,12 +309,13 @@ const setupUnifiedVoiceServer = (ws) => {
         model: "base",
         language: "en",
         interim_results: "true",
-        endpointing: "300",
+        endpointing: "200",
       }
     }
 
     const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`
-    console.log(`[STT] Connecting to: ${deepgramUrl}`)
+
+    console.log(`[STT] Connecting to URL: ${deepgramUrl}`)
 
     deepgramWs = new WebSocket(deepgramUrl, {
       headers: {
@@ -326,60 +324,38 @@ const setupUnifiedVoiceServer = (ws) => {
     })
 
     deepgramWs.on("open", () => {
-      const connectTime = Date.now() - deepgramConnectTime
-      console.log(`[STT] Connected to Deepgram successfully in ${connectTime}ms`)
-      
-      // Send a keepalive message every 10 seconds
-      const keepAlive = setInterval(() => {
-        if (deepgramWs.readyState === WebSocket.OPEN) {
-          try {
-            deepgramWs.send(JSON.stringify({"type": "KeepAlive"}))
-          } catch (error) {
-            console.error("[STT] Keepalive error:", error.message)
-            clearInterval(keepAlive)
-          }
-        } else {
-          clearInterval(keepAlive)
-        }
-      }, 10000)
+      console.log("[STT] Connected to Deepgram successfully")
     })
 
+    // FIXED: Modified message handler to prevent duplicate processing
     deepgramWs.on("message", async (data) => {
-      try {
-        const response = JSON.parse(data)
+      const response = JSON.parse(data)
 
-        if (response.type === "Results") {
-          const transcript = response.channel?.alternatives?.[0]?.transcript
-          const isFinal = response.is_final
-          const confidence = response.channel?.alternatives?.[0]?.confidence || 0
+      if (response.type === "Results") {
+        const transcript = response.channel?.alternatives?.[0]?.transcript
+        const isFinal = response.is_final
+        const confidence = response.channel?.alternatives?.[0]?.confidence
 
-          if (transcript?.trim()) {
-            console.log(`[STT] ${isFinal ? 'FINAL' : 'interim'}: "${transcript}" (conf: ${confidence.toFixed(2)})`)
-            
-            // Only process final results with good confidence to avoid duplicates
-            if (isFinal && confidence > 0.5) {
-              if (silenceTimer) {
-                clearTimeout(silenceTimer)
-                silenceTimer = null
-              }
-              await processUserInput(transcript.trim())
+        if (transcript?.trim() && confidence > 0.6) { // Increased confidence threshold
+          console.log(`[STT] ${isFinal ? 'Final' : 'Interim'} transcript: "${transcript}" (${confidence})`)
+          
+          // FIXED: Only process final results to avoid duplicate responses
+          if (isFinal) {
+            if (silenceTimer) {
+              clearTimeout(silenceTimer)
+              silenceTimer = null
             }
+            await processUserInput(transcript.trim())
           }
-        } else if (response.type === "UtteranceEnd") {
-          console.log("[STT] Utterance ended")
-          // Only process if we have new content that hasn't been processed
-          if (userUtteranceBuffer.trim() && userUtteranceBuffer !== lastProcessedTranscript) {
-            console.log(`[STT] Processing utterance buffer: "${userUtteranceBuffer}"`)
-            await processUserInput(userUtteranceBuffer)
-            userUtteranceBuffer = ""
-          }
-        } else if (response.type === "Metadata") {
-          console.log("[STT] Metadata received:", response)
-        } else {
-          console.log("[STT] Other message type:", response.type)
+          // REMOVED: Interim processing that was causing duplicates
         }
-      } catch (error) {
-        console.error("[STT] Error parsing Deepgram response:", error.message)
+      } else if (response.type === "UtteranceEnd") {
+        // Only process if we have new content that hasn't been processed
+        if (userUtteranceBuffer.trim() && userUtteranceBuffer !== lastProcessedTranscript) {
+          console.log(`[STT] Utterance end: "${userUtteranceBuffer}"`)
+          await processUserInput(userUtteranceBuffer)
+          userUtteranceBuffer = ""
+        }
       }
     })
 
@@ -408,24 +384,7 @@ const setupUnifiedVoiceServer = (ws) => {
 
     deepgramWs.on("close", (code, reason) => {
       console.log(`[STT] Deepgram connection closed: ${code} - ${reason}`)
-      console.log(`[STT] Audio chunks processed: ${deepgramAudioChunkCount}`)
-      
-      if (deepgramAudioChunkCount === 0) {
-        console.error("[STT] NO AUDIO was sent to Deepgram - check audio routing from C-Zentrix!")
-      }
     })
-
-    // Override the send method to track audio chunks
-    const originalSend = deepgramWs.send.bind(deepgramWs)
-    deepgramWs.send = function(data) {
-      if (Buffer.isBuffer(data)) {
-        deepgramAudioChunkCount++
-        if (deepgramAudioChunkCount <= 5 || deepgramAudioChunkCount % 50 === 0) {
-          console.log(`[STT] Audio chunk ${deepgramAudioChunkCount} sent to Deepgram (${data.length} bytes)`)
-        }
-      }
-      return originalSend(data)
-    }
   }
 
   /**
@@ -494,14 +453,14 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Process user speech input with duplicate prevention and response tracking
+   * FIXED: Process user speech input with duplicate prevention and response tracking
    */
   const processUserInput = async (transcript) => {
     const responseId = trackResponse()
     
     if (isProcessing || !transcript.trim()) return
 
-    // Prevent duplicate processing of same transcript within 3 seconds
+    // FIXED: Prevent duplicate processing of same transcript within 3 seconds
     const now = Date.now()
     if (transcript === lastProcessedTranscript && (now - lastProcessedTime) < 3000) {
       console.log(`[PROCESS] Skipping duplicate transcript: "${transcript}"`)
@@ -587,21 +546,11 @@ const setupUnifiedVoiceServer = (ws) => {
           console.log("[CZ] Tracks:", JSON.stringify(data.start?.tracks))
           console.log("[CZ] Media Format:", JSON.stringify(data.start?.mediaFormat))
 
-          // Validate tracks configuration - THIS IS CRITICAL
-          if (!data.start?.tracks?.includes("inbound")) {
-            console.warn("[CZ] WARNING: 'inbound' track not found in tracks array!")
-            console.warn("[CZ] This means we won't receive audio from the caller")
-            console.warn("[CZ] Current tracks:", data.start?.tracks)
-          } else {
-            console.log("[CZ] Inbound track confirmed - will receive caller audio")
-          }
-
           if (data.start?.customParameters) {
             console.log("[CZ] Custom Parameters:", data.start.customParameters)
           }
 
           // Connect to Deepgram for speech recognition
-          deepgramConnectTime = Date.now()
           connectToDeepgram(0)
 
           // Send optimized greeting
@@ -614,53 +563,17 @@ const setupUnifiedVoiceServer = (ws) => {
           break
 
         case "media":
-          const now = Date.now()
-          lastAudioReceived = now
-          
-          console.log(`[CZ] Media - Track: ${data.media?.track}, Chunk: ${data.media?.chunk}, Timestamp: ${data.media?.timestamp}, Payload: ${data.media?.payload?.length || 0} chars`)
-          
-          // Only process inbound audio (from caller to bot)
-          if (data.media?.track === "inbound") {
-            inboundAudioCount++
-            if (inboundAudioCount === 1) {
-              console.log("[CZ] FIRST inbound audio received from caller!")
-              audioReceived = true
-            }
-            
-            if (data.media?.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              try {
-                const audioBuffer = Buffer.from(data.media.payload, "base64")
-                deepgramWs.send(audioBuffer)
-                
-                if (inboundAudioCount <= 5 || inboundAudioCount % 50 === 0) {
-                  console.log(`[STT] Sent inbound audio chunk ${inboundAudioCount} (${audioBuffer.length} bytes) to Deepgram`)
-                }
-              } catch (error) {
-                console.error("[STT] Error processing inbound audio:", error.message)
-              }
-            } else {
-              console.log(`[STT] Cannot process inbound audio - Deepgram state: ${deepgramWs?.readyState || 'null'}`)
-            }
-          } else if (data.media?.track === "outbound") {
-            outboundAudioCount++
-            // Don't log every outbound chunk to reduce noise
-            if (outboundAudioCount <= 3 || outboundAudioCount % 100 === 0) {
-              console.log(`[CZ] Outbound audio chunk ${outboundAudioCount} (bot speaking)`)
-            }
-          } else {
-            console.log(`[CZ] Unknown/empty track: '${data.media?.track}'`)
-          }
-          
-          // Log periodic stats
-          if ((inboundAudioCount + outboundAudioCount) % 100 === 0) {
-            console.log(`[CZ] Audio stats - Inbound: ${inboundAudioCount}, Outbound: ${outboundAudioCount}`)
+          // Forward audio data to Deepgram for transcription
+          if (data.media?.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+            const audioBuffer = Buffer.from(data.media.payload, "base64")
+            deepgramWs.send(audioBuffer)
+          } else if (sttFailed) {
+            console.log("[STT] Audio received but STT unavailable - consider implementing DTMF fallback")
           }
           break
 
         case "stop":
           console.log("[CZ] Call ended")
-          console.log(`[CZ] Final audio stats - Inbound: ${inboundAudioCount}, Outbound: ${outboundAudioCount}`)
-          console.log(`[STT] Total Deepgram chunks: ${deepgramAudioChunkCount}`)
 
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             deepgramWs.close()
@@ -675,12 +588,7 @@ const setupUnifiedVoiceServer = (ws) => {
           console.log("[CZ] DTMF received:", data.dtmf?.digit)
           break
 
-        case "vad":
-          console.log("[CZ] VAD received:", data.vad?.value)
-          break
-
         default:
-          console.log(`[CZ] Unknown event: ${data.event}`)
           break
       }
     } catch (error) {
@@ -688,28 +596,9 @@ const setupUnifiedVoiceServer = (ws) => {
     }
   })
 
-  // Add connection monitoring
-  const monitoringInterval = setInterval(() => {
-    if (lastAudioReceived) {
-      const timeSinceLastAudio = Date.now() - lastAudioReceived
-      if (timeSinceLastAudio > 10000) { // 10 seconds without audio
-        console.log(`[CZ] WARNING: No audio received for ${timeSinceLastAudio}ms`)
-      }
-    }
-    
-    // Log current status every 30 seconds
-    if (Date.now() % 30000 < 5000) {
-      console.log(`[STATUS] Audio received: ${audioReceived}, Inbound: ${inboundAudioCount}, Outbound: ${outboundAudioCount}, Deepgram chunks: ${deepgramAudioChunkCount}`)
-    }
-  }, 5000)
-
   // Handle connection close
   ws.on("close", () => {
     console.log("[CZ] WebSocket connection closed")
-    console.log(`[CZ] Session summary - Audio received: ${audioReceived}, Inbound chunks: ${inboundAudioCount}, Outbound chunks: ${outboundAudioCount}`)
-
-    // Clear monitoring
-    clearInterval(monitoringInterval)
 
     // Cleanup
     if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
@@ -732,10 +621,6 @@ const setupUnifiedVoiceServer = (ws) => {
     lastProcessedTranscript = ""
     lastProcessedTime = 0
     activeResponseId = null
-    audioReceived = false
-    inboundAudioCount = 0
-    outboundAudioCount = 0
-    deepgramAudioChunkCount = 0
   })
 
   // Handle errors
