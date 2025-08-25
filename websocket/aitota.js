@@ -136,7 +136,7 @@ const setupUnifiedVoiceServer = (ws) => {
 
     // C-Zentrix expects specific audio format
     // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
-    const CHUNK_SIZE = 160 // 10ms chunks for 8kHz 16-bit mono
+    const CHUNK_SIZE = 320 // 10ms chunks for 8kHz 16-bit mono
     const CHUNK_DELAY = 10
 
     let position = 0
