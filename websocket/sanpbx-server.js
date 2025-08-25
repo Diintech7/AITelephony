@@ -157,16 +157,6 @@ const setupSanPbxWebSocketServer = (ws) => {
         // Prepare payload
         const payloadBase64 = paddedChunk.toString("base64")
 
-        // Log details for the first chunk only (for visibility without spamming)
-        if (currentChunk === 1) {
-          console.log(
-            `[SANPBX-STREAM] First chunk -> raw_bytes=${chunk.length}, padded_bytes=${paddedChunk.length}, base64_length=${payloadBase64.length}`,
-          )
-          console.log(
-            `[SANPBX-MESSAGE] Example media message fields -> event=media, chunk=${currentChunk}, chunk_durn_ms=${CHUNK_DURATION_MS}, channelId=${channelId}, callId=${callId}, streamId=${streamId}, payload=<base64:${paddedChunk.length} bytes>`,
-          )
-        }
-
         // Format message exactly like SanIPPBX expects
         const mediaMessage = {
           event: "media",
@@ -185,17 +175,8 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
 
         try {
-          // Verbose log: print the exact message object being sent
-          const verboseAll = process.env.SANPBX_VERBOSE_LOG === "1"
-          const shouldSample = !verboseAll && (currentChunk === 1 || currentChunk % 50 === 0)
-          if (verboseAll || shouldSample) {
-            console.log(`[SANPBX-SEND] Media message being sent:`)
-            console.log(JSON.stringify(mediaMessage, null, 2))
-          }
-
           ws.send(JSON.stringify(mediaMessage))
           chunksSuccessfullySent++
-          console.log(`[CHUNK-${currentChunk}] ✅ Sent successfully`)
           currentChunk++
 
           if (chunksSuccessfullySent % 20 === 0) {
@@ -234,15 +215,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
           }
 
-          const verboseAll = process.env.SANPBX_VERBOSE_LOG === "1"
-          const shouldSample = !verboseAll
-          if (verboseAll || shouldSample) {
-            console.log(`[SANPBX-SEND] Trailing silence media message:`)
-            console.log(JSON.stringify(silenceMessage, null, 2))
-          }
-
           ws.send(JSON.stringify(silenceMessage))
-          console.log(`[CHUNK-${currentChunk}] ✅ Sent successfully`)
           currentChunk++
           await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
         }
@@ -383,10 +356,15 @@ const setupSanPbxWebSocketServer = (ws) => {
         const isFinal = response.is_final
         const confidence = response.channel?.alternatives?.[0]?.confidence
 
-        if (transcript?.trim() && confidence > 0.6) {
-          console.log(`[STT] ${isFinal ? 'Final' : 'Interim'} transcript: "${transcript}" (${confidence})`)
-          
-          if (isFinal) {
+        if (transcript?.trim()) {
+          console.log(JSON.stringify({
+            source: "Deepgram",
+            type: isFinal ? "final" : "interim",
+            transcript,
+            confidence
+          }, null, 2))
+
+          if (isFinal && confidence > 0.4) {
             if (silenceTimer) {
               clearTimeout(silenceTimer)
               silenceTimer = null
