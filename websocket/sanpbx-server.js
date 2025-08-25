@@ -236,7 +236,7 @@ function setupSanPbxWebSocketServer(ws) {
         break
 
       default:
-        console.log(`[SANPBX] Unhandled event: ${data.event}`, data)
+        console.log(`[SANPBX] Unhandled event: ${data.event}`)
         break
     }
   })
