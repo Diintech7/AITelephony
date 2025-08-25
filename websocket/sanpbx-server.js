@@ -46,6 +46,9 @@ const setupSanPbxWebSocketServer = (ws) => {
   let streamId = null
   let callId = null
   let channelId = null
+  let inputSampleRateHz = 8000
+  let inputChannels = 1
+  let inputEncoding = "linear16"
   let conversationHistory = []
   let deepgramWs = null
   let isProcessing = false
@@ -170,7 +173,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           callDirection: "Outgoing", // Our response is outgoing
           extraParams: "",
           cid: "0",
-          did: "", // Will be filled by SanIPPBX
+          did: "6745647", // Will be filled by SanIPPBX
           timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
         }
 
@@ -211,7 +214,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             callDirection: "Outgoing",
             extraParams: "",
             cid: "0",
-            did: "",
+            did: "6745647",
             timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
           }
 
@@ -307,9 +310,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     // FIXED: Updated for SanIPPBX audio format
     let params = {
-      encoding: "linear16",
-      sample_rate: "8000", // Match SanIPPBX sample rate
-      channels: "1",
+      encoding: inputEncoding,
+      sample_rate: String(inputSampleRateHz),
+      channels: String(inputChannels),
     }
 
     if (attemptCount === 0) {
@@ -336,6 +339,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`
 
+    console.log(`[STT] Deepgram params -> encoding=${params.encoding}, sample_rate=${params.sample_rate}, channels=${params.channels}`)
     console.log(`[STT] Connecting to URL: ${deepgramUrl}`)
 
     deepgramWs = new WebSocket(deepgramUrl, {
@@ -364,7 +368,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             confidence
           }, null, 2))
 
-          if (isFinal && confidence > 0.4) {
+          // forward anything Deepgram believes is speech, even low-confidence, for visibility
+          if (isFinal) {
             if (silenceTimer) {
               clearTimeout(silenceTimer)
               silenceTimer = null
@@ -570,6 +575,28 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("[SANPBX] CallID:", callId)
           console.log("[SANPBX] ChannelID:", channelId)
           console.log("[SANPBX] Media Format:", JSON.stringify(data.mediaFormat))
+
+          // Apply media format to Deepgram params when available
+          try {
+            const mf = data.mediaFormat || {}
+            // Normalize encoding to Deepgram expected value
+            const enc = (mf.encoding || '').toString().toLowerCase()
+            if (enc.includes('pcm') || enc.includes('linear16') || enc === '') {
+              inputEncoding = 'linear16'
+            } else {
+              inputEncoding = enc
+            }
+            const sr = Number(mf.sampleRate)
+            inputSampleRateHz = Number.isFinite(sr) && sr > 0 ? sr : 8000
+            const ch = Number(mf.channels)
+            inputChannels = Number.isFinite(ch) && ch > 0 ? ch : 1
+            console.log(`[STT] Using media format -> encoding=${inputEncoding}, sample_rate=${inputSampleRateHz}, channels=${inputChannels}`)
+          } catch (e) {
+            console.log('[STT] Using default media format due to parse error:', e.message)
+            inputEncoding = 'linear16'
+            inputSampleRateHz = 8000
+            inputChannels = 1
+          }
 
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0)
