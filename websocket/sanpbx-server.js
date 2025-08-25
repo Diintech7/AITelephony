@@ -126,6 +126,10 @@ const setupSanPbxWebSocketServer = (ws) => {
       // 8000 samples/sec * 0.02 sec * 2 bytes = 320 bytes per chunk
       const CHUNK_SIZE = 320 // 20ms chunks for 8kHz 16-bit mono
       const CHUNK_DURATION_MS = 20
+      const BYTES_PER_SAMPLE = 2
+      const CHANNELS = 1
+      const ENCODING = "LINEAR16"
+      const SAMPLE_RATE_HZ = 8000
       
       let position = 0
       let currentChunk = 1
@@ -134,6 +138,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       console.log(
         `[SANPBX-STREAM] ${streamStartTime} - Starting stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
+      )
+      console.log(
+        `[SANPBX-FORMAT] Sending audio -> encoding=${ENCODING}, sample_rate_hz=${SAMPLE_RATE_HZ}, channels=${CHANNELS}, bytes_per_sample=${BYTES_PER_SAMPLE}, chunk_duration_ms=${CHUNK_DURATION_MS}, chunk_size_bytes=${CHUNK_SIZE}`,
       )
       console.log(`[SANPBX] StreamID: ${streamId}, CallID: ${callId}, ChannelID: ${channelId}`)
 
@@ -147,10 +154,23 @@ const setupSanPbxWebSocketServer = (ws) => {
           ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) 
           : chunk
 
+        // Prepare payload
+        const payloadBase64 = paddedChunk.toString("base64")
+
+        // Log details for the first chunk only (for visibility without spamming)
+        if (currentChunk === 1) {
+          console.log(
+            `[SANPBX-STREAM] First chunk -> raw_bytes=${chunk.length}, padded_bytes=${paddedChunk.length}, base64_length=${payloadBase64.length}`,
+          )
+          console.log(
+            `[SANPBX-MESSAGE] Example media message fields -> event=media, chunk=${currentChunk}, chunk_durn_ms=${CHUNK_DURATION_MS}, channelId=${channelId}, callId=${callId}, streamId=${streamId}, payload=<base64:${paddedChunk.length} bytes>`,
+          )
+        }
+
         // Format message exactly like SanIPPBX expects
         const mediaMessage = {
           event: "media",
-          payload: paddedChunk.toString("base64"),
+          payload: payloadBase64,
           chunk: currentChunk,
           chunk_durn_ms: CHUNK_DURATION_MS,
           channelId: channelId,
