@@ -185,8 +185,17 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
 
         try {
+          // Verbose log: print the exact message object being sent
+          const verboseAll = process.env.SANPBX_VERBOSE_LOG === "1"
+          const shouldSample = !verboseAll && (currentChunk === 1 || currentChunk % 50 === 0)
+          if (verboseAll || shouldSample) {
+            console.log(`[SANPBX-SEND] Media message being sent:`)
+            console.log(JSON.stringify(mediaMessage, null, 2))
+          }
+
           ws.send(JSON.stringify(mediaMessage))
           chunksSuccessfullySent++
+          console.log(`[CHUNK-${currentChunk}] ✅ Sent successfully`)
           currentChunk++
 
           if (chunksSuccessfullySent % 20 === 0) {
@@ -212,7 +221,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           const silenceMessage = {
             event: "media",
             payload: silenceChunk.toString("base64"),
-            chunk: currentChunk++,
+            chunk: currentChunk,
             chunk_durn_ms: CHUNK_DURATION_MS,
             channelId: channelId,
             callId: callId,
@@ -224,8 +233,17 @@ const setupSanPbxWebSocketServer = (ws) => {
             did: "",
             timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
           }
-          
+
+          const verboseAll = process.env.SANPBX_VERBOSE_LOG === "1"
+          const shouldSample = !verboseAll
+          if (verboseAll || shouldSample) {
+            console.log(`[SANPBX-SEND] Trailing silence media message:`)
+            console.log(JSON.stringify(silenceMessage, null, 2))
+          }
+
           ws.send(JSON.stringify(silenceMessage))
+          console.log(`[CHUNK-${currentChunk}] ✅ Sent successfully`)
+          currentChunk++
           await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
         }
       } catch (error) {
