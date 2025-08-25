@@ -228,7 +228,11 @@ function setupSanPbxWebSocketServer(ws) {
   ws.on("error", (err) => {
     console.error(`[SANPBX] ${ts()} - WS error: ${err.message}`)
   })
-
+  function normalizeSampleRate(rate) {
+    const allowed = [8000, 16000, 22050, 24000]
+    return allowed.includes(rate) ? rate : 24000 // fallback
+  }
+  
   ws.on("message", async (raw) => {
     const data = safeJsonParse(raw)
     if (!data || !data.event) return
