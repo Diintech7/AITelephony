@@ -148,6 +148,14 @@ const setupUnifiedVoiceServer = (ws) => {
     )
     console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`)
 
+    // Verify WebSocket is ready
+    if (ws.readyState !== WebSocket.OPEN) {
+      console.error("[STREAM] WebSocket not ready, state:", ws.readyState)
+      return
+    }
+
+    console.log("[STREAM] WebSocket ready, starting audio stream...")
+
     let chunksSuccessfullySent = 0
 
     while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
@@ -169,7 +177,8 @@ const setupUnifiedVoiceServer = (ws) => {
         ws.send(JSON.stringify(mediaMessage))
         chunksSuccessfullySent++
 
-        if (chunksSuccessfullySent % 20 === 0) {
+        // Only log every 50 chunks to reduce noise
+        if (chunksSuccessfullySent % 50 === 0) {
           console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`)
         }
       } catch (error) {
@@ -257,6 +266,9 @@ const setupUnifiedVoiceServer = (ws) => {
 
       const ttsTime = Date.now() - startTime
       console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`)
+
+      // DEBUG: Log the first few characters to understand the format
+      console.log(`[TTS] Audio format check - first 50 chars: ${audioBase64.substring(0, 50)}`)
 
       const streamStartTime = new Date().toISOString()
       console.log(`[STREAM-START] ${streamStartTime} - Starting streaming to SIP`)
@@ -558,7 +570,17 @@ const setupUnifiedVoiceServer = (ws) => {
           console.log("[CZ] Sending greeting:", greeting)
 
           setTimeout(async () => {
+            console.log("[CZ] Starting greeting audio...")
             await synthesizeAndStreamAudio(greeting)
+            console.log("[CZ] Greeting audio completed")
+            
+            // Test with a simple tone to verify audio pipeline
+            setTimeout(async () => {
+              console.log("[CZ] Testing simple tone...")
+              const simpleTone = generateSimpleTone(440, 2.0) // 2 second tone
+              await streamAudioToCallRealtime(simpleTone)
+              console.log("[CZ] Simple tone test completed")
+            }, 2000)
           }, 1000) // Increased delay for call stability
           break
 
