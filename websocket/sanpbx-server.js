@@ -26,7 +26,7 @@ function bytesPer10ms(rate, channels = 1) {
 async function streamAudioToCallRealtime({ ws, streamId, pcmBuffer, sampleRate, channels }) {
   const chunkBytes = bytesPer10ms(sampleRate, channels)
   const totalChunks = Math.ceil(pcmBuffer.length / chunkBytes)
-  console.log(`[STREAM-START] ${ts()} - total=${totalChunks}, chunkBytes=${chunkBytes}`)
+  console.log(`[STREAM-START] ${ts()} - total=${totalChunks}, chunkBytes=${chunkBytes}, sampleRate=${sampleRate}`)
 
   for (let pos = 0, sent = 0; pos < pcmBuffer.length && ws.readyState === WebSocket.OPEN; pos += chunkBytes) {
     const slice = pcmBuffer.slice(pos, pos + chunkBytes)
@@ -41,18 +41,21 @@ async function streamAudioToCallRealtime({ ws, streamId, pcmBuffer, sampleRate, 
 
 // -------- ElevenLabs TTS --------
 async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channels }) {
-  console.log(`[TTS-START] ${ts()} - ElevenLabs: "${text}"`)
+  console.log(`[TTS-START] ${ts()} - ElevenLabs: "${text}" (target: ${sampleRate}Hz)`)
 
   // Map PBX sampleRate → ElevenLabs output_format
   const formatMap = {
     8000: "pcm_8000",
-    16000: "pcm_16000",
+    16000: "pcm_16000", 
     22050: "pcm_22050",
     24000: "pcm_24000",
+    44000: "pcm_44100", // Map 44000 to 44100 (closest available)
     44100: "pcm_44100",
-    44000: "pcm_44000", // PBX sometimes reports 44000
   }
-  const outputFormat =  "pcm_44100"
+  
+  // Use the mapped format or default to pcm_44100
+  const outputFormat = formatMap[sampleRate] || "pcm_44100"
+  console.log(`[TTS] Using ElevenLabs format: ${outputFormat} for sampleRate: ${sampleRate}`)
 
   try {
     const resp = await fetch(
@@ -72,7 +75,7 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channe
     )
     if (!resp.ok) throw new Error(`ElevenLabs API ${resp.status}: ${await resp.text()}`)
 
-    const audioBuf = Buffer.from(await resp.arrayBuffer()) // already PCM LINEAR16
+    const audioBuf = Buffer.from(await resp.arrayBuffer())
     console.log(`[TTS] ElevenLabs returned ${audioBuf.length} bytes PCM (${outputFormat})`)
 
     await streamAudioToCallRealtime({
@@ -99,7 +102,7 @@ async function getAiResponse(prompt) {
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You are a helpful voice assistant." },
+          { role: "system", content: "You are a helpful voice assistant. Keep responses concise and conversational." },
           { role: "user", content: prompt },
         ],
       }),
@@ -120,32 +123,61 @@ function setupSanPbxWebSocketServer(ws) {
   let streamId = null
   let mediaFormat = { encoding: "LINEAR16", sampleRate: 44100, channels: 1 }
   let dgWs = null
+  let callAnswered = false // Track if call has been answered
+  let isProcessing = false // Prevent concurrent TTS calls
 
   // connect Deepgram once call starts
-  const connectDeepgram = (sampleRate) => {
+  const connectDeepgram = (sampleRate, encoding) => {
+    // Normalize encoding for Deepgram
+    const dgEncoding = encoding?.toLowerCase() === 'pcm' ? 'linear16' : 'linear16'
+    
+    console.log(`[STT] Connecting to Deepgram with ${dgEncoding}, ${sampleRate}Hz`)
+    
     dgWs = new DGWebSocket(
-      `wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=${sampleRate}&channels=1&model=nova-2&interim_results=false&smart_format=true`,
+      `wss://api.deepgram.com/v1/listen?encoding=${dgEncoding}&sample_rate=${sampleRate}&channels=1&model=nova-2&interim_results=false&smart_format=true&endpointing=300`,
       { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
     )
-    dgWs.on("open", () => console.log("[STT] Connected to Deepgram"))
+    
+    dgWs.on("open", () => {
+      console.log("[STT] Connected to Deepgram successfully")
+    })
+    
     dgWs.on("message", async (msg) => {
-      const data = JSON.parse(msg.toString())
-      const transcript = data.channel?.alternatives?.[0]?.transcript
-      if (transcript) {
-        console.log(`[STT] Transcript: "${transcript}"`)
-        const reply = await getAiResponse(transcript)
-        console.log(`[AI] Response: "${reply}"`)
-        await synthesizeAndStreamAudio({
-          text: reply,
-          ws,
-          streamId,
-          sampleRate: mediaFormat.sampleRate,
-          channels: mediaFormat.channels,
-        })
+      try {
+        const data = JSON.parse(msg.toString())
+        const transcript = data.channel?.alternatives?.[0]?.transcript
+        
+        if (transcript && transcript.trim() && !isProcessing) {
+          console.log(`[STT] Transcript: "${transcript}"`)
+          isProcessing = true
+          
+          try {
+            const reply = await getAiResponse(transcript)
+            console.log(`[AI] Response: "${reply}"`)
+            
+            await synthesizeAndStreamAudio({
+              text: reply,
+              ws,
+              streamId,
+              sampleRate: mediaFormat.sampleRate,
+              channels: mediaFormat.channels,
+            })
+          } finally {
+            isProcessing = false
+          }
+        }
+      } catch (error) {
+        console.error("[STT] Error processing message:", error.message)
       }
     })
-    dgWs.on("close", () => console.log("[STT] Deepgram closed"))
-    dgWs.on("error", (e) => console.error("[STT] Error:", e.message))
+    
+    dgWs.on("close", (code, reason) => {
+      console.log(`[STT] Deepgram closed: ${code} ${reason}`)
+    })
+    
+    dgWs.on("error", (e) => {
+      console.error("[STT] Deepgram error:", e.message)
+    })
   }
 
   ws.on("message", async (raw) => {
@@ -155,79 +187,131 @@ function setupSanPbxWebSocketServer(ws) {
     } catch {
       return
     }
+    
     switch (data.event) {
       case "connected":
         console.log("[SANPBX] Connected:", data)
         break
+        
       case "start":
         console.log("[SANPBX] Call started")
         streamId = data.streamId
-        mediaFormat = data.mediaFormat || mediaFormat
+        
+        // Handle different encoding formats from PBX
+        if (data.mediaFormat) {
+          mediaFormat = {
+            encoding: data.mediaFormat.encoding || "LINEAR16",
+            sampleRate: data.mediaFormat.sampleRate || 44100,
+            channels: data.mediaFormat.channels || 1
+          }
+        }
+        
         console.log("[SANPBX] streamId:", streamId)
         console.log("[SANPBX] Media Format:", mediaFormat)
-        connectDeepgram(mediaFormat.sampleRate)
-        setTimeout(async () => {
-          await synthesizeAndStreamAudio({
-            text: "Hi! This is a test greeting from the AI assistant. How can I help you today?",
-            ws,
-            streamId,
-            sampleRate: mediaFormat.sampleRate,
-            channels: mediaFormat.channels,
-          })
-        }, 500)
+        
+        // Connect to Deepgram with correct parameters
+        connectDeepgram(mediaFormat.sampleRate, mediaFormat.encoding)
         break
-        case "answer":
-          console.log("[SANPBX] Call answered")
+        
+      case "answer":
+        console.log("[SANPBX] Call answered")
+        callAnswered = true
+        
+        // Extract identifiers from the incoming event
+        const { callId, channelId, streamId: ansStreamId } = data
+        
+        // Update streamId if provided
+        if (ansStreamId) {
+          streamId = ansStreamId
+        }
+        
+        // Send ACK back to PBX so it bridges media
+        const ack = {
+          event: "answer",
+          callId,
+          channelId,
+          streamId,
+        }
+        
+        try {
+          ws.send(JSON.stringify(ack))
+          console.log("[SANPBX] Sent answer ACK back to PBX")
+        } catch (err) {
+          console.error("[SANPBX] Failed to send answer ACK:", err.message)
+        }
 
-          // pull identifiers from the incoming event
-          const { callId, channelId, streamId: ansStreamId } = data
-
-          // Send ACK back to PBX so it bridges media
-          const ack = {
-            event: "answer",
-            callId,
-            channelId,
-            streamId: ansStreamId,
+        // Wait a bit for media bridge to establish, then send greeting
+        setTimeout(async () => {
+          if (!isProcessing && callAnswered) {
+            isProcessing = true
+            try {
+              const greeting = "Hi! This is your AI assistant. How can I help you today?"
+              await synthesizeAndStreamAudio({
+                text: greeting,
+                ws,
+                streamId,
+                sampleRate: mediaFormat.sampleRate,
+                channels: mediaFormat.channels,
+              })
+            } finally {
+              isProcessing = false
+            }
           }
-          try {
-            ws.send(JSON.stringify(ack))
-            console.log("[SANPBX] Sent answer ACK back to PBX")
-          } catch (err) {
-            console.error("[SANPBX] Failed to send answer ACK:", err.message)
-          }
+        }, 1000) // Increased delay for better reliability
+        break
 
-          // Now synthesize & stream greeting
-          const greeting = "Hi! This is a test greeting from the AI assistant. How can I help you today?"
-          await synthesizeAndStreamAudio({
-            text: greeting,
-            ws,
-            streamId: ansStreamId,
-            sampleRate: mediaFormat.sampleRate,
-            channels: mediaFormat.channels,
-          })
-          break
-
-        
-        
-        
-        
       case "media": {
         const b64 = data?.media?.payload
-        if (b64 && dgWs && dgWs.readyState === WebSocket.OPEN) {
-          dgWs.send(Buffer.from(b64, "base64"))
+        if (b64 && dgWs && dgWs.readyState === WebSocket.OPEN && callAnswered) {
+          try {
+            dgWs.send(Buffer.from(b64, "base64"))
+          } catch (err) {
+            console.error("[STT] Error sending audio to Deepgram:", err.message)
+          }
         }
         break
       }
+      
       case "dtmf":
         console.log(`[SANPBX] DTMF: ${data.digit}`)
         break
+        
       case "stop":
         console.log("[SANPBX] Call stopped")
-        if (dgWs) try { dgWs.close() } catch {}
-        ws.close()
+        callAnswered = false
+        isProcessing = false
+        
+        if (dgWs) {
+          try { 
+            dgWs.close() 
+          } catch {}
+        }
+        
+        try {
+          ws.close()
+        } catch {}
         break
+        
       default:
+        console.log(`[SANPBX] Unknown event: ${data.event}`)
         break
+    }
+  })
+  
+  // Handle WebSocket errors and cleanup
+  ws.on("error", (error) => {
+    console.error("[SANPBX] WebSocket error:", error.message)
+  })
+  
+  ws.on("close", () => {
+    console.log("[SANPBX] WebSocket connection closed")
+    callAnswered = false
+    isProcessing = false
+    
+    if (dgWs) {
+      try { 
+        dgWs.close() 
+      } catch {}
     }
   })
 }
