@@ -9,9 +9,10 @@ const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY
 const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "kdmDKE6EkgrWrrykO9Qt"
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY
 
-if (!ELEVEN_API_KEY || !DEEPGRAM_API_KEY || !OPENAI_API_KEY) {
-  console.error("❌ Missing API keys in .env (ElevenLabs / Deepgram / OpenAI)")
+if (!SARVAM_API_KEY || !DEEPGRAM_API_KEY || !OPENAI_API_KEY) {
+  console.error("❌ Missing API keys in .env (Sarvam / Deepgram / OpenAI)")
   process.exit(1)
 }
 
@@ -418,6 +419,76 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, channelId, callId,
   }
 }
 
+// -------- Sarvam HTTP TTS (8000 Hz, PBX format) --------
+async function synthesizeAndStreamAudioSarvam({ text, ws, streamId, channelId, callId, sampleRate = 8000, channels = 1, callDirection, language = "en", speaker = "pavithra" }) {
+  console.log(`\n[TTS-START:SARVAM] ${ts()}`)
+  console.log(`  📝 Text: "${text}"`)
+  console.log(`  🎵 Target: ${sampleRate}Hz, ${channels} channels (forced 8000Hz)`) 
+
+  if (!text || text.trim().length === 0) {
+    console.error("[TTS:SARVAM] ❌ Empty text provided")
+    return
+  }
+
+  try {
+    const body = {
+      inputs: [text.trim()],
+      target_language_code: language,
+      speaker,
+      pitch: 0,
+      pace: 1.0,
+      loudness: 1.0,
+      speech_sample_rate: 8000,
+      enable_preprocessing: true,
+      model: "bulbul:v1",
+    }
+
+    console.log("[TTS:SARVAM] 📤 Request body:", JSON.stringify(body))
+
+    const resp = await fetch("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "API-Subscription-Key": SARVAM_API_KEY,
+      },
+      body: JSON.stringify(body),
+    })
+
+    console.log(`[TTS:SARVAM] 📥 Response status: ${resp.status}`)
+
+    if (!resp.ok) {
+      const errorText = await resp.text()
+      throw new Error(`Sarvam API ${resp.status}: ${errorText}`)
+    }
+
+    const json = await resp.json()
+    const audioBase64 = json?.audios?.[0]
+    if (!audioBase64) {
+      throw new Error("Sarvam response missing audio data")
+    }
+
+    const audioBuf = Buffer.from(audioBase64, "base64")
+    console.log(`[TTS:SARVAM] 📦 Received ${audioBuf.length} bytes @ 8000Hz`)
+    logAudioSample("TTS-SARVAM", audioBuf, 32)
+
+    // Stream out in exact PBX media event format
+    const sentChunks = await streamAudioToCallRealtime({
+      ws,
+      streamId,
+      channelId,
+      callId,
+      pcmBuffer: audioBuf,
+      sampleRate: 8000,
+      channels: 1,
+      callDirection,
+    })
+
+    console.log(`[TTS:SARVAM] ✅ Sent ${sentChunks} audio chunks`)
+  } catch (err) {
+    console.error(`[TTS:SARVAM] ❌ Error: ${err.message}`)
+  }
+}
+
 // -------- OpenAI GPT --------
 async function getAiResponse(prompt) {
   try {
@@ -528,15 +599,17 @@ function setupSanPbxWebSocketServer(ws) {
               const reply = await getAiResponse(transcript)
               console.log(`🤖 [AI] Response: "${reply}"`)
               
-              await synthesizeAndStreamAudio({
+              await synthesizeAndStreamAudioSarvam({
                 text: reply,
                 ws,
                 streamId,
                 channelId,
                 callId,
-                sampleRate: mediaFormat.sampleRate,
-                channels: mediaFormat.channels,
+                sampleRate: 8000,
+                channels: 1,
                 callDirection,
+                language: "en",
+                speaker: "pavithra",
               })
             }
           } finally {
@@ -599,9 +672,11 @@ function setupSanPbxWebSocketServer(ws) {
         if (data.mediaFormat) {
           mediaFormat = {
             encoding: data.mediaFormat.encoding || "LINEAR16",
-            sampleRate: data.mediaFormat.sampleRate || 8000,
-            channels: data.mediaFormat.channels || 1
+            sampleRate: 8000,
+            channels: 1
           }
+        } else {
+          mediaFormat = { encoding: "LINEAR16", sampleRate: 8000, channels: 1 }
         }
         
         console.log(`[SANPBX] 🆔 Stream ID: ${streamId}`)
@@ -670,15 +745,17 @@ function setupSanPbxWebSocketServer(ws) {
               setTimeout(async () => {
                 console.log("2️⃣ Sending greeting...")
                 const greeting = "Hello! This is your AI assistant. I'm sending audio now. Can you hear me clearly?"
-                await synthesizeAndStreamAudio({
+                await synthesizeAndStreamAudioSarvam({
                   text: greeting,
                   ws,
                   streamId,
                   channelId,
                   callId,
-                  sampleRate: mediaFormat.sampleRate,
-                  channels: mediaFormat.channels,
+                  sampleRate: 8000,
+                  channels: 1,
                   callDirection,
+                  language: "en",
+                  speaker: "pavithra",
                 })
                 
                 setTimeout(() => {
@@ -759,15 +836,17 @@ function setupSanPbxWebSocketServer(ws) {
               
               // Send voice response
               const dtmfResponse = `You pressed ${data.digit}. Audio test complete.`
-              await synthesizeAndStreamAudio({
+              await synthesizeAndStreamAudioSarvam({
                 text: dtmfResponse,
                 ws,
                 streamId,
                 channelId,
                 callId,
-                sampleRate: mediaFormat.sampleRate,
-                channels: mediaFormat.channels,
+                sampleRate: 8000,
+                channels: 1,
                 callDirection,
+                language: "en",
+                speaker: "pavithra",
               })
             } catch (err) {
               console.error("[DEBUG] ❌ DTMF response error:", err.message)
