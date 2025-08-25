@@ -178,6 +178,8 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
 
         try {
+          // Log the exact message being sent, including payload
+          console.log(JSON.stringify(mediaMessage, null, 2))
           ws.send(JSON.stringify(mediaMessage))
           chunksSuccessfullySent++
           currentChunk++
@@ -218,6 +220,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
           }
 
+          // Log the exact trailing silence message being sent
+          console.log(JSON.stringify(silenceMessage, null, 2))
           ws.send(JSON.stringify(silenceMessage))
           currentChunk++
           await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
