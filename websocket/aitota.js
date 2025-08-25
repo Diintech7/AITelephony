@@ -122,6 +122,16 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
+   * Test audio streaming function
+   */
+  const testAudioStreaming = async () => {
+    console.log("[TEST] Testing audio streaming...")
+    const testTone = generateSimpleTone(440, 1.0) // 1 second tone
+    await streamAudioToCallRealtime(testTone)
+    console.log("[TEST] Audio streaming test completed")
+  }
+
+  /**
    * Check for quick responses first (0ms latency)
    */
   const getQuickResponse = (text) => {
@@ -159,6 +169,12 @@ const setupUnifiedVoiceServer = (ws) => {
    * Optimized text-to-speech with faster streaming
    */
   const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
+    // Check if WebSocket is ready
+    if (ws.readyState !== WebSocket.OPEN) {
+      console.log("[TTS] Skipping request - WebSocket not ready, state:", ws.readyState)
+      return
+    }
+    
     // Prevent multiple simultaneous TTS requests
     if (isStreaming) {
       console.log("[TTS] Skipping request - already streaming audio")
@@ -230,10 +246,8 @@ const setupUnifiedVoiceServer = (ws) => {
       const fallbackAudio = generateSimpleTone(440, 0.5)
       await streamAudioToCallRealtime(fallbackAudio)
     } finally {
-      // Reset streaming flag after a small delay to ensure audio completes
-      setTimeout(() => {
-        isStreaming = false
-      }, 100)
+      // Reset streaming flag immediately to allow new requests
+      isStreaming = false
     }
   }
 
@@ -257,20 +271,13 @@ const setupUnifiedVoiceServer = (ws) => {
     )
     console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`)
 
-    // Send a test message first to verify WebSocket is working
-    const testMessage = {
-      event: "test",
-      streamSid: streamSid,
-      timestamp: Date.now(),
-    }
-
-    try {
-      ws.send(JSON.stringify(testMessage))
-      console.log("[STREAM] Test message sent successfully")
-    } catch (error) {
-      console.error("[STREAM] Failed to send test message:", error.message)
+    // Verify WebSocket is ready
+    if (ws.readyState !== WebSocket.OPEN) {
+      console.error("[STREAM] WebSocket not ready, state:", ws.readyState)
       return
     }
+
+    console.log("[STREAM] WebSocket ready, starting audio stream...")
 
     let chunksSuccessfullySent = 0
 
@@ -293,10 +300,8 @@ const setupUnifiedVoiceServer = (ws) => {
         ws.send(JSON.stringify(mediaMessage))
         chunksSuccessfullySent++
 
-        const chunkTime = new Date().toISOString()
-        console.log(`[CHUNK-SENT] ${chunkTime} - Chunk ${chunksSuccessfullySent} sent to SIP immediately`)
-
-        if (chunksSuccessfullySent % 10 === 0) {
+        // Only log every 50 chunks to reduce noise
+        if (chunksSuccessfullySent % 50 === 0) {
           console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`)
         }
       } catch (error) {
@@ -647,7 +652,15 @@ const setupUnifiedVoiceServer = (ws) => {
 
           // Wait a moment for call to stabilize before sending audio
           setTimeout(async () => {
+            console.log("[CZ] Starting greeting audio...")
             await synthesizeAndStreamAudio(greeting)
+            console.log("[CZ] Greeting audio completed")
+            
+            // Test audio streaming after greeting
+            setTimeout(async () => {
+              console.log("[CZ] Testing audio streaming...")
+              await testAudioStreaming()
+            }, 1000)
           }, 500)
           break
 
