@@ -221,11 +221,8 @@ const setupUnifiedVoiceServer = (ws) => {
 
       await streamAudioToCallRealtime(audioBase64)
 
-      // Only use alternative streaming if primary fails (commented out to prevent double audio)
-      // setTimeout(async () => {
-      //   console.log("[TTS] Trying alternative streaming method in case primary failed")
-      //   await streamAudioAlternative(audioBase64)
-      // }, 50) // Reduced from 100ms for faster fallback
+      // Removed alternative streaming to prevent audio duplication
+      // The primary streaming method is sufficient and reliable
     } catch (error) {
       console.error("[TTS] Error:", error.message)
 
