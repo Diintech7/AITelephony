@@ -39,7 +39,7 @@ const QUICK_RESPONSES = {
  * Setup unified voice server for SanIPPBX integration
  * @param {WebSocket} ws - The WebSocket connection from SanIPPBX
  */
-const setupUnifiedVoiceServer = (ws) => {
+const setupSanPbxWebSocketServer = (ws) => {
   console.log("Setting up SanIPPBX voice server connection")
 
   // Session state for this connection
@@ -654,5 +654,5 @@ const setupUnifiedVoiceServer = (ws) => {
 }
 
 module.exports = {
-  setupUnifiedVoiceServer,
+  setupSanPbxWebSocketServer,
 }
