@@ -150,7 +150,7 @@ function setupSanPbxWebSocketServer(ws) {
 
   ws.on("message", async (raw) => {
     let data
-    console.log(data)
+    console.log(data.event)
     try {
       data = JSON.parse(raw.toString())
     } catch {
@@ -178,6 +178,7 @@ function setupSanPbxWebSocketServer(ws) {
         }, 500)
         break
       case "answer":
+        console.log(data)
         console.log("[SANPBX] Call answered")
         break
       case "media": {
