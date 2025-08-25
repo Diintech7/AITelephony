@@ -157,6 +157,7 @@ const setupUnifiedVoiceServer = (ws) => {
       const paddedChunk =
         chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
 
+
       const mediaMessage = {
         event: "media",
         streamSid: streamSid,
@@ -186,15 +187,17 @@ const setupUnifiedVoiceServer = (ws) => {
 
     // Add a small silence buffer at the end
     try {
-      const silenceChunk = Buffer.alloc(CHUNK_SIZE)
-      const silenceMessage = {
-        event: "media",
-        streamSid: streamSid,
-        media: {
-          payload: silenceChunk.toString("base64"),
-        },
+      for (let i = 0; i < 5; i++) {
+        const silenceChunk = Buffer.alloc(CHUNK_SIZE)
+        const silenceMessage = {
+          event: "media",
+          streamSid,
+          media: { payload: silenceChunk.toString("base64") }
+        }
+        ws.send(JSON.stringify(silenceMessage))
+        await new Promise(r => setTimeout(r, CHUNK_DELAY))
       }
-      ws.send(JSON.stringify(silenceMessage))
+      
     } catch (error) {
       console.error("[STREAM] Failed to send end silence:", error.message)
     }
