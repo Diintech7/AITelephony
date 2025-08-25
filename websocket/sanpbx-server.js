@@ -1,915 +1,658 @@
-/* eslint-disable no-console */
 const WebSocket = require("ws")
-const { WebSocket: DGWebSocket } = require("ws")
-const fetch = require("node-fetch")
-const fs = require("fs")
+require("dotenv").config()
 
-// ENV
-const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY
-const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "kdmDKE6EkgrWrrykO9Qt"
+// API Keys from environment
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 const SARVAM_API_KEY = process.env.SARVAM_API_KEY
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
-if (!SARVAM_API_KEY || !DEEPGRAM_API_KEY || !OPENAI_API_KEY) {
-  console.error("❌ Missing API keys in .env (Sarvam / Deepgram / OpenAI)")
+// Validate API keys
+if (!DEEPGRAM_API_KEY || !SARVAM_API_KEY || !OPENAI_API_KEY) {
+  console.error("Missing required API keys in environment variables")
   process.exit(1)
 }
 
-const ts = () => new Date().toISOString()
-const wait = (ms) => new Promise((res) => setTimeout(res, ms))
+const fetch = globalThis.fetch || require("node-fetch")
 
-// -------- Enhanced Base64 Validation --------
-function validateBase64Audio(base64String, label = "AUDIO") {
-  try {
-    if (!base64String || typeof base64String !== 'string') {
-      console.log(`[${label}] ❌ Invalid base64 string: ${typeof base64String}`)
-      return false
-    }
-    
-    // Check if it's valid base64
-    const buffer = Buffer.from(base64String, 'base64')
-    if (buffer.length === 0) {
-      console.log(`[${label}] ❌ Empty buffer from base64`)
-      return false
-    }
-    
-    // Check if buffer length is even (for 16-bit PCM)
-    if (buffer.length % 2 !== 0) {
-      console.log(`[${label}] ⚠️ Odd buffer length: ${buffer.length} bytes`)
-    }
-    
-    console.log(`[${label}] ✅ Valid base64: ${base64String.length} chars -> ${buffer.length} bytes`)
-    
-    // Sample first few values
-    const samples = []
-    for (let i = 0; i < Math.min(8, buffer.length - 1); i += 2) {
-      samples.push(buffer.readInt16LE(i))
-    }
-    console.log(`[${label}] First samples: [${samples.join(', ')}]`)
-    
-    return true
-  } catch (err) {
-    console.log(`[${label}] ❌ Base64 validation error: ${err.message}`)
-    return false
-  }
+// Precompiled responses for common queries (instant responses)
+const QUICK_RESPONSES = {
+  hello: "Hello! How can I help you?",
+  hi: "Hi there! What can I do for you?",
+  "how are you": "I'm doing great! How about you?",
+  "thank you": "You're welcome! Is there anything else I can help with?",
+  thanks: "My pleasure! What else can I assist you with?",
+  yes: "Great! What would you like to know more about?",
+  no: "No problem! Is there something else I can help you with?",
+  okay: "Perfect! What's next?",
+  "good morning": "Good morning! How can I assist you today?",
+  "good afternoon": "Good afternoon! What can I help you with?",
+  "good evening": "Good evening! How may I help you?",
+  "bye": "Goodbye! Have a great day!",
+  "goodbye": "Goodbye! Take care!",
+  "see you": "See you later!",
+  "that's all": "Alright! Is there anything else you need?",
+  "nothing else": "Perfect! Have a wonderful day!",
+  "that's it": "Great! Feel free to call back if you need anything else.",
 }
 
-// -------- Logging utilities --------
-function logFullData(label, data) {
-  console.log(`\n=== ${label} ===`)
-  console.log(JSON.stringify(data, null, 2))
-  console.log(`=== END ${label} ===\n`)
-}
+/**
+ * Setup unified voice server for SanIPPBX integration
+ * @param {WebSocket} ws - The WebSocket connection from SanIPPBX
+ */
+const setupUnifiedVoiceServer = (ws) => {
+  console.log("Setting up SanIPPBX voice server connection")
 
-function logAudioSample(label, buffer, maxBytes = 32) {
-  if (!buffer || buffer.length === 0) {
-    console.log(`[${label}] Empty buffer`)
-    return
-  }
-  
-  const sample = buffer.slice(0, Math.min(maxBytes, buffer.length))
-  const hex = sample.toString('hex').match(/.{1,2}/g).join(' ')
-  const decimal = Array.from(sample).join(', ')
-  
-  console.log(`[${label}] First ${sample.length} bytes:`)
-  console.log(`  HEX: ${hex}`)
-  console.log(`  DEC: ${decimal}`)
-  
-  if (buffer.length >= 2) {
-    const int16samples = []
-    for (let i = 0; i < Math.min(8, buffer.length - 1); i += 2) {
-      int16samples.push(buffer.readInt16LE(i))
-    }
-    console.log(`  INT16LE: [${int16samples.join(', ')}]`)
-  }
-}
-
-// -------- Audio Format Conversion --------
-function resampleAudio(buffer, fromRate, toRate) {
-  if (fromRate === toRate) return buffer
-
-  const ratio = fromRate / toRate
-  const newLength = Math.floor(buffer.length / 2 / ratio) * 2
-  const result = Buffer.alloc(newLength)
-
-  for (let i = 0; i < newLength; i += 2) {
-    const sourceIndex = Math.floor((i / 2) * ratio) * 2
-    if (sourceIndex < buffer.length - 1) {
-      result[i] = buffer[sourceIndex]
-      result[i + 1] = buffer[sourceIndex + 1]
-    }
-  }
-
-  console.log(`[AUDIO-RESAMPLE] ${fromRate}Hz -> ${toRate}Hz: ${buffer.length} -> ${newLength} bytes`)
-  logAudioSample("RESAMPLED", result, 16)
-  return result
-}
-
-// -------- PCM utils --------
-function calculateChunkSize(sampleRate, durationMs = 20, channels = 1) {
-  // Calculate bytes for the given duration
-  const samplesPerMs = sampleRate / 1000
-  const samplesForDuration = Math.round(samplesPerMs * durationMs)
-  const bytes = samplesForDuration * 2 * channels // 16-bit = 2 bytes per sample
-  
-  console.log(`[PCM-CALC] Rate: ${sampleRate}Hz, Duration: ${durationMs}ms, Channels: ${channels}`)
-  console.log(`[PCM-CALC] Samples per chunk: ${samplesForDuration}, Bytes per chunk: ${bytes}`)
-  return bytes
-}
-
-// -------- CRITICAL: Audio Streaming with SanIPPBX Format --------
-async function streamAudioToCallRealtime({ ws, streamId, channelId, callId, pcmBuffer, sampleRate, channels, callDirection = "Incoming" }) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.error("[STREAM-ERROR] ❌ WebSocket not open")
-    return 0
-  }
-
-  if (!streamId || !channelId || !callId) {
-    console.error("[STREAM-ERROR] ❌ Missing required IDs:", { streamId, channelId, callId })
-    return 0
-  }
-
-  if (!pcmBuffer || pcmBuffer.length === 0) {
-    console.error("[STREAM-ERROR] ❌ Empty PCM buffer")
-    return 0
-  }
-
-  // Use 20ms chunks like the incoming format
-  const chunkDurationMs = 20
-  const chunkBytes = calculateChunkSize(sampleRate, chunkDurationMs, channels)
-  const totalChunks = Math.ceil(pcmBuffer.length / chunkBytes)
-  let sentCount = 0
-  
-  console.log(`\n[STREAM-START] ${ts()}`)
-  console.log(`  🔊 Total chunks: ${totalChunks}`)
-  console.log(`  📦 Chunk size: ${chunkBytes} bytes (${chunkDurationMs}ms)`)
-  console.log(`  🎵 Sample rate: ${sampleRate}Hz`)
-  console.log(`  🔊 Channels: ${channels}`)
-  console.log(`  💾 Buffer size: ${pcmBuffer.length} bytes`)
-  console.log(`  ⏱️ Expected duration: ${(pcmBuffer.length / (sampleRate * 2 * channels)).toFixed(2)}s`)
-  
-  logAudioSample("STREAM-INPUT", pcmBuffer, 32)
-
-  for (let pos = 0; pos < pcmBuffer.length && ws.readyState === WebSocket.OPEN; pos += chunkBytes) {
-    const slice = pcmBuffer.slice(pos, pos + chunkBytes)
-    
-    // Ensure chunk is exactly the right size (pad with zeros if needed)
-    const paddedSlice = slice.length < chunkBytes ? 
-      Buffer.concat([slice, Buffer.alloc(chunkBytes - slice.length, 0)]) : 
-      slice
-
-    // CRITICAL: Convert to base64 and validate
-    const base64Payload = paddedSlice.toString("base64")
-    
-    if (!validateBase64Audio(base64Payload, `CHUNK-${sentCount}`)) {
-      console.error(`[STREAM-ERROR] ❌ Invalid base64 for chunk ${sentCount}`)
-      continue
-    }
-    
-    // Match the exact format from SanIPPBX incoming media
-    const mediaEvent = {
-      event: "media",
-      payload: base64Payload,  // Direct payload field, not nested under media
-      chunk: sentCount + 1,    // Chunk number starting from 1
-      chunk_durn_ms: chunkDurationMs,
-      channelId: channelId,
-      callId: callId,
-      streamId: streamId,
-      callDirection: callDirection,
-      timestamp: new Date().toISOString().replace('T', ' ').substring(0, 19)
-    }
-    
-    // Enhanced logging for first few chunks
-    if (sentCount < 5) {
-      console.log(`\n[CHUNK-${sentCount}] 📦 Processing chunk`)
-      console.log(`  Raw size: ${slice.length}/${chunkBytes} bytes`)
-      console.log(`  Padded size: ${paddedSlice.length} bytes`)
-      console.log(`  Base64 length: ${base64Payload.length} characters`)
-      console.log(`  StreamId: ${streamId}`)
-      
-      logAudioSample(`CHUNK-${sentCount}`, paddedSlice, 16)
-      
-      // Log the exact JSON being sent
-      console.log(`[CHUNK-${sentCount}] 📤 Media event JSON:`)
-      console.log(JSON.stringify(mediaEvent, null, 2))
-      
-      // Verify the base64 can be decoded back
-      const testDecode = Buffer.from(base64Payload, 'base64')
-      console.log(`[CHUNK-${sentCount}] 🔍 Base64 decode test: ${testDecode.length} bytes`)
-    }
-    
-    try {
-      const jsonString = JSON.stringify(mediaEvent)
-      console.log(`[CHUNK-${sentCount}] 📡 Sending ${jsonString.length} bytes to WebSocket`)
-      
-      ws.send(jsonString)
-      sentCount++
-      
-      console.log(`[CHUNK-${sentCount-1}] ✅ Sent successfully`)
-      
-    } catch (err) {
-      console.error(`[STREAM-ERROR] ❌ Failed to send chunk ${sentCount}: ${err.message}`)
-      console.error(`[STREAM-ERROR] WebSocket state: ${ws.readyState}`)
-      break
-    }
-    
-    // Progress logging
-    if (sentCount % 20 === 0 || sentCount === totalChunks) {
-      console.log(`[STREAM-PROGRESS] ${ts()} - 🔊 Sent ${sentCount}/${totalChunks} chunks`)
-    }
-    
-    // Critical timing: 20ms delay between chunks to match chunk duration
-    if (sentCount < totalChunks) {
-      await wait(chunkDurationMs)
-    }
-  }
-  
-  console.log(`[STREAM-COMPLETE] ${ts()} - 🎯 Final count: ${sentCount}/${totalChunks} chunks sent`)
-  
-  // Final validation
-  if (sentCount === totalChunks) {
-    console.log(`[STREAM-COMPLETE] ✅ All chunks sent successfully`)
-  } else {
-    console.log(`[STREAM-COMPLETE] ⚠️ Incomplete: ${sentCount}/${totalChunks} chunks sent`)
-  }
-  
-  return sentCount
-}
-
-// -------- Enhanced Test Audio Generation --------
-async function testAudioGeneration(sampleRate, duration = 4.0) {
-  console.log(`\n[TEST-AUDIO] 🎵 Generating test tone for ${sampleRate}Hz`)
-  
-  const frequency = 800 // 800Hz tone - easily audible
-  const samples = Math.floor(sampleRate * duration)
-  const buffer = Buffer.alloc(samples * 2)
-  
-  console.log(`[TEST-AUDIO] 🔊 Generating ${samples} samples for ${duration}s`)
-  
-  for (let i = 0; i < samples; i++) {
-    // Generate a clear sine wave with good amplitude
-    const amplitude = 16000 // Strong signal
-    const sample = Math.sin(2 * Math.PI * frequency * i / sampleRate) * amplitude
-    
-    // Add envelope to prevent clicks (fade in/out)
-    const fadeLength = Math.floor(sampleRate * 0.1) // 100ms fade
-    let envelope = 1.0
-    
-    if (i < fadeLength) {
-      envelope = i / fadeLength
-    } else if (i > samples - fadeLength) {
-      envelope = (samples - i) / fadeLength
-    }
-    
-    const finalSample = Math.round(sample * envelope)
-    buffer.writeInt16LE(finalSample, i * 2)
-  }
-  
-  console.log(`[TEST-AUDIO] ✅ Generated ${buffer.length} bytes (${duration}s @ ${frequency}Hz)`)
-  logAudioSample("TEST-AUDIO", buffer, 32)
-  
-  // Validate the test audio
-  const testBase64 = buffer.toString('base64')
-  validateBase64Audio(testBase64, "TEST-AUDIO-BASE64")
-  
-  // Save test audio for debugging
-  try {
-    const filename = `/tmp/debug_test_${sampleRate}hz_${Date.now()}.pcm`
-    fs.writeFileSync(filename, buffer)
-    console.log(`[TEST-AUDIO] 💾 Saved test audio to ${filename}`)
-  } catch (err) {
-    console.log(`[TEST-AUDIO] ⚠️ Could not save test file: ${err.message}`)
-  }
-  
-  return buffer
-}
-
-// -------- Enhanced ElevenLabs TTS --------
-async function synthesizeAndStreamAudio({ text, ws, streamId, channelId, callId, sampleRate, channels, callDirection }) {
-  console.log(`\n[TTS-START] ${ts()}`)
-  console.log(`  📝 Text: "${text}"`)
-  console.log(`  🎵 Target: ${sampleRate}Hz, ${channels} channels`)
-
-  if (!text || text.trim().length === 0) {
-    console.error("[TTS] ❌ Empty text provided")
-    return
-  }
-
-  try {
-    // Choose appropriate format based on sample rate
-    let outputFormat, elevenlabsRate
-    if (sampleRate <= 8000) {
-      outputFormat = "pcm_16000"
-      elevenlabsRate = 16000
-    } else if (sampleRate <= 22050) {
-      outputFormat = "pcm_22050"
-      elevenlabsRate = 22050
-    } else {
-      outputFormat = "pcm_44100"
-      elevenlabsRate = 44100
-    }
-    
-    console.log(`[TTS] 🎧 Using ElevenLabs format: ${outputFormat} (${elevenlabsRate}Hz)`)
-    
-    const requestBody = {
-      text: text.trim(),
-      output_format: outputFormat,
-      voice_settings: {
-        stability: 0.7,
-        similarity_boost: 0.8,
-        style: 0.2,
-        use_speaker_boost: true
-      }
-    }
-    
-    console.log("[TTS] 📤 Request body:", JSON.stringify(requestBody, null, 2))
-    
-    const resp = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}`,
-      {
-        method: "POST",
-        headers: {
-          "xi-api-key": ELEVEN_API_KEY,
-          Accept: "audio/pcm",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(requestBody),
-      }
-    )
-    
-    console.log(`[TTS] 📥 Response status: ${resp.status}`)
-    console.log(`[TTS] 📋 Response headers:`, Object.fromEntries(resp.headers))
-    
-    if (!resp.ok) {
-      const errorText = await resp.text()
-      throw new Error(`ElevenLabs API ${resp.status}: ${errorText}`)
-    }
-
-    let audioBuf = Buffer.from(await resp.arrayBuffer())
-    console.log(`[TTS] 📦 ElevenLabs returned ${audioBuf.length} bytes`)
-    
-    if (audioBuf.length === 0) {
-      console.error("[TTS] ❌ Empty audio buffer from ElevenLabs")
-      return
-    }
-
-    logAudioSample("TTS-ORIGINAL", audioBuf, 32)
-
-    // Validate audio quality
-    const maxSample = Math.max(...Array.from({length: Math.min(100, audioBuf.length/2)}, (_, i) => Math.abs(audioBuf.readInt16LE(i * 2))))
-    console.log(`[TTS] 🔊 Max sample value: ${maxSample} (should be > 1000 for good audio)`)
-
-    if (maxSample < 100) {
-      console.warn("[TTS] ⚠️ Audio seems very quiet or silent")
-    }
-
-    // Save original for debugging
-    try {
-      const filename = `/tmp/debug_tts_original_${elevenlabsRate}hz_${Date.now()}.pcm`
-      fs.writeFileSync(filename, audioBuf)
-      console.log(`[TTS] 💾 Saved original to ${filename}`)
-    } catch (err) {
-      console.log(`[TTS] ⚠️ Could not save debug file: ${err.message}`)
-    }
-
-    // Resample if needed
-    if (sampleRate !== elevenlabsRate) {
-      console.log(`[TTS] 🔄 Resampling from ${elevenlabsRate}Hz to ${sampleRate}Hz`)
-      audioBuf = resampleAudio(audioBuf, elevenlabsRate, sampleRate)
-      
-      try {
-        const filename = `/tmp/debug_tts_resampled_${sampleRate}hz_${Date.now()}.pcm`
-        fs.writeFileSync(filename, audioBuf)
-        console.log(`[TTS] 💾 Saved resampled to ${filename}`)
-      } catch (err) {
-        console.log(`[TTS] ⚠️ Could not save resampled file: ${err.message}`)
-      }
-    }
-
-    // Validate final buffer before streaming
-    const finalBase64 = audioBuf.toString('base64')
-    if (!validateBase64Audio(finalBase64, "TTS-FINAL")) {
-      console.error("[TTS] ❌ Final audio buffer failed base64 validation")
-      return
-    }
-
-    console.log(`[TTS] 🚀 Starting audio stream...`)
-    
-    const sentChunks = await streamAudioToCallRealtime({
-      ws,
-      streamId,
-      channelId,
-      callId,
-      pcmBuffer: audioBuf,
-      sampleRate,
-      channels,
-      callDirection,
-    })
-
-    console.log(`[TTS] ✅ Successfully sent ${sentChunks} audio chunks`)
-    
-    if (sentChunks === 0) {
-      console.error("[TTS] ❌ No chunks were sent!")
-    }
-    
-  } catch (err) {
-    console.error(`[TTS] ❌ ElevenLabs error: ${err.message}`)
-    console.error(`[TTS] Stack trace:`, err.stack)
-  }
-}
-
-// -------- Sarvam HTTP TTS (8000 Hz, PBX format) --------
-async function synthesizeAndStreamAudioSarvam({ text, ws, streamId, channelId, callId, sampleRate = 8000, channels = 1, callDirection, language = "en", speaker = "pavithra" }) {
-  console.log(`\n[TTS-START:SARVAM] ${ts()}`)
-  console.log(`  📝 Text: "${text}"`)
-  console.log(`  🎵 Target: ${sampleRate}Hz, ${channels} channels (forced 8000Hz)`) 
-
-  if (!text || text.trim().length === 0) {
-    console.error("[TTS:SARVAM] ❌ Empty text provided")
-    return
-  }
-
-  try {
-    const body = {
-      inputs: [text.trim()],
-      target_language_code: language,
-      speaker,
-      pitch: 0,
-      pace: 1.0,
-      loudness: 1.0,
-      speech_sample_rate: 8000,
-      enable_preprocessing: true,
-      model: "bulbul:v1",
-    }
-
-    console.log("[TTS:SARVAM] 📤 Request body:", JSON.stringify(body))
-
-    const resp = await fetch("https://api.sarvam.ai/text-to-speech", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "API-Subscription-Key": SARVAM_API_KEY,
-      },
-      body: JSON.stringify(body),
-    })
-
-    console.log(`[TTS:SARVAM] 📥 Response status: ${resp.status}`)
-
-    if (!resp.ok) {
-      const errorText = await resp.text()
-      throw new Error(`Sarvam API ${resp.status}: ${errorText}`)
-    }
-
-    const json = await resp.json()
-    const audioBase64 = json?.audios?.[0]
-    if (!audioBase64) {
-      throw new Error("Sarvam response missing audio data")
-    }
-
-    const audioBuf = Buffer.from(audioBase64, "base64")
-    console.log(`[TTS:SARVAM] 📦 Received ${audioBuf.length} bytes @ 8000Hz`)
-    logAudioSample("TTS-SARVAM", audioBuf, 32)
-
-    // Stream out in exact PBX media event format
-    const sentChunks = await streamAudioToCallRealtime({
-      ws,
-      streamId,
-      channelId,
-      callId,
-      pcmBuffer: audioBuf,
-      sampleRate: 8000,
-      channels: 1,
-      callDirection,
-    })
-
-    console.log(`[TTS:SARVAM] ✅ Sent ${sentChunks} audio chunks`)
-  } catch (err) {
-    console.error(`[TTS:SARVAM] ❌ Error: ${err.message}`)
-  }
-}
-
-// -------- OpenAI GPT --------
-async function getAiResponse(prompt) {
-  try {
-    console.log(`[AI] 🤖 Processing prompt: "${prompt}"`)
-    
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { 
-            role: "system", 
-            content: "You are a helpful voice assistant for phone calls. Keep responses short and natural, under 25 words. Be friendly and conversational."
-          },
-          { role: "user", content: prompt },
-        ],
-        max_tokens: 60,
-        temperature: 0.7
-      }),
-    })
-    
-    if (!resp.ok) {
-      const errorText = await resp.text()
-      throw new Error(`OpenAI ${resp.status}: ${errorText}`)
-    }
-    
-    const data = await resp.json()
-    const response = data.choices[0].message.content.trim()
-    console.log(`[AI] 💬 Generated response: "${response}"`)
-    return response
-    
-  } catch (err) {
-    console.error(`[AI] ❌ Error: ${err.message}`)
-    return "I understand. How can I help you?"
-  }
-}
-
-// -------- MAIN SanPBX Handler --------
-function setupSanPbxWebSocketServer(ws) {
-  console.log("\n🚀 Setting up SanIPPBX voice server connection")
-
+  // Session state for this connection
   let streamId = null
-  let channelId = null
   let callId = null
-  let callDirection = "Incoming"
-  let mediaFormat = { encoding: "LINEAR16", sampleRate: 8000, channels: 1 }
-  let dgWs = null
-  let callAnswered = false
+  let channelId = null
+  let conversationHistory = []
+  let deepgramWs = null
   let isProcessing = false
-  let incomingMediaCount = 0
-  let hasReceivedAudio = false
+  let userUtteranceBuffer = ""
+  let silenceTimer = null
+  let sttFailed = false
+  let chunkCounter = 0
+  
+  // Add duplicate prevention tracking
+  let lastProcessedTranscript = ""
+  let lastProcessedTime = 0
+  let activeResponseId = null
 
-  const connectDeepgram = (sampleRate, encoding) => {
-    const dgEncoding = 'linear16'
-    console.log(`\n[STT-SETUP] 🎤 Connecting to Deepgram`)
-    console.log(`  Encoding: ${dgEncoding} (from PBX: ${encoding})`)
-    console.log(`  Sample rate: ${sampleRate}Hz`)
+  /**
+   * Track response to prevent multiple responses to same input
+   */
+  const trackResponse = () => {
+    const responseId = Date.now() + Math.random()
+    activeResponseId = responseId
+    return responseId
+  }
+
+  /**
+   * Check if response is still active
+   */
+  const isResponseActive = (responseId) => {
+    return activeResponseId === responseId
+  }
+
+  /**
+   * Check for quick responses first (0ms latency)
+   */
+  const getQuickResponse = (text) => {
+    const normalized = text.toLowerCase().trim()
     
-    if (dgWs) {
-      try { dgWs.close() } catch {}
+    // Direct match
+    if (QUICK_RESPONSES[normalized]) {
+      return QUICK_RESPONSES[normalized]
     }
     
-    dgWs = new DGWebSocket(
-      `wss://api.deepgram.com/v1/listen?encoding=${dgEncoding}&sample_rate=${sampleRate}&channels=1&model=nova-2&interim_results=false&smart_format=true&endpointing=300&utterance_end_ms=1000&punctuate=true`,
-      { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
-    )
+    // Partial match for common variations
+    for (const [key, response] of Object.entries(QUICK_RESPONSES)) {
+      if (normalized.includes(key) || key.includes(normalized)) {
+        return response
+      }
+    }
     
-    dgWs.on("open", () => {
-      console.log("[STT] ✅ Connected to Deepgram successfully")
-    })
+    // Handle common variations
+    if (normalized.includes("hello") || normalized.includes("hi")) {
+      return QUICK_RESPONSES.hello
+    }
     
-    dgWs.on("message", async (msg) => {
-      try {
-        const data = JSON.parse(msg.toString())
-        
-        // Only log non-empty responses
-        if (data.channel?.alternatives?.[0]?.transcript) {
-          console.log("[STT] 📥 Deepgram response:", JSON.stringify(data, null, 2))
+    if (normalized.includes("thank")) {
+      return QUICK_RESPONSES["thank you"]
+    }
+    
+    if (normalized.includes("bye") || normalized.includes("goodbye")) {
+      return QUICK_RESPONSES.bye
+    }
+    
+    return null
+  }
+
+  /**
+   * FIXED: Stream audio to SanIPPBX in their expected format
+   * Based on the logs: chunk duration 20ms, 8kHz sample rate, LINEAR16
+   */
+  const streamAudioToSanIPPBX = async (audioBase64) => {
+    if (!streamId || !callId || !channelId) {
+      console.error("[SANPBX] Missing required IDs for streaming")
+      return
+    }
+
+    try {
+      const audioBuffer = Buffer.from(audioBase64, "base64")
+      
+      // SanIPPBX format: 8kHz, 16-bit PCM, mono, 20ms chunks
+      // 8000 samples/sec * 0.02 sec * 2 bytes = 320 bytes per chunk
+      const CHUNK_SIZE = 320 // 20ms chunks for 8kHz 16-bit mono
+      const CHUNK_DURATION_MS = 20
+      
+      let position = 0
+      let currentChunk = 1
+      const streamStart = Date.now()
+      const streamStartTime = new Date().toISOString()
+
+      console.log(
+        `[SANPBX-STREAM] ${streamStartTime} - Starting stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
+      )
+      console.log(`[SANPBX] StreamID: ${streamId}, CallID: ${callId}, ChannelID: ${channelId}`)
+
+      let chunksSuccessfullySent = 0
+
+      while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+        const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
+
+        // Pad smaller chunks with silence if needed
+        const paddedChunk = chunk.length < CHUNK_SIZE 
+          ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) 
+          : chunk
+
+        // Format message exactly like SanIPPBX expects
+        const mediaMessage = {
+          event: "media",
+          payload: paddedChunk.toString("base64"),
+          chunk: currentChunk,
+          chunk_durn_ms: CHUNK_DURATION_MS,
+          channelId: channelId,
+          callId: callId,
+          streamId: streamId,
+          callerId: "", // Will be filled by SanIPPBX
+          callDirection: "Outgoing", // Our response is outgoing
+          extraParams: "",
+          cid: "0",
+          did: "", // Will be filled by SanIPPBX
+          timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
         }
-        
-        const transcript = data.channel?.alternatives?.[0]?.transcript?.trim()
-        
-        if (transcript && transcript.length > 0 && !isProcessing) {
-          console.log(`\n🎤 [STT] Transcript: "${transcript}"`)
-          isProcessing = true
-          
-          try {
-            const lowerTranscript = transcript.toLowerCase()
-            
-            if (lowerTranscript.includes('test') || lowerTranscript.includes('tone')) {
-              console.log("[DEBUG] 🔊 Test audio command detected")
-              const testBuffer = await testAudioGeneration(mediaFormat.sampleRate)
-              await streamAudioToCallRealtime({
-                ws,
-                streamId,
-                channelId,
-                callId,
-                pcmBuffer: testBuffer,
-                sampleRate: mediaFormat.sampleRate,
-                channels: mediaFormat.channels,
-                callDirection,
-              })
-            } else {
-              const reply = await getAiResponse(transcript)
-              console.log(`🤖 [AI] Response: "${reply}"`)
-              
-              await synthesizeAndStreamAudioSarvam({
-                text: reply,
-                ws,
-                streamId,
-                channelId,
-                callId,
-                sampleRate: 8000,
-                channels: 1,
-                callDirection,
-                language: "en",
-                speaker: "pavithra",
-              })
-            }
-          } finally {
-            // Longer delay to prevent overlap
-            setTimeout(() => {
-              isProcessing = false
-            }, 2000)
+
+        try {
+          ws.send(JSON.stringify(mediaMessage))
+          chunksSuccessfullySent++
+          currentChunk++
+
+          if (chunksSuccessfullySent % 20 === 0) {
+            console.log(`[SANPBX-STREAM] Sent ${chunksSuccessfullySent} chunks`)
           }
+        } catch (error) {
+          console.error(`[SANPBX-STREAM] Failed to send chunk ${chunksSuccessfullySent + 1}:`, error.message)
+          break
+        }
+
+        position += CHUNK_SIZE
+
+        // Wait for chunk duration before sending next chunk
+        if (position < audioBuffer.length) {
+          await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
+        }
+      }
+
+      // Add silence buffer at the end to ensure clean audio termination
+      try {
+        for (let i = 0; i < 3; i++) {
+          const silenceChunk = Buffer.alloc(CHUNK_SIZE)
+          const silenceMessage = {
+            event: "media",
+            payload: silenceChunk.toString("base64"),
+            chunk: currentChunk++,
+            chunk_durn_ms: CHUNK_DURATION_MS,
+            channelId: channelId,
+            callId: callId,
+            streamId: streamId,
+            callerId: "",
+            callDirection: "Outgoing",
+            extraParams: "",
+            cid: "0",
+            did: "",
+            timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
+          }
+          
+          ws.send(JSON.stringify(silenceMessage))
+          await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
         }
       } catch (error) {
-        console.error("[STT] ❌ Error processing message:", error.message)
-        isProcessing = false
+        console.error("[SANPBX-STREAM] Failed to send end silence:", error.message)
+      }
+
+      const streamDuration = Date.now() - streamStart
+      const completionTime = new Date().toISOString()
+      console.log(
+        `[SANPBX-STREAM-COMPLETE] ${completionTime} - Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`,
+      )
+    } catch (error) {
+      console.error("[SANPBX-STREAM] Error:", error.message)
+    }
+  }
+
+  /**
+   * FIXED: Optimized text-to-speech with Sarvam API for 8kHz output
+   */
+  const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
+    try {
+      const ttsStartTime = new Date().toISOString()
+      console.log(`[TTS-START] ${ttsStartTime} - Starting TTS for: "${text}"`)
+
+      const startTime = Date.now()
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 5000)
+
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": SARVAM_API_KEY,
+          Connection: "keep-alive",
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: language,
+          speaker: "meera",
+          pitch: 0,
+          pace: 1.4,
+          loudness: 1.0,
+          speech_sample_rate: 8000, // FIXED: 8kHz to match SanIPPBX format
+          enable_preprocessing: true,
+          model: "bulbul:v1",
+        }),
+        signal: controller.signal,
+      })
+
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Sarvam API error: ${response.status} - ${errorText}`)
+      }
+
+      const data = await response.json()
+      const audioBase64 = data.audios?.[0]
+
+      if (!audioBase64) {
+        throw new Error("No audio data received from Sarvam")
+      }
+
+      const ttsTime = Date.now() - startTime
+      console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`)
+
+      const streamStartTime = new Date().toISOString()
+      console.log(`[SANPBX-STREAM-START] ${streamStartTime} - Starting streaming to SanIPPBX`)
+
+      // Stream audio in SanIPPBX format
+      await streamAudioToSanIPPBX(audioBase64)
+      
+    } catch (error) {
+      console.error("[TTS] Error:", error.message)
+
+      // Send simple silence as fallback
+      const fallbackAudio = Buffer.alloc(8000).toString("base64") // 1 second of silence
+      await streamAudioToSanIPPBX(fallbackAudio)
+    }
+  }
+
+  /**
+   * Connect to Deepgram with optimized settings for 8kHz audio
+   */
+  const connectToDeepgram = (attemptCount = 0) => {
+    console.log(`[STT] Connecting to Deepgram (attempt ${attemptCount + 1})`)
+
+    // FIXED: Updated for SanIPPBX audio format
+    let params = {
+      encoding: "linear16",
+      sample_rate: "8000", // Match SanIPPBX sample rate
+      channels: "1",
+    }
+
+    if (attemptCount === 0) {
+      params = {
+        ...params,
+        model: "nova-2",
+        language: "en",
+        interim_results: "true",
+        smart_format: "true",
+        endpointing: "300",
+        punctuate: "true",
+        diarize: "false",
+        multichannel: "false",
+      }
+    } else if (attemptCount === 1) {
+      params = {
+        ...params,
+        model: "base",
+        language: "en",
+        interim_results: "true",
+        endpointing: "200",
+      }
+    }
+
+    const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`
+
+    console.log(`[STT] Connecting to URL: ${deepgramUrl}`)
+
+    deepgramWs = new WebSocket(deepgramUrl, {
+      headers: {
+        Authorization: `Token ${DEEPGRAM_API_KEY}`,
+      },
+    })
+
+    deepgramWs.on("open", () => {
+      console.log("[STT] Connected to Deepgram successfully")
+    })
+
+    deepgramWs.on("message", async (data) => {
+      const response = JSON.parse(data)
+
+      if (response.type === "Results") {
+        const transcript = response.channel?.alternatives?.[0]?.transcript
+        const isFinal = response.is_final
+        const confidence = response.channel?.alternatives?.[0]?.confidence
+
+        if (transcript?.trim() && confidence > 0.6) {
+          console.log(`[STT] ${isFinal ? 'Final' : 'Interim'} transcript: "${transcript}" (${confidence})`)
+          
+          if (isFinal) {
+            if (silenceTimer) {
+              clearTimeout(silenceTimer)
+              silenceTimer = null
+            }
+            await processUserInput(transcript.trim())
+          }
+        }
+      } else if (response.type === "UtteranceEnd") {
+        if (userUtteranceBuffer.trim() && userUtteranceBuffer !== lastProcessedTranscript) {
+          console.log(`[STT] Utterance end: "${userUtteranceBuffer}"`)
+          await processUserInput(userUtteranceBuffer)
+          userUtteranceBuffer = ""
+        }
       }
     })
-    
-    dgWs.on("close", (code, reason) => {
-      console.log(`[STT] 🔌 Deepgram closed: ${code} - ${reason}`)
+
+    deepgramWs.on("error", (error) => {
+      console.error(`[STT] Deepgram error (attempt ${attemptCount + 1}):`, error.message)
+
+      if (attemptCount < 2) {
+        console.log(`[STT] Retrying with different parameters...`)
+        setTimeout(
+          () => {
+            connectToDeepgram(attemptCount + 1)
+          },
+          1000 * (attemptCount + 1),
+        )
+      } else {
+        console.error("[STT] All Deepgram connection attempts failed. Check API key and permissions.")
+        sttFailed = true
+
+        const fallbackMessage = "I'm having trouble with speech recognition right now, but I can still help you. Please use the keypad to navigate options."
+        synthesizeAndStreamAudio(fallbackMessage).catch((err) =>
+          console.error("[STT] Fallback message error:", err.message),
+        )
+      }
     })
-    
-    dgWs.on("error", (e) => {
-      console.error("[STT] ❌ Deepgram error:", e.message)
+
+    deepgramWs.on("close", (code, reason) => {
+      console.log(`[STT] Deepgram connection closed: ${code} - ${reason}`)
     })
   }
 
-  ws.on("message", async (raw) => {
-    let data
+  /**
+   * Optimized AI response with parallel processing
+   */
+  const getAIResponse = async (userMessage) => {
     try {
-      data = JSON.parse(raw.toString())
-    } catch (parseError) {
-      console.error("[SANPBX] ❌ Failed to parse message:", parseError.message)
+      console.log(`[LLM] Processing: "${userMessage}"`)
+      const startTime = Date.now()
+
+      // Check for quick responses first
+      const quickResponse = getQuickResponse(userMessage)
+      if (quickResponse) {
+        console.log(`[LLM] Quick response: "${quickResponse}" (0ms)`)
+        return quickResponse
+      }
+
+      const messages = [
+        {
+          role: "system",
+          content: "You are a helpful AI assistant. Give very concise responses (1-2 sentences max). Be direct and helpful.",
+        },
+        ...conversationHistory.slice(-4),
+        {
+          role: "user",
+          content: userMessage,
+        },
+      ]
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 4000)
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: messages,
+          max_tokens: 80,
+          temperature: 0.5,
+          stream: false,
+        }),
+        signal: controller.signal,
+      })
+
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const aiResponse = data.choices[0]?.message?.content?.trim()
+
+      const llmTime = Date.now() - startTime
+      console.log(`[LLM] Response: "${aiResponse}" (${llmTime}ms)`)
+      return aiResponse
+    } catch (error) {
+      console.error("[LLM] Error:", error.message)
+      return "I apologize, but I encountered an issue. Could you please try again?"
+    }
+  }
+
+  /**
+   * Process user speech input with duplicate prevention and response tracking
+   */
+  const processUserInput = async (transcript) => {
+    const responseId = trackResponse()
+    
+    if (isProcessing || !transcript.trim()) return
+
+    // Prevent duplicate processing of same transcript within 3 seconds
+    const now = Date.now()
+    if (transcript === lastProcessedTranscript && (now - lastProcessedTime) < 3000) {
+      console.log(`[PROCESS] Skipping duplicate transcript: "${transcript}"`)
       return
     }
-    
-    console.log(`\n📨 [SANPBX] Received event: ${data.event}`)
-    
-    switch (data.event) {
-      case "connected":
-        console.log("🔗 [SANPBX] Connected event")
-        logFullData("CONNECTED", data)
-        
-        // Extract call info from connected event
-        streamId = data.streamId
-        channelId = data.channelId
-        callId = data.callId
-        callDirection = data.callDirection || "Incoming"
-        
-        console.log(`[SANPBX] 🆔 Call Info - StreamId: ${streamId}, ChannelId: ${channelId}, CallId: ${callId}`)
-        break
-        
-      case "start":
-        console.log("▶️ [SANPBX] Call started")
-        logFullData("START", data)
-        
-        // Update call info if provided
-        if (data.streamId) streamId = data.streamId
-        if (data.channelId) channelId = data.channelId
-        if (data.callId) callId = data.callId
-        if (data.callDirection) callDirection = data.callDirection
-        
-        if (data.mediaFormat) {
-          mediaFormat = {
-            encoding: data.mediaFormat.encoding || "LINEAR16",
-            sampleRate: 8000,
-            channels: 1
-          }
-        } else {
-          mediaFormat = { encoding: "LINEAR16", sampleRate: 8000, channels: 1 }
-        }
-        
-        console.log(`[SANPBX] 🆔 Stream ID: ${streamId}`)
-        console.log(`[SANPBX] 🎵 Media Format:`, mediaFormat)
-        
-        connectDeepgram(mediaFormat.sampleRate, mediaFormat.encoding)
-        break
-        
-      case "answer":
-        console.log("📞 [SANPBX] Call answered")
-        logFullData("ANSWER", data)
-        
-        callAnswered = true
-        
-        // Update call info
-        if (data.streamId) streamId = data.streamId
-        if (data.channelId) channelId = data.channelId
-        if (data.callId) callId = data.callId
-        if (data.callDirection) callDirection = data.callDirection
-        
-        console.log(`[SANPBX] 🆔 Updated Call Info - StreamId: ${streamId}, ChannelId: ${channelId}, CallId: ${callId}`)
-        
-        // Send ACK immediately
-        const ack = {
-          event: "answer",
-          callId: callId,
-          channelId: channelId,
-          streamId: streamId,
-        }
-        
-        console.log("[SANPBX] 📤 Sending ACK:")
-        logFullData("ACK", ack)
-        
-        try {
-          ws.send(JSON.stringify(ack))
-          console.log("[SANPBX] ✅ Sent answer ACK")
-        } catch (err) {
-          console.error("[SANPBX] ❌ Failed to send ACK:", err.message)
-        }
 
-        // Start greeting sequence
-        setTimeout(async () => {
-          if (!isProcessing && callAnswered && streamId && channelId && callId) {
-            isProcessing = true
-            
-            try {
-              console.log("\n🔊 [DEBUG] Starting audio sequence...")
-              
-              // Send a strong test tone first
-              console.log("1️⃣ Sending test tone...")
-              const testBuffer = await testAudioGeneration(mediaFormat.sampleRate, 3.0)
-              const testSent = await streamAudioToCallRealtime({
-                ws,
-                streamId,
-                channelId,
-                callId,
-                pcmBuffer: testBuffer,
-                sampleRate: mediaFormat.sampleRate,
-                channels: mediaFormat.channels,
-                callDirection,
-              })
-              
-              console.log(`[DEBUG] ✅ Test tone: ${testSent} chunks sent`)
-              
-              // Wait then send greeting
-              setTimeout(async () => {
-                console.log("2️⃣ Sending greeting...")
-                const greeting = "Hello! This is your AI assistant. I'm sending audio now. Can you hear me clearly?"
-                await synthesizeAndStreamAudioSarvam({
-                  text: greeting,
-                  ws,
-                  streamId,
-                  channelId,
-                  callId,
-                  sampleRate: 8000,
-                  channels: 1,
-                  callDirection,
-                  language: "en",
-                  speaker: "pavithra",
-                })
-                
-                setTimeout(() => {
-                  isProcessing = false
-                  console.log("✅ [DEBUG] Audio sequence complete")
-                }, 2000)
-              }, 3000)
-              
-            } catch (err) {
-              console.error("[DEBUG] ❌ Error in audio sequence:", err.message)
-              isProcessing = false
-            }
-          }
-        }, 2000)
-        break
+    lastProcessedTranscript = transcript
+    lastProcessedTime = now
+    
+    isProcessing = true
+    const totalStart = Date.now()
+    console.log(`[PROCESS] Starting processing for: "${transcript}" (ID: ${responseId})`)
 
-      case "media": {
-        incomingMediaCount++
-        
-        // Updated to match the exact format: payload is directly in the event object
-        const b64 = data?.payload  // Changed from data?.media?.payload to data?.payload
-        
-        if (incomingMediaCount <= 3) {
-          console.log(`\n🎵 [MEDIA-${incomingMediaCount}] Received media packet`)
-          console.log(`[MEDIA-${incomingMediaCount}] Chunk: ${data.chunk}, Duration: ${data.chunk_durn_ms}ms`)
-          
-          if (b64 && b64.length > 0) {
-            const buffer = Buffer.from(b64, "base64")
-            console.log(`[MEDIA-${incomingMediaCount}] ✅ Payload: ${b64.length} chars -> ${buffer.length} bytes`)
-            logAudioSample(`MEDIA-${incomingMediaCount}`, buffer, 16)
-            
-            if (!hasReceivedAudio) {
-              hasReceivedAudio = true
-              console.log("🎉 [MEDIA] First audio received!")
-            }
-          } else {
-            console.log(`[MEDIA-${incomingMediaCount}] ❌ No payload`)
-          }
-        } else if (incomingMediaCount === 4) {
-          console.log(`[MEDIA] ... (received ${incomingMediaCount}+ packets)`)
-        }
-        
-        // Forward to Deepgram if we have audio
-        if (b64 && b64.length > 0 && dgWs && dgWs.readyState === WebSocket.OPEN && callAnswered) {
-          try {
-            const audioBuffer = Buffer.from(b64, "base64")
-            if (audioBuffer.length > 0) {
-              dgWs.send(audioBuffer)
-            }
-          } catch (err) {
-            console.error("[STT] ❌ Error forwarding to Deepgram:", err.message)
-          }
-        }
-        break
+    try {
+      if (!isResponseActive(responseId)) {
+        console.log(`[PROCESS] Response ${responseId} cancelled - newer request in progress`)
+        return
       }
-      
-      case "dtmf":
-        console.log(`📱 [SANPBX] DTMF: ${data.digit}`)
+
+      const quickResponse = getQuickResponse(transcript)
+
+      if (quickResponse && isResponseActive(responseId)) {
+        console.log(`[PROCESS] Quick response found: "${quickResponse}"`)
+        conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: quickResponse })
+
+        await synthesizeAndStreamAudio(quickResponse)
+      } else if (isResponseActive(responseId)) {
+        console.log(`[PROCESS] Getting AI response for: "${transcript}"`)
         
-        if (!isProcessing) {
-          isProcessing = true
-          console.log(`[DEBUG] 🔊 DTMF ${data.digit} - immediate audio response`)
+        const aiResponse = await getAIResponse(transcript)
+        if (aiResponse && isResponseActive(responseId)) {
+          console.log(`[PROCESS] AI response received: "${aiResponse}"`)
           
-          setTimeout(async () => {
-            try {
-              // Send test tone
-              const testBuffer = await testAudioGeneration(mediaFormat.sampleRate, 2.0)
-              await streamAudioToCallRealtime({
-                ws,
-                streamId,
-                channelId,
-                callId,
-                pcmBuffer: testBuffer,
-                sampleRate: mediaFormat.sampleRate,
-                channels: mediaFormat.channels,
-                callDirection,
-              })
-              
-              // Send voice response
-              const dtmfResponse = `You pressed ${data.digit}. Audio test complete.`
-              await synthesizeAndStreamAudioSarvam({
-                text: dtmfResponse,
-                ws,
-                streamId,
-                channelId,
-                callId,
-                sampleRate: 8000,
-                channels: 1,
-                callDirection,
-                language: "en",
-                speaker: "pavithra",
-              })
-            } catch (err) {
-              console.error("[DEBUG] ❌ DTMF response error:", err.message)
-            } finally {
-              setTimeout(() => {
-                isProcessing = false
-              }, 1000)
-            }
-          }, 200)
+          conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
+
+          // Keep history lean for performance
+          if (conversationHistory.length > 6) {
+            conversationHistory = conversationHistory.slice(-6)
+          }
+
+          await synthesizeAndStreamAudio(aiResponse)
         }
-        break
-        
-      case "stop":
-        console.log("🛑 [SANPBX] Call stopped")
-        
-        callAnswered = false
+      }
+
+      const totalTime = Date.now() - totalStart
+      console.log(`[PROCESS] Processing completed in ${totalTime}ms for response ${responseId}`)
+    } catch (error) {
+      console.error("[PROCESS] Error processing user input:", error.message)
+    } finally {
+      if (isResponseActive(responseId)) {
         isProcessing = false
-        incomingMediaCount = 0
-        hasReceivedAudio = false
-        streamId = null
-        channelId = null
-        callId = null
-        
-        if (dgWs) {
-          try { dgWs.close() } catch {}
-        }
-        break
-        
-      case "transfer-call-response":
-        console.log("🔄 [SANPBX] Transfer call response")
-        logFullData("TRANSFER-RESPONSE", data)
-        break
-        
-      case "hangup-call-response":
-        console.log("📵 [SANPBX] Hangup call response")
-        logFullData("HANGUP-RESPONSE", data)
-        break
-        
-      default:
-        console.log(`❓ [SANPBX] Unknown event: ${data.event}`)
-        logFullData("UNKNOWN-EVENT", data)
-        break
+      }
+    }
+  }
+
+  // Handle incoming messages from SanIPPBX
+  ws.on("message", async (message) => {
+    try {
+      const messageStr = message.toString()
+
+      if (!messageStr.startsWith("{")) {
+        return
+      }
+
+      const data = JSON.parse(messageStr)
+      console.log(`📨 [SANPBX] Received event: ${data.event}`)
+
+      switch (data.event) {
+        case "connected":
+          console.log("[SANPBX] Connected")
+          console.log("ChannelID:", data.channelId)
+          console.log("CallID:", data.callId) 
+          console.log("StreamID:", data.streamId)
+          console.log("CallerID:", data.callerId)
+          console.log("Call Direction:", data.callDirection)
+          console.log("DID:", data.did)
+          break
+
+        case "start":
+          console.log("[SANPBX] Call started")
+          
+          streamId = data.streamId
+          callId = data.callId
+          channelId = data.channelId
+
+          console.log("[SANPBX] StreamID:", streamId)
+          console.log("[SANPBX] CallID:", callId)
+          console.log("[SANPBX] ChannelID:", channelId)
+          console.log("[SANPBX] Media Format:", JSON.stringify(data.mediaFormat))
+
+          // Connect to Deepgram for speech recognition
+          connectToDeepgram(0)
+
+          // Send greeting after call is established
+          const greeting = "Hi! How can I help you?"
+          console.log("[SANPBX] Sending greeting:", greeting)
+
+          setTimeout(async () => {
+            await synthesizeAndStreamAudio(greeting)
+          }, 1500) // Wait for call to be fully established
+          break
+
+        case "answer":
+          console.log("[SANPBX] Call answered - ready for media streaming")
+          break
+
+        case "media":
+          // Forward audio data to Deepgram for transcription
+          if (data.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+            const audioBuffer = Buffer.from(data.payload, "base64")
+            deepgramWs.send(audioBuffer)
+            
+            chunkCounter++
+            if (chunkCounter % 50 === 0) {
+              console.log(`[SANPBX] Processed ${chunkCounter} audio chunks`)
+            }
+          } else if (sttFailed) {
+            console.log("[STT] Audio received but STT unavailable - consider implementing DTMF fallback")
+          }
+          break
+
+        case "stop":
+          console.log("[SANPBX] Call ended")
+
+          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+            deepgramWs.close()
+          }
+
+          if (silenceTimer) {
+            clearTimeout(silenceTimer)
+          }
+          break
+
+        case "dtmf":
+          console.log("[SANPBX] DTMF received:", data.digit)
+          // Handle DTMF input if needed
+          break
+
+        case "transfer-call-response":
+          console.log("[SANPBX] Transfer response:", data.message)
+          break
+
+        case "hangup-call-response":
+          console.log("[SANPBX] Hangup response:", data.message)
+          break
+
+        default:
+          console.log(`[SANPBX] Unknown event: ${data.event}`)
+          break
+      }
+    } catch (error) {
+      console.error("[SANPBX] Error processing message:", error.message)
     }
   })
-  
-  ws.on("error", (error) => {
-    console.error("[SANPBX] ❌ WebSocket error:", error.message)
-  })
-  
-  ws.on("close", (code, reason) => {
-    console.log(`[SANPBX] 🔌 WebSocket connection closed: ${code} - ${reason}`)
-    callAnswered = false
-    isProcessing = false
-    incomingMediaCount = 0
-    hasReceivedAudio = false
+
+  // Handle connection close
+  ws.on("close", () => {
+    console.log("[SANPBX] WebSocket connection closed")
+
+    // Cleanup
+    if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+      deepgramWs.close()
+    }
+
+    if (silenceTimer) {
+      clearTimeout(silenceTimer)
+    }
+
+    // Reset session state
     streamId = null
-    channelId = null
     callId = null
-    
-    if (dgWs) {
-      try { dgWs.close() } catch {}
-    }
+    channelId = null
+    conversationHistory = []
+    isProcessing = false
+    userUtteranceBuffer = ""
+    sttFailed = false
+    chunkCounter = 0
+    lastProcessedTranscript = ""
+    lastProcessedTime = 0
+    activeResponseId = null
+  })
+
+  // Handle errors
+  ws.on("error", (error) => {
+    console.error("[SANPBX] WebSocket error:", error.message)
   })
 }
 
-module.exports = { setupSanPbxWebSocketServer }
+module.exports = {
+  setupUnifiedVoiceServer,
+}
