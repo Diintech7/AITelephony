@@ -176,10 +176,39 @@ function setupSanPbxWebSocketServer(ws) {
           })
         }, 500)
         break
-      case "answer":
-        console.log(data)
-        console.log("[SANPBX] Call answered")
-        break
+        case "answer": 
+          console.log("[SANPBX] Call answered")
+        
+          // ✅ Send ACK back to PBX so it bridges media
+          const ack = {
+            event: "answer",
+            streamId,
+            callId,
+            channelId,
+          }
+          try {
+            ws.send(JSON.stringify(ack))
+            console.log("[SANPBX] Sent answer ACK back to PBX")
+          } catch (err) {
+            console.error("[SANPBX] Failed to send answer ACK:", err.message)
+          }
+        
+          // Now it’s safe to synthesize & stream
+          const greeting = "Hi! This is a test greeting from the AI assistant. How can I help you today?"
+          await synthesizeAndStreamAudio({
+            text: greeting,
+            language: DEFAULT_LANG,
+            voice: DEFAULT_VOICE,
+            ws,
+            streamId,
+            callId,
+            channelId,
+            sampleRate: mediaFormat.sampleRate,
+            channels: mediaFormat.channels,
+          })
+          break
+        
+        
       case "media": {
         const b64 = data?.media?.payload
         if (b64 && dgWs && dgWs.readyState === WebSocket.OPEN) {
