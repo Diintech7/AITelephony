@@ -150,6 +150,7 @@ function setupSanPbxWebSocketServer(ws) {
 
   ws.on("message", async (raw) => {
     let data
+    console.log(data)
     try {
       data = JSON.parse(raw.toString())
     } catch {
