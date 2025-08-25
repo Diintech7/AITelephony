@@ -159,6 +159,14 @@ const setupUnifiedVoiceServer = (ws) => {
    * Optimized text-to-speech with faster streaming
    */
   const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
+    // Prevent multiple simultaneous TTS requests
+    if (isStreaming) {
+      console.log("[TTS] Skipping request - already streaming audio")
+      return
+    }
+    
+    isStreaming = true
+    
     try {
       const ttsStartTime = new Date().toISOString()
       console.log(`[TTS-START] ${ttsStartTime} - Starting TTS streaming for: "${text}"`)
@@ -213,16 +221,22 @@ const setupUnifiedVoiceServer = (ws) => {
 
       await streamAudioToCallRealtime(audioBase64)
 
-      setTimeout(async () => {
-        console.log("[TTS] Trying alternative streaming method in case primary failed")
-        await streamAudioAlternative(audioBase64)
-      }, 50) // Reduced from 100ms for faster fallback
+      // Only use alternative streaming if primary fails (commented out to prevent double audio)
+      // setTimeout(async () => {
+      //   console.log("[TTS] Trying alternative streaming method in case primary failed")
+      //   await streamAudioAlternative(audioBase64)
+      // }, 50) // Reduced from 100ms for faster fallback
     } catch (error) {
       console.error("[TTS] Error:", error.message)
 
       // Send a simple beep or tone as fallback
       const fallbackAudio = generateSimpleTone(440, 0.5)
       await streamAudioToCallRealtime(fallbackAudio)
+    } finally {
+      // Reset streaming flag after a small delay to ensure audio completes
+      setTimeout(() => {
+        isStreaming = false
+      }, 100)
     }
   }
 
