@@ -180,7 +180,7 @@ function setupSanPbxWebSocketServer(ws) {
           console.log("[SANPBX] Call answered")
         
           // ✅ pull identifiers from the incoming message
-          const { callId, channelId, streamId } = msg
+          const { callId, channelId, streamId } = data
         
           // ✅ Send ACK back to PBX so it bridges media
           const ack = {
