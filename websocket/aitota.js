@@ -53,55 +53,27 @@ const setupUnifiedVoiceServer = (ws) => {
   let silenceTimer = null
   let audioQueue = []
   let isStreaming = false
-  let sttFailed = false // Track STT failure state
+  let sttFailed = false
+  
+  // Add duplicate prevention tracking
+  let lastProcessedTranscript = ""
+  let lastProcessedTime = 0
+  let activeResponseId = null
 
   /**
-   * Alternative streaming method - try different formats
+   * Track response to prevent multiple responses to same input
    */
-  const streamAudioAlternative = async (audioBase64) => {
-    console.log("[STREAM-ALT] Trying high-speed streaming method")
+  const trackResponse = () => {
+    const responseId = Date.now() + Math.random()
+    activeResponseId = responseId
+    return responseId
+  }
 
-    const audioBuffer = Buffer.from(audioBase64, "base64")
-
-    const CHUNK_SIZE = 320 // 20ms chunks for faster transmission
-    const CHUNK_DELAY = 10 // Increased delay for individual chunk sending
-    let position = 0
-
-    const chunks = []
-    while (position < audioBuffer.length) {
-      const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
-      chunks.push(chunk)
-      position += CHUNK_SIZE
-    }
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]
-
-      const mediaMessage = {
-        event: "media",
-        streamSid: streamSid,
-        media: {
-          payload: chunk.toString("base64"),
-        },
-      }
-
-      try {
-        ws.send(JSON.stringify(mediaMessage))
-
-        if ((i + 1) % 20 === 0) {
-          console.log(`[STREAM-ALT] Sent ${i + 1} chunks`)
-        }
-      } catch (error) {
-        console.error("[STREAM-ALT] Chunk error:", error.message)
-        break
-      }
-
-      if (i < chunks.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, CHUNK_DELAY))
-      }
-    }
-
-    console.log("[STREAM-ALT] High-speed streaming completed")
+  /**
+   * Check if response is still active
+   */
+  const isResponseActive = (responseId) => {
+    return activeResponseId === responseId
   }
 
   /**
@@ -119,16 +91,6 @@ const setupUnifiedVoiceServer = (ws) => {
     }
 
     return buffer.toString("base64")
-  }
-
-  /**
-   * Test audio streaming function
-   */
-  const testAudioStreaming = async () => {
-    console.log("[TEST] Testing audio streaming...")
-    const testTone = generateSimpleTone(440, 1.0) // 1 second tone
-    await streamAudioToCallRealtime(testTone)
-    console.log("[TEST] Audio streaming test completed")
   }
 
   /**
@@ -166,93 +128,8 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Optimized text-to-speech with faster streaming
-   */
-  const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
-    // Check if WebSocket is ready
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.log("[TTS] Skipping request - WebSocket not ready, state:", ws.readyState)
-      return
-    }
-    
-    // Prevent multiple simultaneous TTS requests
-    if (isStreaming) {
-      console.log("[TTS] Skipping request - already streaming audio")
-      return
-    }
-    
-    isStreaming = true
-    
-    try {
-      const ttsStartTime = new Date().toISOString()
-      console.log(`[TTS-START] ${ttsStartTime} - Starting TTS streaming for: "${text}"`)
-
-      console.log(`[TTS] Synthesizing: "${text}"`)
-      const startTime = Date.now()
-
-      // Use fetch with timeout and optimized parameters for C-Zentrix
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 3000) // Reduced from 5s to 3s
-
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "API-Subscription-Key": SARVAM_API_KEY,
-          Connection: "keep-alive",
-        },
-        body: JSON.stringify({
-          inputs: [text],
-          target_language_code: language,
-          speaker: "meera",
-          pitch: 0,
-          pace: 1.4, // Increased pace for faster speech
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false, // Disable preprocessing for speed
-          model: "bulbul:v1",
-        }),
-        signal: controller.signal,
-      })
-
-      clearTimeout(timeoutId)
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        throw new Error(`Sarvam API error: ${response.status} - ${errorText}`)
-      }
-
-      const data = await response.json()
-      const audioBase64 = data.audios?.[0]
-
-      if (!audioBase64) {
-        throw new Error("No audio data received from Sarvam")
-      }
-
-      const ttsTime = Date.now() - startTime
-      console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`)
-
-      const streamStartTime = new Date().toISOString()
-      console.log(`[STREAM-START] ${streamStartTime} - Starting immediate streaming to SIP`)
-
-      await streamAudioToCallRealtime(audioBase64)
-
-      // Removed alternative streaming to prevent audio duplication
-      // The primary streaming method is sufficient and reliable
-    } catch (error) {
-      console.error("[TTS] Error:", error.message)
-
-      // Send a simple beep or tone as fallback
-      const fallbackAudio = generateSimpleTone(440, 0.5)
-      await streamAudioToCallRealtime(fallbackAudio)
-    } finally {
-      // Reset streaming flag immediately to allow new requests
-      isStreaming = false
-    }
-  }
-
-  /**
    * Real-time audio streaming - sends each chunk immediately to SIP
+   * FIXED: Single streaming method to prevent audio duplication
    */
   const streamAudioToCallRealtime = async (audioBase64) => {
     const audioBuffer = Buffer.from(audioBase64, "base64")
@@ -260,24 +137,16 @@ const setupUnifiedVoiceServer = (ws) => {
     // C-Zentrix expects specific audio format
     // 8kHz, 16-bit PCM, mono = 160 bytes per 10ms chunk
     const CHUNK_SIZE = 160 // 10ms chunks for 8kHz 16-bit mono
-    const CHUNK_DELAY = 5 // Reduced delay for immediate sending
+    const CHUNK_DELAY = 5
 
     let position = 0
     const streamStart = Date.now()
     const streamStartTime = new Date().toISOString()
 
     console.log(
-      `[STREAM-REALTIME] ${streamStartTime} - Starting real-time stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
+      `[STREAM-REALTIME] ${streamStartTime} - Starting stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
     )
     console.log(`[STREAM] StreamSID: ${streamSid}, WS State: ${ws.readyState}`)
-
-    // Verify WebSocket is ready
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.error("[STREAM] WebSocket not ready, state:", ws.readyState)
-      return
-    }
-
-    console.log("[STREAM] WebSocket ready, starting audio stream...")
 
     let chunksSuccessfullySent = 0
 
@@ -300,8 +169,7 @@ const setupUnifiedVoiceServer = (ws) => {
         ws.send(JSON.stringify(mediaMessage))
         chunksSuccessfullySent++
 
-        // Only log every 50 chunks to reduce noise
-        if (chunksSuccessfullySent % 50 === 0) {
+        if (chunksSuccessfullySent % 20 === 0) {
           console.log(`[STREAM] Sent ${chunksSuccessfullySent} chunks`)
         }
       } catch (error) {
@@ -327,8 +195,6 @@ const setupUnifiedVoiceServer = (ws) => {
         },
       }
       ws.send(JSON.stringify(silenceMessage))
-      const endTime = new Date().toISOString()
-      console.log(`[STREAM-END] ${endTime} - End silence sent`)
     } catch (error) {
       console.error("[STREAM] Failed to send end silence:", error.message)
     }
@@ -341,10 +207,76 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Optimized audio streaming with reduced latency for C-Zentrix
+   * FIXED: Optimized text-to-speech with single streaming method
    */
-  const streamAudioToCall = async (audioBase64) => {
-    return await streamAudioToCallRealtime(audioBase64)
+  const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
+    try {
+      const ttsStartTime = new Date().toISOString()
+      console.log(`[TTS-START] ${ttsStartTime} - Starting TTS streaming for: "${text}"`)
+
+      console.log(`[TTS] Synthesizing: "${text}"`)
+      const startTime = Date.now()
+
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 3000)
+
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": SARVAM_API_KEY,
+          Connection: "keep-alive",
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: language,
+          speaker: "meera",
+          pitch: 0,
+          pace: 1.4,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false,
+          model: "bulbul:v1",
+        }),
+        signal: controller.signal,
+      })
+
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Sarvam API error: ${response.status} - ${errorText}`)
+      }
+
+      const data = await response.json()
+      const audioBase64 = data.audios?.[0]
+
+      if (!audioBase64) {
+        throw new Error("No audio data received from Sarvam")
+      }
+
+      const ttsTime = Date.now() - startTime
+      console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`)
+
+      const streamStartTime = new Date().toISOString()
+      console.log(`[STREAM-START] ${streamStartTime} - Starting streaming to SIP`)
+
+      // FIXED: Only call ONE streaming method to prevent duplication
+      await streamAudioToCallRealtime(audioBase64)
+
+      // REMOVED: Secondary streaming method that was causing duplication
+      // setTimeout(async () => {
+      //   console.log("[TTS] Trying alternative streaming method in case primary failed")
+      //   await streamAudioAlternative(audioBase64)
+      // }, 50)
+      
+    } catch (error) {
+      console.error("[TTS] Error:", error.message)
+
+      // Send a simple beep or tone as fallback
+      const fallbackAudio = generateSimpleTone(440, 0.5)
+      await streamAudioToCallRealtime(fallbackAudio)
+    }
   }
 
   /**
@@ -353,43 +285,37 @@ const setupUnifiedVoiceServer = (ws) => {
   const connectToDeepgram = (attemptCount = 0) => {
     console.log(`[STT] Connecting to Deepgram (attempt ${attemptCount + 1})`)
 
-    // Start with minimal parameters that always work
     let params = {
       encoding: "linear16",
       sample_rate: "8000",
       channels: "1",
     }
 
-    // Add additional parameters based on attempt
     if (attemptCount === 0) {
-      // First attempt: Ultra-low latency settings
       params = {
         ...params,
         model: "nova-2",
         language: "en",
         interim_results: "true",
         smart_format: "true",
-        endpointing: "100", // Reduced from 300ms to 100ms for faster response
+        endpointing: "300", // Increased for more stable detection
         punctuate: "true",
-        diarize: "false", // Disable diarization for speed
-        multichannel: "false", // Disable multichannel for speed
+        diarize: "false",
+        multichannel: "false",
       }
     } else if (attemptCount === 1) {
-      // Second attempt: Basic features with low latency
       params = {
         ...params,
         model: "base",
         language: "en",
         interim_results: "true",
-        endpointing: "50", // Even lower for fallback
+        endpointing: "200",
       }
     }
-    // Third attempt uses minimal params only
 
     const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`
 
     console.log(`[STT] Connecting to URL: ${deepgramUrl}`)
-    console.log(`[STT] Using API key: ${DEEPGRAM_API_KEY ? `${DEEPGRAM_API_KEY.substring(0, 8)}...` : "MISSING"}`)
 
     deepgramWs = new WebSocket(deepgramUrl, {
       headers: {
@@ -401,6 +327,7 @@ const setupUnifiedVoiceServer = (ws) => {
       console.log("[STT] Connected to Deepgram successfully")
     })
 
+    // FIXED: Modified message handler to prevent duplicate processing
     deepgramWs.on("message", async (data) => {
       const response = JSON.parse(data)
 
@@ -409,40 +336,22 @@ const setupUnifiedVoiceServer = (ws) => {
         const isFinal = response.is_final
         const confidence = response.channel?.alternatives?.[0]?.confidence
 
-        if (transcript?.trim()) {
-          // Lower confidence threshold for faster response
-          if (confidence > 0.5) {
-            console.log(`[STT] ${isFinal ? 'Final' : 'Interim'} transcript: "${transcript}" (${confidence})`)
-            
-            if (isFinal) {
-              // Clear any existing silence timer
-              if (silenceTimer) {
-                clearTimeout(silenceTimer)
-                silenceTimer = null
-              }
-
-              // Process immediately for all final results
-              await processUserInput(transcript.trim())
-            } else {
-              // For interim results, only process if they're substantial and confident
-              if (transcript.length > 3 && confidence > 0.8) {
-                // Clear any existing silence timer
-                if (silenceTimer) {
-                  clearTimeout(silenceTimer)
-                  silenceTimer = null
-                }
-
-                // Process interim results for very confident short phrases
-                if (transcript.length < 20) {
-                  await processUserInput(transcript.trim())
-                }
-              }
+        if (transcript?.trim() && confidence > 0.6) { // Increased confidence threshold
+          console.log(`[STT] ${isFinal ? 'Final' : 'Interim'} transcript: "${transcript}" (${confidence})`)
+          
+          // FIXED: Only process final results to avoid duplicate responses
+          if (isFinal) {
+            if (silenceTimer) {
+              clearTimeout(silenceTimer)
+              silenceTimer = null
             }
+            await processUserInput(transcript.trim())
           }
+          // REMOVED: Interim processing that was causing duplicates
         }
       } else if (response.type === "UtteranceEnd") {
-        // Process any remaining buffer immediately
-        if (userUtteranceBuffer.trim()) {
+        // Only process if we have new content that hasn't been processed
+        if (userUtteranceBuffer.trim() && userUtteranceBuffer !== lastProcessedTranscript) {
           console.log(`[STT] Utterance end: "${userUtteranceBuffer}"`)
           await processUserInput(userUtteranceBuffer)
           userUtteranceBuffer = ""
@@ -453,20 +362,18 @@ const setupUnifiedVoiceServer = (ws) => {
     deepgramWs.on("error", (error) => {
       console.error(`[STT] Deepgram error (attempt ${attemptCount + 1}):`, error.message)
 
-      // Try different connection approaches
-      if (attemptCount < 3) {
+      if (attemptCount < 2) {
         console.log(`[STT] Retrying with different parameters...`)
         setTimeout(
           () => {
             connectToDeepgram(attemptCount + 1)
           },
           1000 * (attemptCount + 1),
-        ) // Increasing delay
+        )
       } else {
         console.error("[STT] All Deepgram connection attempts failed. Check API key and permissions.")
         sttFailed = true
 
-        // Provide feedback to user about STT failure (without await - fire and forget)
         const fallbackMessage =
           "I'm having trouble with speech recognition right now, but I can still help you. Please use the keypad to navigate options."
         synthesizeAndStreamAudio(fallbackMessage).catch((err) =>
@@ -501,16 +408,15 @@ const setupUnifiedVoiceServer = (ws) => {
           content:
             "You are a helpful AI assistant. Give very concise responses (1-2 sentences max). Be direct and helpful.",
         },
-        ...conversationHistory.slice(-4), // Reduced context for faster processing
+        ...conversationHistory.slice(-4),
         {
           role: "user",
           content: userMessage,
         },
       ]
 
-      // Optimized API call with timeout
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 4000) // 4s timeout
+      const timeoutId = setTimeout(() => controller.abort(), 4000)
 
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -521,9 +427,9 @@ const setupUnifiedVoiceServer = (ws) => {
         body: JSON.stringify({
           model: "gpt-4o-mini",
           messages: messages,
-          max_tokens: 80, // Reduced from 150 for faster generation
-          temperature: 0.5, // Reduced for more focused responses
-          stream: false, // Disable streaming for this use case
+          max_tokens: 80,
+          temperature: 0.5,
+          stream: false,
         }),
         signal: controller.signal,
       })
@@ -547,63 +453,67 @@ const setupUnifiedVoiceServer = (ws) => {
   }
 
   /**
-   * Process user speech input with ultra-low latency flow
+   * FIXED: Process user speech input with duplicate prevention and response tracking
    */
   const processUserInput = async (transcript) => {
+    const responseId = trackResponse()
+    
     if (isProcessing || !transcript.trim()) return
 
+    // FIXED: Prevent duplicate processing of same transcript within 3 seconds
+    const now = Date.now()
+    if (transcript === lastProcessedTranscript && (now - lastProcessedTime) < 3000) {
+      console.log(`[PROCESS] Skipping duplicate transcript: "${transcript}"`)
+      return
+    }
+
+    lastProcessedTranscript = transcript
+    lastProcessedTime = now
+    
     isProcessing = true
     const totalStart = Date.now()
-    console.log(`[PROCESS] Starting processing for: "${transcript}"`)
+    console.log(`[PROCESS] Starting processing for: "${transcript}" (ID: ${responseId})`)
 
     try {
-      // Check for quick responses first (0ms latency)
+      // Check if this response is still active before proceeding
+      if (!isResponseActive(responseId)) {
+        console.log(`[PROCESS] Response ${responseId} cancelled - newer request in progress`)
+        return
+      }
+
       const quickResponse = getQuickResponse(transcript)
 
-      if (quickResponse) {
-        // Immediate response for common phrases
+      if (quickResponse && isResponseActive(responseId)) {
         console.log(`[PROCESS] Quick response found: "${quickResponse}"`)
         conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: quickResponse })
 
-        // Start TTS immediately without waiting
-        synthesizeAndStreamAudio(quickResponse).catch(err => 
-          console.error("[PROCESS] Quick response TTS error:", err.message)
-        )
-      } else {
-        // For non-quick responses, start AI processing immediately
+        await synthesizeAndStreamAudio(quickResponse)
+      } else if (isResponseActive(responseId)) {
         console.log(`[PROCESS] Getting AI response for: "${transcript}"`)
         
-        // Start AI response generation (don't await here for faster response)
-        getAIResponse(transcript).then(async (aiResponse) => {
-          if (aiResponse) {
-            console.log(`[PROCESS] AI response received: "${aiResponse}"`)
-            
-            // Add to conversation history
-            conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
+        const aiResponse = await getAIResponse(transcript)
+        if (aiResponse && isResponseActive(responseId)) {
+          console.log(`[PROCESS] AI response received: "${aiResponse}"`)
+          
+          conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
 
-            // Keep history lean for performance
-            if (conversationHistory.length > 6) {
-              conversationHistory = conversationHistory.slice(-6)
-            }
-
-            // Convert to speech and stream back
-            await synthesizeAndStreamAudio(aiResponse)
+          // Keep history lean for performance
+          if (conversationHistory.length > 6) {
+            conversationHistory = conversationHistory.slice(-6)
           }
-        }).catch(error => {
-          console.error("[PROCESS] AI response error:", error.message)
-        })
+
+          await synthesizeAndStreamAudio(aiResponse)
+        }
       }
 
       const totalTime = Date.now() - totalStart
-      console.log(`[PROCESS] Initial processing completed in ${totalTime}ms`)
+      console.log(`[PROCESS] Processing completed in ${totalTime}ms for response ${responseId}`)
     } catch (error) {
       console.error("[PROCESS] Error processing user input:", error.message)
     } finally {
-      // Don't set isProcessing to false immediately for quick responses
-      // Allow parallel processing of multiple inputs
-      setTimeout(() => {
+      if (isResponseActive(responseId)) {
         isProcessing = false
-      }, 100) // Small delay to prevent rapid-fire processing
+      }
     }
   }
 
@@ -612,7 +522,6 @@ const setupUnifiedVoiceServer = (ws) => {
     try {
       const messageStr = message.toString()
 
-      // Skip non-JSON messages
       if (!messageStr.startsWith("{")) {
         return
       }
@@ -627,7 +536,6 @@ const setupUnifiedVoiceServer = (ws) => {
         case "start":
           console.log("[CZ] Call started")
 
-          // Extract call information
           streamSid = data.streamSid || data.start?.streamSid
           callSid = data.start?.callSid
           accountSid = data.start?.accountSid
@@ -638,7 +546,6 @@ const setupUnifiedVoiceServer = (ws) => {
           console.log("[CZ] Tracks:", JSON.stringify(data.start?.tracks))
           console.log("[CZ] Media Format:", JSON.stringify(data.start?.mediaFormat))
 
-          // Log custom parameters if present
           if (data.start?.customParameters) {
             console.log("[CZ] Custom Parameters:", data.start.customParameters)
           }
@@ -646,22 +553,13 @@ const setupUnifiedVoiceServer = (ws) => {
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0)
 
-          // Send optimized greeting with proper timing
+          // Send optimized greeting
           const greeting = "Hi! How can I help you?"
           console.log("[CZ] Sending greeting:", greeting)
 
-          // Wait a moment for call to stabilize before sending audio
           setTimeout(async () => {
-            console.log("[CZ] Starting greeting audio...")
             await synthesizeAndStreamAudio(greeting)
-            console.log("[CZ] Greeting audio completed")
-            
-            // Test audio streaming after greeting
-            setTimeout(async () => {
-              console.log("[CZ] Testing audio streaming...")
-              await testAudioStreaming()
-            }, 1000)
-          }, 500)
+          }, 1000) // Increased delay for call stability
           break
 
         case "media":
@@ -670,7 +568,6 @@ const setupUnifiedVoiceServer = (ws) => {
             const audioBuffer = Buffer.from(data.media.payload, "base64")
             deepgramWs.send(audioBuffer)
           } else if (sttFailed) {
-            // If STT failed, we can still respond to DTMF or provide menu-driven responses
             console.log("[STT] Audio received but STT unavailable - consider implementing DTMF fallback")
           }
           break
@@ -692,7 +589,6 @@ const setupUnifiedVoiceServer = (ws) => {
           break
 
         default:
-          // Reduced logging for performance
           break
       }
     } catch (error) {
@@ -722,6 +618,9 @@ const setupUnifiedVoiceServer = (ws) => {
     userUtteranceBuffer = ""
     audioQueue = []
     isStreaming = false
+    lastProcessedTranscript = ""
+    lastProcessedTime = 0
+    activeResponseId = null
   })
 
   // Handle errors
