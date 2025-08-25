@@ -42,6 +42,18 @@ async function streamAudioToCallRealtime({ ws, streamId, pcmBuffer, sampleRate, 
 // -------- ElevenLabs TTS --------
 async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channels }) {
   console.log(`[TTS-START] ${ts()} - ElevenLabs: "${text}"`)
+
+  // Map PBX sampleRate → ElevenLabs output_format
+  const formatMap = {
+    8000: "pcm_8000",
+    16000: "pcm_16000",
+    22050: "pcm_22050",
+    24000: "pcm_24000",
+    44100: "pcm_44100",
+    44000: "pcm_44000", // PBX sometimes reports 44000
+  }
+  const outputFormat = formatMap[sampleRate] || "pcm_44100"
+
   try {
     const resp = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${ELEVEN_VOICE_ID}`,
@@ -49,19 +61,19 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channe
         method: "POST",
         headers: {
           "xi-api-key": ELEVEN_API_KEY,
-          Accept: "audio/pcm", // raw PCM
+          Accept: "audio/pcm",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
           text,
-          output_format: "pcm_44100", // Force 44.1kHz PCM LINEAR16
+          output_format: outputFormat,
         }),
       }
     )
     if (!resp.ok) throw new Error(`ElevenLabs API ${resp.status}: ${await resp.text()}`)
 
-    const audioBuf = Buffer.from(await resp.arrayBuffer()) // already PCM16 44.1kHz
-    console.log(`[TTS] ElevenLabs returned ${audioBuf.length} bytes PCM`)
+    const audioBuf = Buffer.from(await resp.arrayBuffer()) // already PCM LINEAR16
+    console.log(`[TTS] ElevenLabs returned ${audioBuf.length} bytes PCM (${outputFormat})`)
 
     await streamAudioToCallRealtime({
       ws,
@@ -110,9 +122,9 @@ function setupSanPbxWebSocketServer(ws) {
   let dgWs = null
 
   // connect Deepgram once call starts
-  const connectDeepgram = () => {
+  const connectDeepgram = (sampleRate) => {
     dgWs = new DGWebSocket(
-      "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=44100&channels=1&model=nova-2&interim_results=false&smart_format=true",
+      `wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=${sampleRate}&channels=1&model=nova-2&interim_results=false&smart_format=true`,
       { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
     )
     dgWs.on("open", () => console.log("[STT] Connected to Deepgram"))
@@ -153,10 +165,10 @@ function setupSanPbxWebSocketServer(ws) {
         mediaFormat = data.mediaFormat || mediaFormat
         console.log("[SANPBX] streamId:", streamId)
         console.log("[SANPBX] Media Format:", mediaFormat)
-        connectDeepgram()
+        connectDeepgram(mediaFormat.sampleRate)
         setTimeout(async () => {
           await synthesizeAndStreamAudio({
-            text: "Hi! How can I help you today?",
+            text: "Hi! This is a test greeting from the AI assistant. How can I help you today?",
             ws,
             streamId,
             sampleRate: mediaFormat.sampleRate,
