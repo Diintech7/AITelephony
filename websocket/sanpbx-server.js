@@ -209,7 +209,7 @@ function setupSanPbxWebSocketServer(ws) {
   let streamId = null
   let callId = null
   let channelId = null
-  let mediaFormat = { encoding: "PCM", sampleRate: 44100, channels: 1 } // default/fallback
+  let mediaFormat = { encoding: "PCM", sampleRate: 8000, channels: 1 } // default/fallback
 
   // Optional: ping keepalive (PBX usually drives the session, but harmless)
   let pingTimer = setInterval(() => {
@@ -249,7 +249,7 @@ function setupSanPbxWebSocketServer(ws) {
         // PBX can report different spellings/values; normalize
         const mf = data.mediaFormat || {}
         mediaFormat.encoding = mf.encoding || "PCM"
-        mediaFormat.sampleRate = Number(mf.sampleRate) || 44100
+        mediaFormat.sampleRate = Number(mf.sampleRate) || 8000
         mediaFormat.channels = Number(mf.channels) || 1
 
         console.log("[SANPBX] streamId:", streamId)
