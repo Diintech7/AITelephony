@@ -39,7 +39,7 @@ const QUICK_RESPONSES = {
  * Setup unified voice server for C-Zentrix integration
  * @param {WebSocket} ws - The WebSocket connection from C-Zentrix
  */
-const setupUnifiedVoiceServer = (ws) => {
+const setupSanPbxWebSocketServer = (ws) => {
   console.log("Setting up C-Zentrix voice server connection")
 
   // Session state for this connection
@@ -633,5 +633,5 @@ const setupUnifiedVoiceServer = (ws) => {
 }
 
 module.exports = {
-  setupUnifiedVoiceServer,
+  setupSanPbxWebSocketServer,
 }
