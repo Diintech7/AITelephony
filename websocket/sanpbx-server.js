@@ -14,26 +14,10 @@ if (!ELEVEN_API_KEY || !DEEPGRAM_API_KEY || !OPENAI_API_KEY) {
   process.exit(1)
 }
 
-
 const ts = () => new Date().toISOString()
 const wait = (ms) => new Promise((res) => setTimeout(res, ms))
 
 // -------- PCM utils --------
-function base64ToPcm16(b64) {
-  const buf = Buffer.from(b64, "base64")
-  if (buf.slice(0, 4).toString("ascii") !== "RIFF") return buf
-
-  let offset = 12
-  while (offset + 8 <= buf.length) {
-    const chunkId = buf.slice(offset, offset + 4).toString("ascii")
-    const chunkSize = buf.readUInt32LE(offset + 4)
-    const start = offset + 8
-    const end = start + chunkSize
-    if (chunkId === "data") return buf.slice(start, end)
-    offset = end
-  }
-  return buf
-}
 function bytesPer10ms(rate, channels = 1) {
   return Math.round(rate / 100) * 2 * channels
 }
@@ -65,16 +49,27 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channe
         method: "POST",
         headers: {
           "xi-api-key": ELEVEN_API_KEY,
-          Accept: "audio/wav",
+          Accept: "audio/pcm", // raw PCM
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          output_format: "pcm_44100", // Force 44.1kHz PCM LINEAR16
+        }),
       }
     )
     if (!resp.ok) throw new Error(`ElevenLabs API ${resp.status}: ${await resp.text()}`)
-    const audioBuf = Buffer.from(await resp.arrayBuffer())
-    const pcm = base64ToPcm16(audioBuf.toString("base64"))
-    await streamAudioToCallRealtime({ ws, streamId, pcmBuffer: pcm, sampleRate, channels })
+
+    const audioBuf = Buffer.from(await resp.arrayBuffer()) // already PCM16 44.1kHz
+    console.log(`[TTS] ElevenLabs returned ${audioBuf.length} bytes PCM`)
+
+    await streamAudioToCallRealtime({
+      ws,
+      streamId,
+      pcmBuffer: audioBuf,
+      sampleRate,
+      channels,
+    })
   } catch (err) {
     console.error(`[TTS] ElevenLabs error: ${err.message}`)
   }
@@ -91,7 +86,10 @@ async function getAiResponse(prompt) {
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        messages: [{ role: "system", content: "You are a helpful voice assistant." }, { role: "user", content: prompt }],
+        messages: [
+          { role: "system", content: "You are a helpful voice assistant." },
+          { role: "user", content: prompt },
+        ],
       }),
     })
     if (!resp.ok) throw new Error(`OpenAI ${resp.status}: ${await resp.text()}`)
@@ -108,13 +106,13 @@ function setupSanPbxWebSocketServer(ws) {
   console.log("Setting up SanIPPBX voice server connection")
 
   let streamId = null
-  let mediaFormat = { encoding: "PCM", sampleRate: 44100, channels: 1 }
+  let mediaFormat = { encoding: "LINEAR16", sampleRate: 44100, channels: 1 }
   let dgWs = null
 
   // connect Deepgram once call starts
   const connectDeepgram = () => {
     dgWs = new DGWebSocket(
-      "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=44000&channels=1&model=nova-2&interim_results=false&smart_format=true",
+      "wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=44100&channels=1&model=nova-2&interim_results=false&smart_format=true",
       { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
     )
     dgWs.on("open", () => console.log("[STT] Connected to Deepgram"))
