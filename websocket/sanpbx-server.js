@@ -230,7 +230,7 @@ function setupSanPbxWebSocketServer(ws) {
   })
   function normalizeSampleRate(rate) {
     const allowed = [8000, 16000, 22050, 24000]
-    return allowed.includes(rate) ? rate : 24000 // fallback
+    return allowed.includes(rate) ? rate : 8000 // fallback
   }
   
   ws.on("message", async (raw) => {
