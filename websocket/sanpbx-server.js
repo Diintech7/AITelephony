@@ -249,7 +249,7 @@ function setupSanPbxWebSocketServer(ws) {
         // PBX can report different spellings/values; normalize
         const mf = data.mediaFormat || {}
         mediaFormat.encoding = mf.encoding || "PCM"
-        mediaFormat.sampleRate = Number(mf.sampleRate) || 24000
+        mediaFormat.sampleRate = normalizeSampleRate(Number(mf.sampleRate) || 24000)
         mediaFormat.channels = Number(mf.channels) || 1
 
         console.log("[SANPBX] streamId:", streamId)
