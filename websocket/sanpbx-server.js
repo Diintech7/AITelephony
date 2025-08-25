@@ -52,7 +52,7 @@ async function synthesizeAndStreamAudio({ text, ws, streamId, sampleRate, channe
     44100: "pcm_44100",
     44000: "pcm_44000", // PBX sometimes reports 44000
   }
-  const outputFormat = formatMap[sampleRate] || "pcm_44100"
+  const outputFormat =  "pcm_44100"
 
   try {
     const resp = await fetch(
