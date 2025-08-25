@@ -5,7 +5,7 @@ const fetch = require("node-fetch")
 
 // ENV
 const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY
-const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "JBFqnCBsd6RMkjVDRZzbRachel"
+const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "kdmDKE6EkgrWrrykO9Qt"
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
