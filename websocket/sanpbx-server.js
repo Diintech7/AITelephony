@@ -176,18 +176,18 @@ function setupSanPbxWebSocketServer(ws) {
           })
         }, 500)
         break
-        case "answer": 
+        case "answer":
           console.log("[SANPBX] Call answered")
-        
-          // ✅ pull identifiers from the incoming message
-          const { callId, channelId, streamId } = data
-        
-          // ✅ Send ACK back to PBX so it bridges media
+
+          // pull identifiers from the incoming event
+          const { callId, channelId, streamId: ansStreamId } = data
+
+          // Send ACK back to PBX so it bridges media
           const ack = {
             event: "answer",
             callId,
             channelId,
-            streamId,
+            streamId: ansStreamId,
           }
           try {
             ws.send(JSON.stringify(ack))
@@ -195,21 +195,18 @@ function setupSanPbxWebSocketServer(ws) {
           } catch (err) {
             console.error("[SANPBX] Failed to send answer ACK:", err.message)
           }
-        
-          // Now it’s safe to synthesize & stream
+
+          // Now synthesize & stream greeting
           const greeting = "Hi! This is a test greeting from the AI assistant. How can I help you today?"
           await synthesizeAndStreamAudio({
             text: greeting,
-            language: DEFAULT_LANG,
-            voice: DEFAULT_VOICE,
             ws,
-            streamId,
-            callId,
-            channelId,
+            streamId: ansStreamId,
             sampleRate: mediaFormat.sampleRate,
             channels: mediaFormat.channels,
           })
           break
+
         
         
         
