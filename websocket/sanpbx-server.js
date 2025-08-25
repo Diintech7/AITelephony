@@ -3,7 +3,7 @@ const WebSocket = require("ws")
 
 // ENV vars
 const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY
-const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "Rachel" // pick your ElevenLabs voice
+const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb" // pick your ElevenLabs voice
 
 if (!ELEVEN_API_KEY) {
   console.error("❌ ELEVEN_API_KEY is missing from environment variables")
