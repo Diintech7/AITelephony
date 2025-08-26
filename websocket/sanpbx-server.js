@@ -150,7 +150,14 @@ const setupSanPbxWebSocketServer = (ws) => {
       )
       console.log(`[SANPBX] StreamID: ${streamId}, CallID: ${callId}, ChannelID: ${channelId}`)
 
+      // Spec conformance pre-check (one-time per stream)
+      const expectedEventName = "reverse-media" // spec says client should send reverse-media
+      console.log(
+        `[SPEC-CHECK:PRE] expected_event=${expectedEventName}, expected_sample_rate=8000, expected_channels=1, expected_encoding=LINEAR16, expected_chunk_bytes=320, expected_chunk_durn_ms=20`,
+      )
+
       let chunksSuccessfullySent = 0
+      let firstChunkSpecChecked = false
 
       while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
@@ -165,7 +172,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         // Format message exactly like SanIPPBX expects
         const mediaMessage = {
-          event: "media",
+          event: "media", // WARNING: spec expects "reverse-media" for client → telephony
           payload: payloadBase64,
           chunk: currentChunk,
           chunk_durn_ms: CHUNK_DURATION_MS,
@@ -181,6 +188,34 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
 
         try {
+          // Extra spec-check logging only on first chunk
+          if (!firstChunkSpecChecked) {
+            const usedEventName = mediaMessage.event
+            const eventOk = usedEventName === expectedEventName
+            const sizeOk = paddedChunk.length === CHUNK_SIZE
+            const durOk = mediaMessage.chunk_durn_ms === CHUNK_DURATION_MS
+            const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
+            console.log(
+              `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${eventOk} (used=${usedEventName}), size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${mediaMessage.chunk_durn_ms}), format_ok=${fmtOk}`,
+            )
+            if (!eventOk) {
+              console.warn(
+                `[SPEC-WARN] Outgoing event name should be "${expectedEventName}" but is "${usedEventName}". Update if your PBX expects reverse direction.`,
+              )
+            }
+            if (!sizeOk) {
+              console.warn(
+                `[SPEC-WARN] Chunk size should be 320 bytes for 20ms @ 8kHz 16-bit mono.`,
+              )
+            }
+            if (!fmtOk) {
+              console.warn(
+                `[SPEC-WARN] Format should be LINEAR16, 8000 Hz, 1 channel. Current: encoding=${ENCODING}, sample_rate_hz=${SAMPLE_RATE_HZ}, channels=${CHANNELS}`,
+              )
+            }
+            firstChunkSpecChecked = true
+          }
+
           // Log the exact message being sent, including payload
           console.log(JSON.stringify(mediaMessage, null, 2))
           ws.send(JSON.stringify(mediaMessage))
@@ -208,7 +243,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         for (let i = 0; i < 3; i++) {
           const silenceChunk = Buffer.alloc(CHUNK_SIZE)
           const silenceMessage = {
-            event: "media",
+            event: "media", // WARNING: spec expects "reverse-media"
             payload: silenceChunk.toString("base64"),
             chunk: currentChunk,
             chunk_durn_ms: CHUNK_DURATION_MS,
@@ -606,6 +641,11 @@ const setupSanPbxWebSocketServer = (ws) => {
             const ch = Number(mf.channels)
             inputChannels = Number.isFinite(ch) && ch > 0 ? ch : 1
             console.log(`[STT] Using media format -> encoding=${inputEncoding}, sample_rate=${inputSampleRateHz}, channels=${inputChannels}`)
+            const conforms = inputEncoding === 'linear16' && inputSampleRateHz === 8000 && inputChannels === 1
+            console.log(`[SPEC-CHECK:INCOMING-FORMAT] conforms=${conforms} (expected: encoding=linear16, sample_rate=8000, channels=1)`) 
+            if (!conforms) {
+              console.warn(`[SPEC-WARN] Incoming media format differs from spec: encoding=${inputEncoding}, sample_rate=${inputSampleRateHz}, channels=${inputChannels}`)
+            }
           } catch (e) {
             console.log('[STT] Using default media format due to parse error:', e.message)
             inputEncoding = 'linear16'
