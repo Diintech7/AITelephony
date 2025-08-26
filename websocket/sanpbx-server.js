@@ -116,17 +116,17 @@ const setupSanPbxWebSocketServer = (ws) => {
   }
 
   /**
-   * FIXED: Stream audio to SanIPPBX in their expected format
-   * Based on the logs: chunk duration 20ms, 8kHz sample rate, LINEAR16
+   * Stream raw PCM (16-bit, mono, 8kHz) audio to SanIPPBX using reverse-media
+   * Chunks: 20ms (320 bytes) to match PBX expectations
    */
-  const streamAudioToSanIPPBX = async (audioBase64) => {
+  const streamAudioToSanIPPBX = async (pcmBase64) => {
     if (!streamId || !callId || !channelId) {
       console.error("[SANPBX] Missing required IDs for streaming")
       return
     }
 
     try {
-      const audioBuffer = Buffer.from(audioBase64, "base64")
+      const audioBuffer = Buffer.from(pcmBase64, "base64")
       
       // SanIPPBX format: 8kHz, 16-bit PCM, mono, 20ms chunks
       // 8000 samples/sec * 0.02 sec * 2 bytes = 320 bytes per chunk
@@ -151,9 +151,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       console.log(`[SANPBX] StreamID: ${streamId}, CallID: ${callId}, ChannelID: ${channelId}`)
 
       // Spec conformance pre-check (one-time per stream)
-      const expectedEventName = "reverse-media" // spec says client should send reverse-media
       console.log(
-        `[SPEC-CHECK:PRE] expected_event=${expectedEventName}, expected_sample_rate=8000, expected_channels=1, expected_encoding=LINEAR16, expected_chunk_bytes=320, expected_chunk_durn_ms=20`,
+        `[SPEC-CHECK:PRE] event=reverse-media, sample_rate=8000, channels=1, encoding=LINEAR16, chunk_bytes=320, chunk_durn_ms=20`,
       )
 
       let chunksSuccessfullySent = 0
@@ -170,21 +169,13 @@ const setupSanPbxWebSocketServer = (ws) => {
         // Prepare payload
         const payloadBase64 = paddedChunk.toString("base64")
 
-        // Format message exactly like SanIPPBX expects
+        // Minimal spec-compliant message
         const mediaMessage = {
           event: "reverse-media",
           payload: payloadBase64,
-          chunk: currentChunk,
-          chunk_durn_ms: CHUNK_DURATION_MS,
+          streamId: streamId,
           channelId: channelId,
           callId: callId,
-          streamId: streamId,
-          callerId: callerIdValue || "",
-          callDirection: callDirectionValue || "Outgoing",
-          extraParams: "",
-          cid: "0",
-          did: didValue || "",
-          timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
         }
 
         try {
@@ -216,8 +207,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             firstChunkSpecChecked = true
           }
 
-          // Log the exact message being sent, including payload
-          console.log(JSON.stringify(mediaMessage, null, 2))
+          // Log without payload to avoid noise
+          console.log(`[SANPBX-SEND] reverse-media chunk #${currentChunk}`)
           ws.send(JSON.stringify(mediaMessage))
           chunksSuccessfullySent++
           currentChunk++
@@ -245,21 +236,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           const silenceMessage = {
             event: "reverse-media",
             payload: silenceChunk.toString("base64"),
-            chunk: currentChunk,
-            chunk_durn_ms: CHUNK_DURATION_MS,
+            streamId: streamId,
             channelId: channelId,
             callId: callId,
-            streamId: streamId,
-            callerId: callerIdValue || "",
-            callDirection: callDirectionValue || "Outgoing",
-            extraParams: "",
-            cid: "0",
-            did: didValue || "",
-            timestamp: new Date().toISOString().slice(0, 19).replace('T', ' ')
           }
-
-          // Log the exact trailing silence message being sent
-          console.log(JSON.stringify(silenceMessage, null, 2))
+          console.log(`[SANPBX-SEND] reverse-media silence chunk #${currentChunk}`)
           ws.send(JSON.stringify(silenceMessage))
           currentChunk++
           await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
@@ -279,7 +260,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   }
 
   /**
-   * FIXED: Optimized text-to-speech with Sarvam API for 8kHz output
+   * Optimized text-to-speech with Sarvam API for 8kHz output
    */
   const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
     try {
@@ -332,8 +313,11 @@ const setupSanPbxWebSocketServer = (ws) => {
       const streamStartTime = new Date().toISOString()
       console.log(`[SANPBX-STREAM-START] ${streamStartTime} - Starting streaming to SanIPPBX`)
 
-      // Stream audio in SanIPPBX format
-      await streamAudioToSanIPPBX(audioBase64)
+      // Convert WAV (if provided) to raw PCM 16-bit mono 8kHz before streaming
+      const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
+
+      // Stream audio in SanIPPBX format (reverse-media)
+      await streamAudioToSanIPPBX(pcmBase64)
       
     } catch (error) {
       console.error("[TTS] Error:", error.message)
@@ -341,6 +325,50 @@ const setupSanPbxWebSocketServer = (ws) => {
       // Send simple silence as fallback
       const fallbackAudio = Buffer.alloc(8000).toString("base64") // 1 second of silence
       await streamAudioToSanIPPBX(fallbackAudio)
+    }
+  }
+
+  /**
+   * Ensure base64 audio is raw PCM 16-bit mono @ 8kHz.
+   * If it's a WAV (RIFF/WAVE), strip header and return the data chunk.
+   */
+  const extractPcmLinear16Mono8kBase64 = (audioBase64) => {
+    try {
+      const buf = Buffer.from(audioBase64, 'base64')
+      if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') {
+        // Parse chunks to find 'fmt ' and 'data'
+        let offset = 12
+        let fmt = null
+        let dataOffset = null
+        let dataSize = null
+        while (offset + 8 <= buf.length) {
+          const chunkId = buf.toString('ascii', offset, offset + 4)
+          const chunkSize = buf.readUInt32LE(offset + 4)
+          const next = offset + 8 + chunkSize
+          if (chunkId === 'fmt ') {
+            fmt = {
+              audioFormat: buf.readUInt16LE(offset + 8),
+              numChannels: buf.readUInt16LE(offset + 10),
+              sampleRate: buf.readUInt32LE(offset + 12),
+              bitsPerSample: buf.readUInt16LE(offset + 22),
+            }
+          } else if (chunkId === 'data') {
+            dataOffset = offset + 8
+            dataSize = chunkSize
+            break
+          }
+          offset = next
+        }
+        if (dataOffset != null && dataSize != null) {
+          // Optional: validate fmt, but still proceed to avoid blocking audio
+          const dataBuf = buf.slice(dataOffset, dataOffset + dataSize)
+          return dataBuf.toString('base64')
+        }
+      }
+      // Assume it's already raw PCM
+      return audioBase64
+    } catch (e) {
+      return audioBase64
     }
   }
 
