@@ -182,7 +182,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Extra spec-check logging only on first chunk
           if (!firstChunkSpecChecked) {
             const usedEventName = mediaMessage.event
-            const eventOk = usedEventName === expectedEventName
+            const eventOk = usedEventName === "reverse-media"
             const sizeOk = paddedChunk.length === CHUNK_SIZE
             const durOk = mediaMessage.chunk_durn_ms === CHUNK_DURATION_MS
             const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
@@ -191,7 +191,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             )
             if (!eventOk) {
               console.warn(
-                `[SPEC-WARN] Outgoing event name should be "${expectedEventName}" but is "${usedEventName}". Update if your PBX expects reverse direction.`,
+                `[SPEC-WARN] Outgoing event name should be "reverse-media" but is "${usedEventName}". Update if your PBX expects reverse direction.`,
               )
             }
             if (!sizeOk) {
