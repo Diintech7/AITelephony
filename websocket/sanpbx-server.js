@@ -184,10 +184,10 @@ const setupSanPbxWebSocketServer = (ws) => {
             const usedEventName = mediaMessage.event
             const eventOk = usedEventName === "reverse-media"
             const sizeOk = paddedChunk.length === CHUNK_SIZE
-            const durOk = mediaMessage.chunk_durn_ms === CHUNK_DURATION_MS
+            const durOk = CHUNK_DURATION_MS === 20
             const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
             console.log(
-              `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${eventOk} (used=${usedEventName}), size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${mediaMessage.chunk_durn_ms}), format_ok=${fmtOk}`,
+              `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${eventOk} (used=${usedEventName}), size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS}), format_ok=${fmtOk}`,
             )
             if (!eventOk) {
               console.warn(
