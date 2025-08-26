@@ -1953,43 +1953,55 @@ const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobil
     if (!clientId || !streamSid) return
     if (billedStreamSids.has(streamSid)) return
 
-    const billedMinutes = Math.max(0, Math.ceil((Number(durationSeconds) || 0) / 60))
-    if (billedMinutes <= 0) {
-      billedStreamSids.add(streamSid)
-      return
-    }
-
     const CREDITS_PER_MINUTE = 2
-    const requiredCredits = billedMinutes * CREDITS_PER_MINUTE
-
     const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
-    const balanceBefore = creditRecord.currentBalance || 0
-    const amountToDeduct = Math.min(requiredCredits, balanceBefore)
+    const carriedBefore = Number(creditRecord.rolloverSeconds || 0)
+    const currentSeconds = Math.max(0, Number(durationSeconds) || 0)
+    const totalSeconds = carriedBefore + currentSeconds
+    const fullMinutes = Math.floor(totalSeconds / 60)
+    const carryAfter = totalSeconds % 60
 
+    let requiredCredits = 0
     let deducted = 0
-    if (amountToDeduct > 0) {
-      await creditRecord.useCredits(amountToDeduct, 'call', `Call charges (${callDirection || 'inbound'})`, {
-        duration: billedMinutes, // minutes
-        messageCount: undefined,
-        mobile: mobile || null,
-        callDirection: callDirection || null,
-        callLogId: callLogId || null,
-        streamSid: streamSid,
-      })
-      deducted = amountToDeduct
+    let balanceBefore = creditRecord.currentBalance || 0
+    let balanceAfter = balanceBefore
+
+    if (fullMinutes > 0) {
+      requiredCredits = fullMinutes * CREDITS_PER_MINUTE
+      const amountToDeduct = Math.min(requiredCredits, balanceBefore)
+      if (amountToDeduct > 0) {
+        await creditRecord.useCredits(amountToDeduct, 'call', `Call charges (${callDirection || 'inbound'})`, {
+          duration: fullMinutes, // minutes charged now
+          messageCount: undefined,
+          mobile: mobile || null,
+          callDirection: callDirection || null,
+          callLogId: callLogId || null,
+          streamSid: streamSid,
+          carriedSecondsBefore: carriedBefore,
+          carriedSecondsAfter: carryAfter,
+          totalSessionSeconds: currentSeconds,
+        })
+        deducted = amountToDeduct
+        balanceAfter = balanceBefore - deducted
+      }
     }
 
-    const balanceAfter = balanceBefore - deducted
+    // Always persist updated rollover seconds, even if no full minute billed
+    creditRecord.rolloverSeconds = carryAfter
+    try { await creditRecord.save() } catch (e) {}
 
     if (callLogId) {
       await CallLog.findByIdAndUpdate(callLogId, {
         'metadata.billing': {
-          billedMinutes,
+          billedMinutes: fullMinutes,
           ratePerMinute: CREDITS_PER_MINUTE,
           requiredCredits,
           deductedCredits: deducted,
           balanceBefore,
           balanceAfter,
+          carriedSecondsBefore: carriedBefore,
+          carriedSecondsAfter: carryAfter,
+          sessionSeconds: currentSeconds,
           billedAt: new Date(),
         },
         'metadata.lastUpdated': new Date(),

@@ -161,6 +161,13 @@ const CreditSchema = new mongoose.Schema({
       threshold: { type: Number, default: 50 }
     }
   },
+
+  // Unbilled leftover seconds to carry into next call
+  rolloverSeconds: {
+    type: Number,
+    default: 0,
+    min: 0,
+  },
   
   // Timestamps
   createdAt: {
