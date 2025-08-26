@@ -172,7 +172,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         // Format message exactly like SanIPPBX expects
         const mediaMessage = {
-          event: "media", // WARNING: spec expects "reverse-media" for client → telephony
+          event: "reverse-media",
           payload: payloadBase64,
           chunk: currentChunk,
           chunk_durn_ms: CHUNK_DURATION_MS,
@@ -243,7 +243,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         for (let i = 0; i < 3; i++) {
           const silenceChunk = Buffer.alloc(CHUNK_SIZE)
           const silenceMessage = {
-            event: "media", // WARNING: spec expects "reverse-media"
+            event: "reverse-media",
             payload: silenceChunk.toString("base64"),
             chunk: currentChunk,
             chunk_durn_ms: CHUNK_DURATION_MS,
