@@ -39,7 +39,6 @@ const CallLogSchema = new mongoose.Schema({
   // Telephony identifiers for call management
   streamSid: { type: String, index: true }, // For active call tracking
   callSid: { type: String, index: true },   // For call identification
-  
   // Enhanced metadata for live tracking
   metadata: {
     userTranscriptCount: { type: Number, default: 0 },
@@ -62,31 +61,7 @@ const CallLogSchema = new mongoose.Schema({
     // Technical details
     sttProvider: { type: String, default: 'deepgram' },
     ttsProvider: { type: String, default: 'sarvam' },
-    llmProvider: { type: String, default: 'openai' },
-    // WhatsApp integration
-    whatsappSent: { type: Boolean, default: false },
-    whatsappSentAt: { type: Date },
-    whatsappAttemptedAt: { type: Date },
-    whatsappError: { type: String },
-    whatsappData: {
-      phoneNumber: { type: String },
-      orgName: { type: String },
-      courseName: { type: String },
-      response: { type: Object }
-    },
-    // Google Meet integration
-    googleMeetRequested: { type: Boolean, default: false },
-    googleMeetEmail: { type: String },
-    googleMeetDetails: {
-      link: { type: String },
-      meetingId: { type: String },
-      createdAt: { type: Date },
-      expiresAt: { type: Date },
-      status: { type: String, default: 'active' }
-    },
-    googleMeetEmailSent: { type: Boolean, default: false },
-    googleMeetEmailSentAt: { type: Date },
-    googleMeetEmailError: { type: String }
+    llmProvider: { type: String, default: 'openai' }
   }
 }, {
   timestamps: true

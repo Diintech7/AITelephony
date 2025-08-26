@@ -109,10 +109,13 @@ const ClientSchema = new mongoose.Schema({
     default: false,
   },
   isprofileCompleted: {
-    type: String,
+    type: Boolean,
     default: false,
   },
-
+  isApproved:{
+    type: Boolean,
+    default: false,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

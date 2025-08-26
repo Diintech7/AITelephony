@@ -3,6 +3,7 @@ require("dotenv").config()
 const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
+const Credit = require("../models/Credit")
 
 // Import franc with fallback for different versions
 let franc;
@@ -1835,6 +1836,16 @@ const setupUnifiedVoiceServer = (wss) => {
             if (callLogger) {
               const stats = callLogger.getStats()
               console.log("🛑 [SIP-STOP] Call Stats:", JSON.stringify(stats, null, 2))
+              // Bill credits at end of call (2 credits/minute)
+              const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
+              await billCallCredits({
+                clientId: callLogger.clientId,
+                durationSeconds,
+                callDirection,
+                mobile,
+                callLogId: callLogger.callLogId,
+                streamSid
+              })
               
               try {
                 console.log("💾 [SIP-STOP] Saving final call log to database...")
@@ -1871,6 +1882,16 @@ const setupUnifiedVoiceServer = (wss) => {
       if (callLogger) {
         const stats = callLogger.getStats()
         console.log("🔌 [SIP-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
+        // Bill credits on close as safety (guarded by billedStreamSids)
+        const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
+        await billCallCredits({
+          clientId: callLogger.clientId,
+          durationSeconds,
+          callDirection,
+          mobile: callLogger.mobile,
+          callLogId: callLogger.callLogId,
+          streamSid
+        })
         
         try {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
@@ -1922,6 +1943,64 @@ const activeCallLoggers = new Map()
 
 // Global sequence counter for stop events
 let stopEventSequence = 1
+
+// Track billed streams to avoid double-charging on both stop and close
+const billedStreamSids = new Set()
+
+// Helper to bill call credits at 2 credits/minute and update CallLog metadata
+const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobile, callLogId, streamSid }) => {
+  try {
+    if (!clientId || !streamSid) return
+    if (billedStreamSids.has(streamSid)) return
+
+    const billedMinutes = Math.max(0, Math.ceil((Number(durationSeconds) || 0) / 60))
+    if (billedMinutes <= 0) {
+      billedStreamSids.add(streamSid)
+      return
+    }
+
+    const CREDITS_PER_MINUTE = 2
+    const requiredCredits = billedMinutes * CREDITS_PER_MINUTE
+
+    const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
+    const balanceBefore = creditRecord.currentBalance || 0
+    const amountToDeduct = Math.min(requiredCredits, balanceBefore)
+
+    let deducted = 0
+    if (amountToDeduct > 0) {
+      await creditRecord.useCredits(amountToDeduct, 'call', `Call charges (${callDirection || 'inbound'})`, {
+        duration: billedMinutes, // minutes
+        messageCount: undefined,
+        mobile: mobile || null,
+        callDirection: callDirection || null,
+        callLogId: callLogId || null,
+        streamSid: streamSid,
+      })
+      deducted = amountToDeduct
+    }
+
+    const balanceAfter = balanceBefore - deducted
+
+    if (callLogId) {
+      await CallLog.findByIdAndUpdate(callLogId, {
+        'metadata.billing': {
+          billedMinutes,
+          ratePerMinute: CREDITS_PER_MINUTE,
+          requiredCredits,
+          deductedCredits: deducted,
+          balanceBefore,
+          balanceAfter,
+          billedAt: new Date(),
+        },
+        'metadata.lastUpdated': new Date(),
+      }).catch(() => {})
+    }
+
+    billedStreamSids.add(streamSid)
+  } catch (e) {
+    // Swallow billing errors to not affect call flow
+  }
+}
 
 /**
  * Terminate a call by streamSid
