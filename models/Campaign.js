@@ -52,14 +52,6 @@ const campaignSchema = new mongoose.Schema({
       enum: ['ringing', 'ongoing', 'completed'], 
       default: 'ringing' 
     },
-    lastStatusUpdate: {
-      type: Date,
-      default: Date.now
-    },
-    callDuration: {
-      type: Number,
-      default: 0
-    }
   }],
   // Array to store campaign contacts (copied from groups but can be manipulated independently)
   contacts: [{

@@ -1740,6 +1740,36 @@ const setupUnifiedVoiceServer = (wss) => {
               return
             }
 
+            // Block call if the client has no credits
+            try {
+              const creditRecord = await Credit.getOrCreateCreditRecord(agentConfig.clientId)
+              const currentBalance = Number(creditRecord?.currentBalance || 0)
+              if (currentBalance <= 0) {
+                console.log("🛑 [SIP-CREDIT-CHECK] Insufficient credits. Blocking call connection.")
+                ws.send(
+                  JSON.stringify({
+                    event: "error",
+                    code: "insufficient_credits",
+                    message: "Call blocked: insufficient credits. Please recharge to place or receive calls.",
+                  }),
+                )
+                try { ws.close() } catch (_) {}
+                return
+              }
+            } catch (creditErr) {
+              console.log("⚠️ [SIP-CREDIT-CHECK] Credit check failed:", creditErr.message)
+              // Fail safe: if we cannot verify credits, prevent connection to avoid free calls
+              ws.send(
+                JSON.stringify({
+                  event: "error",
+                  code: "credit_check_failed",
+                  message: "Unable to verify credits. Call cannot be connected at this time.",
+                }),
+              )
+              try { ws.close() } catch (_) {}
+              return
+            }
+
             ws.sessionAgentConfig = agentConfig
             currentLanguage = agentConfig.language || "en"
 
