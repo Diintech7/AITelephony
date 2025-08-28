@@ -32,10 +32,10 @@ if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
 
 const fetch = globalThis.fetch || require("node-fetch")
 
-// WhatsApp Cloud API config (optional)
-const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v22.0/790783224112773/messages"
+// WhatsApp send-info API config (can override via env)
+const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL || "https://whatsapp-template-module.onrender.com/api/whatsapp/send-info"
 
-// Normalize Indian mobile to +91 format
+// Normalize Indian mobile to 91XXXXXXXXXX format (no +)
 const normalizeIndianMobile = (raw) => {
   try {
     if (!raw) return null
@@ -44,28 +44,15 @@ const normalizeIndianMobile = (raw) => {
     // Remove leading country/long trunk prefixes; keep last 10 digits for India
     const last10 = digits.slice(-10)
     if (last10.length !== 10) return null
-    return `+91${last10}`
+    return `91${last10}`
   } catch (_) {
     return null
   }
 }
 
-// Send WhatsApp template message (fire-and-forget safe)
-const sendWhatsAppTemplateMessage = async (toNumber, templateName = "hello_world", lang = "en_US") => {
-  if (!API_KEYS.whatsapp) {
-    console.log("⚠️ [WHATSAPP] WHATSAPP_TOKEN not set; skipping send")
-    return { ok: false, reason: "missing_token" }
-  }
-
-  const body = {
-    messaging_product: "whatsapp",
-    to: toNumber,
-    type: "template",
-    template: {
-      name: templateName,
-      language: { code: lang },
-    },
-  }
+// Send WhatsApp info via external endpoint (fire-and-forget safe)
+const sendWhatsAppTemplateMessage = async (toNumber) => {
+  const body = { to: toNumber }
 
   try {
     console.log("📨 [WHATSAPP] POST", WHATSAPP_API_URL)
@@ -74,7 +61,7 @@ const sendWhatsAppTemplateMessage = async (toNumber, templateName = "hello_world
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.whatsapp}`,
+        ...(API_KEYS.whatsapp ? { Authorization: `Bearer ${API_KEYS.whatsapp}` } : {}),
       },
       body: JSON.stringify(body),
     })
