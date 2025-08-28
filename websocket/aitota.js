@@ -21,6 +21,7 @@ const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
   sarvam: process.env.SARVAM_API_KEY,
   openai: process.env.OPENAI_API_KEY,
+  whatsapp: process.env.WHATSAPP_TOKEN,
 }
 
 // Validate API keys
@@ -30,6 +31,63 @@ if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
 }
 
 const fetch = globalThis.fetch || require("node-fetch")
+
+// WhatsApp Cloud API config (optional)
+const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v22.0/790783224112773/messages"
+
+// Normalize Indian mobile to +91 format
+const normalizeIndianMobile = (raw) => {
+  try {
+    if (!raw) return null
+    const digits = String(raw).replace(/\D+/g, "")
+    if (!digits) return null
+    // Remove leading country/long trunk prefixes; keep last 10 digits for India
+    const last10 = digits.slice(-10)
+    if (last10.length !== 10) return null
+    return `+91${last10}`
+  } catch (_) {
+    return null
+  }
+}
+
+// Send WhatsApp template message (fire-and-forget safe)
+const sendWhatsAppTemplateMessage = async (toNumber, templateName = "hello_world", lang = "en_US") => {
+  if (!API_KEYS.whatsapp) {
+    console.log("⚠️ [WHATSAPP] WHATSAPP_TOKEN not set; skipping send")
+    return { ok: false, reason: "missing_token" }
+  }
+
+  const body = {
+    messaging_product: "whatsapp",
+    to: toNumber,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: lang },
+    },
+  }
+
+  try {
+    console.log("📨 [WHATSAPP] POST", WHATSAPP_API_URL)
+    console.log("📨 [WHATSAPP] Payload:", JSON.stringify(body))
+    const res = await fetch(WHATSAPP_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.whatsapp}`,
+      },
+      body: JSON.stringify(body),
+    })
+    const text = await res.text()
+    const isOk = res.ok
+    console.log(`📨 [WHATSAPP] Status: ${res.status} ${res.statusText}`)
+    console.log("📨 [WHATSAPP] Response:", text)
+    return { ok: isOk, status: res.status, body: text }
+  } catch (err) {
+    console.log("❌ [WHATSAPP] Error:", err.message)
+    return { ok: false, error: err.message }
+  }
+}
 
 // Performance timing helper
 const createTimer = (label) => {
@@ -1696,6 +1754,22 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("📞 [SIP-START] To/DID:", to)
             console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
             console.log("📞 [SIP-START] ======================================")
+
+            // Fire-and-forget WhatsApp notification using parsed mobile
+            try {
+              const waNumber = normalizeIndianMobile(mobile)
+              console.log("📨 [WHATSAPP] Raw mobile:", mobile, "=> normalized:", waNumber)
+              if (waNumber) {
+                // Do not await to avoid blocking call flow
+                sendWhatsAppTemplateMessage(waNumber, "hello_world", "en_US")
+                  .then((r) => console.log("📨 [WHATSAPP] Send result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || ""))
+                  .catch((e) => console.log("❌ [WHATSAPP] Send error:", e.message))
+              } else {
+                console.log("⚠️ [WHATSAPP] Skipping send; could not normalize mobile")
+              }
+            } catch (waErr) {
+              console.log("❌ [WHATSAPP] Unexpected error:", waErr.message)
+            }
 
             try {
               console.log("🔍 [SIP-AGENT-LOOKUP] ========== AGENT LOOKUP ==========")
