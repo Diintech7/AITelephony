@@ -67,10 +67,11 @@ const agentSchema = new mongoose.Schema({
       "arjun",
       "maya",
     ],
-    default: "anushka",
+    default: "meera",
   },
   contextMemory: { type: String },
   brandInfo: { type: String },
+
 
   // Multiple starting messages
   startingMessages: [
@@ -110,6 +111,40 @@ const agentSchema = new mongoose.Schema({
     provider: { type: String, default: "sarvam" },
   },
 
+  //socials
+  // Social media enable flags
+  whatsappEnabled: { type: Boolean, default: false },
+  telegramEnabled: { type: Boolean, default: false },
+  emailEnabled: { type: Boolean, default: false },
+  smsEnabled: { type: Boolean, default: false },
+
+  // Convenience single WhatsApp link for quick access
+  whatsapplink: { type: String },
+
+  whatsapp: [
+    {
+      link: { type: String, required: true },
+    },
+  ],
+  telegram: [
+    {
+      link: { type: String, required: true },
+    },
+  ],
+  email: [
+    {
+      link: { type: String, required: true },
+    },
+  ],
+  sms: [
+    {
+      link: { type: String, required: true },
+    },
+  ],
+
+  // Assigned templates (admin -> agent)
+  templates: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Template' }],
+
   // Timestamps
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
@@ -144,6 +179,20 @@ const agentSchema = new mongoose.Schema({
 // Update the updatedAt field before saving
 agentSchema.pre("save", function (next) {
   this.updatedAt = Date.now()
+
+  // Clean up disabled social media fields
+  if (!this.whatsappEnabled) {
+    this.whatsapp = undefined;
+  }
+  if (!this.telegramEnabled) {
+    this.telegram = undefined;
+  }
+  if (!this.emailEnabled) {
+    this.email = undefined;
+  }
+  if (!this.smsEnabled) {
+    this.sms = undefined;
+  }
 
   // Validate and convert audioBytes if present
   if (this.audioBytes) {
@@ -183,6 +232,57 @@ agentSchema.methods.setAudioFromBase64 = function (base64String) {
     const byteSize = Math.ceil((base64String.length * 3) / 4)
     this.audioMetadata.size = byteSize
   }
+}
+
+// Method to get only enabled social media fields
+agentSchema.methods.getEnabledSocials = function() {
+  const enabledSocials = {};
+  
+  if (this.whatsappEnabled && this.whatsapp && this.whatsapp.length > 0) {
+    enabledSocials.whatsapp = this.whatsapp;
+  }
+  
+  if (this.telegramEnabled && this.telegram && this.telegram.length > 0) {
+    enabledSocials.telegram = this.telegram;
+  }
+  
+  if (this.emailEnabled && this.email && this.email.length > 0) {
+    enabledSocials.email = this.email;
+  }
+  
+  if (this.smsEnabled && this.sms && this.sms.length > 0) {
+    enabledSocials.sms = this.sms;
+  }
+  
+  return enabledSocials;
+}
+
+// Method to check if a social media platform is enabled
+agentSchema.methods.isSocialEnabled = function(platform) {
+  const enabledPlatforms = {
+    whatsapp: this.whatsappEnabled,
+    telegram: this.telegramEnabled,
+    email: this.emailEnabled,
+    sms: this.smsEnabled
+  };
+  
+  return enabledPlatforms[platform] || false;
+}
+
+// Method to enable/disable a social media platform
+agentSchema.methods.toggleSocial = function(platform, enabled) {
+  const platformField = `${platform}Enabled`;
+  if (this.schema.paths[platformField]) {
+    this[platformField] = enabled;
+    
+    // If disabling, clear the social media data
+    if (!enabled) {
+      this[platform] = undefined;
+    }
+    
+    return true;
+  }
+  return false;
 }
 
 module.exports = mongoose.model("Agent", agentSchema)
