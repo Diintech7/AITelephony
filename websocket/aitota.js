@@ -51,8 +51,8 @@ const normalizeIndianMobile = (raw) => {
 }
 
 // Send WhatsApp info via external endpoint (fire-and-forget safe)
-const sendWhatsAppTemplateMessage = async (toNumber) => {
-  const body = { to: toNumber }
+const sendWhatsAppTemplateMessage = async (toNumber, link = null) => {
+  const body = link ? { to: toNumber, link } : { to: toNumber }
 
   try {
     console.log("📨 [WHATSAPP] POST", WHATSAPP_API_URL)
@@ -73,6 +73,23 @@ const sendWhatsAppTemplateMessage = async (toNumber) => {
   } catch (err) {
     console.log("❌ [WHATSAPP] Error:", err.message)
     return { ok: false, error: err.message }
+  }
+}
+
+// Resolve WhatsApp link from agent config
+const getAgentWhatsappLink = (agent) => {
+  try {
+    if (!agent) return null
+    if (agent.whatsapplink && typeof agent.whatsapplink === "string" && agent.whatsapplink.trim()) {
+      return agent.whatsapplink.trim()
+    }
+    if (Array.isArray(agent.whatsapp) && agent.whatsapp.length > 0) {
+      const first = agent.whatsapp.find((w) => w && typeof w.link === "string" && w.link.trim())
+      if (first) return first.link.trim()
+    }
+    return null
+  } catch (_) {
+    return null
   }
 }
 
@@ -1420,6 +1437,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let callDirection = "inbound"
     let agentConfig = null
     let userName = null
+    let whatsappSent = false
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -1742,21 +1760,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
             console.log("📞 [SIP-START] ======================================")
 
-            // Fire-and-forget WhatsApp notification using parsed mobile
-            try {
-              const waNumber = normalizeIndianMobile(mobile)
-              console.log("📨 [WHATSAPP] Raw mobile:", mobile, "=> normalized:", waNumber)
-              if (waNumber) {
-                // Do not await to avoid blocking call flow
-                sendWhatsAppTemplateMessage(waNumber, "hello_world", "en_US")
-                  .then((r) => console.log("📨 [WHATSAPP] Send result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || ""))
-                  .catch((e) => console.log("❌ [WHATSAPP] Send error:", e.message))
-              } else {
-                console.log("⚠️ [WHATSAPP] Skipping send; could not normalize mobile")
-              }
-            } catch (waErr) {
-              console.log("❌ [WHATSAPP] Unexpected error:", waErr.message)
-            }
+            // Note: WhatsApp message will be sent at call end if enabled in agent
 
             try {
               console.log("🔍 [SIP-AGENT-LOOKUP] ========== AGENT LOOKUP ==========")
@@ -1918,6 +1922,34 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🛑 [SIP-STOP] StreamSID:", streamSid)
             console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
             console.log("🛑 [SIP-STOP] Mobile:", mobile)
+
+            // Attempt WhatsApp send with agent's link if enabled
+            try {
+              if (!whatsappSent && agentConfig?.whatsappEnabled) {
+                const waLink = getAgentWhatsappLink(agentConfig)
+                const waNumber = normalizeIndianMobile(mobile)
+                console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", normalized=", waNumber)
+                if (waLink && waNumber) {
+                  sendWhatsAppTemplateMessage(waNumber, waLink)
+                    .then(async (r) => {
+                      console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+                      if (r?.ok) {
+                        await billWhatsAppCredit({
+                          clientId: agentConfig.clientId || accountSid,
+                          mobile,
+                          link: waLink,
+                          callLogId: callLogger?.callLogId,
+                          streamSid,
+                        })
+                      }
+                    })
+                    .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
+                  whatsappSent = true
+                }
+              }
+            } catch (waErr) {
+              console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
+            }
             
             // Handle external call disconnection
             if (streamSid) {
@@ -1969,6 +2001,34 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🔌 [SIP-CLOSE] ========== WEBSOCKET CLOSED ==========")
       console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
       console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
+      
+      // Safety: Attempt WhatsApp send on close if not yet sent
+      try {
+        if (!whatsappSent && agentConfig?.whatsappEnabled) {
+          const waLink = getAgentWhatsappLink(agentConfig)
+          const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+          console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", normalized=", waNumber)
+          if (waLink && waNumber) {
+            sendWhatsAppTemplateMessage(waNumber, waLink)
+              .then(async (r) => {
+                console.log("📨 [WHATSAPP] close-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+                if (r?.ok) {
+                  await billWhatsAppCredit({
+                    clientId: agentConfig.clientId || callLogger?.clientId,
+                    mobile: callLogger?.mobile || null,
+                    link: waLink,
+                    callLogId: callLogger?.callLogId,
+                    streamSid,
+                  })
+                }
+              })
+              .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
+            whatsappSent = true
+          }
+        }
+      } catch (waErr) {
+        console.log("❌ [WHATSAPP] close-event unexpected:", waErr.message)
+      }
       
       if (callLogger) {
         const stats = callLogger.getStats()
@@ -2102,6 +2162,28 @@ const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobil
     billedStreamSids.add(streamSid)
   } catch (e) {
     // Swallow billing errors to not affect call flow
+  }
+}
+
+// Helper to deduct 1 credit for successful WhatsApp sends
+const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid }) => {
+  try {
+    if (!clientId) return
+    const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
+    const balanceBefore = Number(creditRecord?.currentBalance || 0)
+    if (balanceBefore <= 0) {
+      console.log("⚠️ [WHATSAPP-BILLING] Insufficient credits to deduct for WhatsApp message")
+      return
+    }
+    await creditRecord.useCredits(1, 'whatsapp', 'WhatsApp message sent', {
+      mobile: mobile || null,
+      link: link || null,
+      callLogId: callLogId || null,
+      streamSid: streamSid || null,
+    })
+    console.log("✅ [WHATSAPP-BILLING] Deducted 1 credit for WhatsApp message")
+  } catch (e) {
+    console.log("❌ [WHATSAPP-BILLING] Error deducting credit:", e.message)
   }
 }
 
