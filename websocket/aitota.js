@@ -33,7 +33,7 @@ if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
 const fetch = globalThis.fetch || require("node-fetch")
 
 // WhatsApp send-info API config (can override via env)
-const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL || "https://whatsapp-template-module.onrender.com/api/whatsapp/send-info"
+const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL || "https://whatsapp-template-module.onrender.com/api/whatsapp/send-jansuraaj"
 
 // Normalize Indian mobile to 91XXXXXXXXXX format (no +)
 const normalizeIndianMobile = (raw) => {
