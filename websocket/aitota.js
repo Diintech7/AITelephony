@@ -1664,27 +1664,32 @@ const setupUnifiedVoiceServer = (wss) => {
             let callerId = null;
             let customParams = {};
             let czdataDecoded = null;
+            let uniqueid = null;
             if (urlParams.czdata) {
               czdataDecoded = decodeCzdata(urlParams.czdata);
-              if (czdataDecoded) {
-                customParams = czdataDecoded;
-                userName = (
-                  czdataDecoded.name ||
-                  czdataDecoded.Name ||
-                  czdataDecoded.full_name ||
-                  czdataDecoded.fullName ||
-                  czdataDecoded.customer_name ||
-                  czdataDecoded.customerName ||
-                  czdataDecoded.CustomerName ||
-                  czdataDecoded.candidate_name ||
-                  czdataDecoded.contactName ||
-                  null
-                );
-                console.log("[SIP-START] Decoded czdata customParams:", customParams);
-                if (userName) {
-                  console.log("[SIP-START] User Name (czdata):", userName);
+                              if (czdataDecoded) {
+                  customParams = czdataDecoded;
+                  userName = (
+                    czdataDecoded.name ||
+                    czdataDecoded.Name ||
+                    czdataDecoded.full_name ||
+                    czdataDecoded.fullName ||
+                    czdataDecoded.customer_name ||
+                    czdataDecoded.customerName ||
+                    czdataDecoded.CustomerName ||
+                    czdataDecoded.candidate_name ||
+                    czdataDecoded.contactName ||
+                    null
+                  );
+                  uniqueid = czdataDecoded.uniqueid || czdataDecoded.uniqueId || null;
+                  console.log("[SIP-START] Decoded czdata customParams:", customParams);
+                  if (userName) {
+                    console.log("[SIP-START] User Name (czdata):", userName);
+                  }
+                  if (uniqueid) {
+                    console.log("[SIP-START] Unique ID (czdata):", uniqueid);
+                  }
                 }
-              }
             }
 
             if (data.start?.from) {
@@ -1735,6 +1740,14 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log("[SIP-START] User Name (extraData):", userName);
               }
             }
+            
+            // Capture uniqueid from extraData if not already captured
+            if (!uniqueid && extraData) {
+              uniqueid = extraData.uniqueid || extraData.uniqueId || null;
+              if (uniqueid) {
+                console.log("[SIP-START] Unique ID (extraData):", uniqueid);
+              }
+            }
 
             if (!userName && urlParams.name) {
               userName = urlParams.name;
@@ -1757,6 +1770,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("📞 [SIP-START] Call Direction:", callDirection)
             console.log("📞 [SIP-START] From/Mobile:", mobile)
             console.log("📞 [SIP-START] To/DID:", to)
+            console.log("📞 [SIP-START] Unique ID:", uniqueid)
             console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
             console.log("📞 [SIP-START] ======================================")
 
@@ -1858,6 +1872,7 @@ const setupUnifiedVoiceServer = (wss) => {
             callLogger.callSid = data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid;
             callLogger.accountSid = accountSid;
             callLogger.ws = ws; // Store WebSocket reference
+            callLogger.uniqueid = uniqueid; // Store uniqueid for outbound calls
 
             // Create initial call log entry immediately
             try {
@@ -1959,7 +1974,7 @@ const setupUnifiedVoiceServer = (wss) => {
             if (callLogger) {
               const stats = callLogger.getStats()
               console.log("🛑 [SIP-STOP] Call Stats:", JSON.stringify(stats, null, 2))
-              // Bill credits at end of call (2 credits/minute)
+              // Bill credits at end of call (decimal precision)
               const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
               await billCallCredits({
                 clientId: callLogger.clientId,
@@ -1967,7 +1982,8 @@ const setupUnifiedVoiceServer = (wss) => {
                 callDirection,
                 mobile,
                 callLogId: callLogger.callLogId,
-                streamSid
+                streamSid,
+                uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
               })
               
               try {
@@ -2041,7 +2057,8 @@ const setupUnifiedVoiceServer = (wss) => {
           callDirection,
           mobile: callLogger.mobile,
           callLogId: callLogger.callLogId,
-          streamSid
+          streamSid,
+          uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
         })
         
         try {
@@ -2098,61 +2115,40 @@ let stopEventSequence = 1
 // Track billed streams to avoid double-charging on both stop and close
 const billedStreamSids = new Set()
 
-// Helper to bill call credits at 30 seconds per credit and update CallLog metadata
-const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobile, callLogId, streamSid }) => {
+// Helper to bill call credits with decimal precision (1/30 credit per second)
+const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobile, callLogId, streamSid, uniqueid }) => {
   try {
     if (!clientId || !streamSid) return
     if (billedStreamSids.has(streamSid)) return
 
-    const SECONDS_PER_CREDIT = 30 // 30 seconds = 1 credit
     const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
-    const carriedBefore = Number(creditRecord.rolloverSeconds || 0)
     const currentSeconds = Math.max(0, Number(durationSeconds) || 0)
-    const totalSeconds = carriedBefore + currentSeconds
-    const fullCredits = Math.floor(totalSeconds / SECONDS_PER_CREDIT)
-    const carryAfter = totalSeconds % SECONDS_PER_CREDIT
+    const balanceBefore = Number(creditRecord.currentBalance || 0)
 
-    let requiredCredits = 0
-    let deducted = 0
-    let balanceBefore = creditRecord.currentBalance || 0
-    let balanceAfter = balanceBefore
+    // Use new decimal billing method
+    const billingResult = creditRecord.billCallCredits(
+      currentSeconds, 
+      mobile || 'unknown', 
+      callDirection || 'inbound', 
+      callLogId, 
+      streamSid,
+      uniqueid
+    )
 
-    if (fullCredits > 0) {
-      requiredCredits = fullCredits
-      const amountToDeduct = Math.min(requiredCredits, balanceBefore)
-      if (amountToDeduct > 0) {
-        await creditRecord.useCredits(amountToDeduct, 'call', `Call charges (${callDirection || 'inbound'}) - ${fullCredits * SECONDS_PER_CREDIT}s billed, ${carryAfter}s carried`, {
-          duration: fullCredits * SECONDS_PER_CREDIT, // seconds charged now
-          messageCount: undefined,
-          mobile: mobile || null,
-          callDirection: callDirection || null,
-          callLogId: callLogId || null,
-          streamSid: streamSid,
-          carriedSecondsBefore: carriedBefore,
-          carriedSecondsAfter: carryAfter,
-          totalSessionSeconds: currentSeconds,
-        })
-        deducted = amountToDeduct
-        balanceAfter = balanceBefore - deducted
-      }
-    }
-
-    // Always persist updated rollover seconds, even if no full credit billed
-    creditRecord.rolloverSeconds = carryAfter
-    try { await creditRecord.save() } catch (e) {}
+    // Save the updated credit record
+    await creditRecord.save()
 
     if (callLogId) {
       await CallLog.findByIdAndUpdate(callLogId, {
         'metadata.billing': {
-          billedCredits: fullCredits,
-          secondsPerCredit: SECONDS_PER_CREDIT,
-          requiredCredits,
-          deductedCredits: deducted,
-          balanceBefore,
-          balanceAfter,
-          carriedSecondsBefore: carriedBefore,
-          carriedSecondsAfter: carryAfter,
-          sessionSeconds: currentSeconds,
+          creditsUsed: billingResult.creditsUsed,
+          durationFormatted: billingResult.durationFormatted,
+          durationSeconds: currentSeconds,
+          balanceBefore: balanceBefore,
+          balanceAfter: billingResult.balanceAfter,
+          billingMethod: 'decimal_precision',
+          creditsPerSecond: 1/30,
+          uniqueid: uniqueid || null,
           billedAt: new Date(),
         },
         'metadata.lastUpdated': new Date(),
@@ -2160,8 +2156,9 @@ const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobil
     }
 
     billedStreamSids.add(streamSid)
-    console.log(`💰 [CALL-BILLING] Call: ${currentSeconds}s + ${carriedBefore}s carried = ${totalSeconds}s total. Charged: ${fullCredits} credits, carried: ${carryAfter}s`)
+    console.log(`💰 [CALL-BILLING] Call: ${billingResult.durationFormatted} (${currentSeconds}s). Charged: ${billingResult.creditsUsed} credits. Balance: ${balanceBefore} → ${billingResult.balanceAfter}`)
   } catch (e) {
+    console.log(`❌ [CALL-BILLING] Error: ${e.message}`)
     // Swallow billing errors to not affect call flow
   }
 }
@@ -2172,7 +2169,7 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
     if (!clientId) return
     const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
     const balanceBefore = Number(creditRecord?.currentBalance || 0)
-    if (balanceBefore <= 0) {
+    if (balanceBefore < 1) {
       console.log("⚠️ [WHATSAPP-BILLING] Insufficient credits to deduct for WhatsApp message")
       return
     }
@@ -2182,7 +2179,7 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
       callLogId: callLogId || null,
       streamSid: streamSid || null,
     })
-    console.log(`💰 [WHATSAPP-BILLING] Deducted 1 credit for WhatsApp message to ${mobile}`)
+    console.log(`💰 [WHATSAPP-BILLING] Deducted 1.00 credit for WhatsApp message to ${mobile}`)
   } catch (e) {
     console.log("❌ [WHATSAPP-BILLING] Error deducting credit:", e.message)
   }

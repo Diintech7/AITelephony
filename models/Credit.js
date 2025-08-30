@@ -169,6 +169,46 @@ const CreditSchema = new mongoose.Schema({
     min: 0,
   },
   
+  // Call billing details for tracking
+  callBillingDetails: [{
+    mobile: {
+      type: String,
+      required: true
+    },
+    callDirection: {
+      type: String,
+      enum: ['inbound', 'outbound'],
+      required: true
+    },
+    duration: {
+      type: String, // Format: "1:30" for 1 minute 30 seconds
+      required: true
+    },
+    durationSeconds: {
+      type: Number, // Total seconds for calculation
+      required: true
+    },
+    creditsUsed: {
+      type: Number, // Decimal credits used (e.g., 1.50 for 45 seconds)
+      required: true,
+      min: 0
+    },
+    callLogId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CallLog'
+    },
+    streamSid: {
+      type: String
+    },
+    uniqueid: {
+      type: String // For outbound calls tracking
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+  
   // Timestamps
   createdAt: {
     type: Date,
@@ -210,16 +250,20 @@ CreditSchema.methods.addCredits = function(amount, type, description, planId = n
 CreditSchema.methods.useCredits = function(amount, usageType, description, metadata = {}) {
   // Normalize usage type keys (schema uses 'calls' in usageStats but history enum has 'call')
   const normalizedUsageType = usageType === 'call' ? 'calls' : usageType;
-  if (this.currentBalance < amount) {
+  
+  // Round amount to 2 decimal places for precision
+  const roundedAmount = Math.round(amount * 100) / 100;
+  
+  if (this.currentBalance < roundedAmount) {
     throw new Error('Insufficient credits');
   }
   
-  this.currentBalance -= amount;
-  this.totalUsed += amount;
+  this.currentBalance -= roundedAmount;
+  this.totalUsed += roundedAmount;
   
   // Update usage statistics
   if (normalizedUsageType && this.usageStats[normalizedUsageType]) {
-    this.usageStats[normalizedUsageType].creditsUsed += amount;
+    this.usageStats[normalizedUsageType].creditsUsed += roundedAmount;
     if (normalizedUsageType === 'calls') {
       this.usageStats.calls.total += 1;
       this.usageStats.calls.minutes += (metadata.duration || 0);
@@ -229,11 +273,11 @@ CreditSchema.methods.useCredits = function(amount, usageType, description, metad
   }
   
   // Update monthly usage
-  this.updateMonthlyUsage(amount, normalizedUsageType, metadata);
+  this.updateMonthlyUsage(roundedAmount, normalizedUsageType, metadata);
   
   this.history.push({
     type: 'usage',
-    amount: -amount,
+    amount: -roundedAmount,
     description: description,
     usageType: usageType, // preserve original label in history
     duration: metadata.duration,
@@ -265,10 +309,12 @@ CreditSchema.methods.updateMonthlyUsage = function(amount, usageType, metadata =
     this.monthlyUsage.push(monthlyRecord);
   }
   
-  monthlyRecord.totalCredits += amount;
+  // Round to 2 decimal places for monthly tracking
+  const roundedAmount = Math.round(amount * 100) / 100;
+  monthlyRecord.totalCredits += roundedAmount;
   
   if (usageType && monthlyRecord[usageType]) {
-    monthlyRecord[usageType].credits += amount;
+    monthlyRecord[usageType].credits += roundedAmount;
     if (usageType === 'calls') {
       monthlyRecord.calls.count += 1;
       monthlyRecord.calls.minutes += (metadata.duration || 0);
@@ -300,6 +346,90 @@ CreditSchema.methods.shouldTriggerLowBalanceAlert = function() {
          this.currentBalance <= this.settings.lowBalanceAlert.threshold;
 };
 
+// Method to bill call credits with decimal precision (1/30 credit per second)
+CreditSchema.methods.billCallCredits = function(durationSeconds, mobile, callDirection, callLogId = null, streamSid = null, uniqueid = null) {
+  // Calculate credits using formula: (1/30) * totalSeconds
+  const creditsPerSecond = 1/30;
+  const totalCredits = (creditsPerSecond * durationSeconds);
+  
+  // Round to 2 decimal places
+  const roundedCredits = Math.round(totalCredits * 100) / 100;
+  
+  // Check if sufficient balance
+  if (this.currentBalance < roundedCredits) {
+    throw new Error(`Insufficient credits. Required: ${roundedCredits}, Available: ${this.currentBalance}`);
+  }
+  
+  // Format duration as "M:SS" or "H:MM:SS"
+  const formatDuration = (seconds) => {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    
+    if (hours > 0) {
+      return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    } else {
+      return `${minutes}:${secs.toString().padStart(2, '0')}`;
+    }
+  };
+  
+  const durationFormatted = formatDuration(durationSeconds);
+  
+  // Deduct credits
+  this.currentBalance -= roundedCredits;
+  this.totalUsed += roundedCredits;
+  
+  // Add to call billing details
+  this.callBillingDetails.push({
+    mobile: mobile || 'unknown',
+    callDirection: callDirection || 'inbound',
+    duration: durationFormatted,
+    durationSeconds: durationSeconds,
+    creditsUsed: roundedCredits,
+    callLogId: callLogId,
+    streamSid: streamSid,
+    uniqueid: uniqueid,
+    timestamp: new Date()
+  });
+  
+  // Update usage statistics
+  this.usageStats.calls.total += 1;
+  this.usageStats.calls.minutes += Math.round(durationSeconds / 60 * 100) / 100; // Convert to minutes with 2 decimal places
+  this.usageStats.calls.creditsUsed += roundedCredits;
+  
+  // Update monthly usage
+  this.updateMonthlyUsage(roundedCredits, 'calls', {
+    duration: Math.round(durationSeconds / 60 * 100) / 100,
+    mobile: mobile,
+    callDirection: callDirection
+  });
+  
+  // Add to history
+  this.history.push({
+    type: 'usage',
+    amount: -roundedCredits,
+    description: `Call charges (${callDirection || 'inbound'}) - ${durationFormatted} - ${mobile || 'unknown'}`,
+    usageType: 'call',
+    duration: Math.round(durationSeconds / 60 * 100) / 100,
+    metadata: {
+      mobile: mobile || null,
+      callDirection: callDirection || null,
+      callLogId: callLogId || null,
+      streamSid: streamSid || null,
+      uniqueid: uniqueid || null,
+      durationSeconds: durationSeconds,
+      durationFormatted: durationFormatted
+    },
+    timestamp: new Date()
+  });
+  
+  return {
+    creditsUsed: roundedCredits,
+    durationFormatted: durationFormatted,
+    balanceAfter: this.currentBalance
+  };
+};
+
 // Static method to get credit balance for a client
 CreditSchema.statics.getClientBalance = function(clientId) {
   return this.findOne({ clientId }).populate('currentPlan.planId');
@@ -324,6 +454,7 @@ CreditSchema.statics.getOrCreateCreditRecord = async function(clientId) {
         sms: { messages: 0, creditsUsed: 0 }
       },
       monthlyUsage: [],
+      callBillingDetails: [],
       settings: {
         lowBalanceAlert: { enabled: true, threshold: 100 },
         autoPurchase: { enabled: false, threshold: 50 }
