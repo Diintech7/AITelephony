@@ -2098,31 +2098,31 @@ let stopEventSequence = 1
 // Track billed streams to avoid double-charging on both stop and close
 const billedStreamSids = new Set()
 
-// Helper to bill call credits at 2 credits/minute and update CallLog metadata
+// Helper to bill call credits at 30 seconds per credit and update CallLog metadata
 const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobile, callLogId, streamSid }) => {
   try {
     if (!clientId || !streamSid) return
     if (billedStreamSids.has(streamSid)) return
 
-    const CREDITS_PER_MINUTE = 2
+    const SECONDS_PER_CREDIT = 30 // 30 seconds = 1 credit
     const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
     const carriedBefore = Number(creditRecord.rolloverSeconds || 0)
     const currentSeconds = Math.max(0, Number(durationSeconds) || 0)
     const totalSeconds = carriedBefore + currentSeconds
-    const fullMinutes = Math.floor(totalSeconds / 60)
-    const carryAfter = totalSeconds % 60
+    const fullCredits = Math.floor(totalSeconds / SECONDS_PER_CREDIT)
+    const carryAfter = totalSeconds % SECONDS_PER_CREDIT
 
     let requiredCredits = 0
     let deducted = 0
     let balanceBefore = creditRecord.currentBalance || 0
     let balanceAfter = balanceBefore
 
-    if (fullMinutes > 0) {
-      requiredCredits = fullMinutes * CREDITS_PER_MINUTE
+    if (fullCredits > 0) {
+      requiredCredits = fullCredits
       const amountToDeduct = Math.min(requiredCredits, balanceBefore)
       if (amountToDeduct > 0) {
-        await creditRecord.useCredits(amountToDeduct, 'call', `Call charges (${callDirection || 'inbound'})`, {
-          duration: fullMinutes, // minutes charged now
+        await creditRecord.useCredits(amountToDeduct, 'call', `Call charges (${callDirection || 'inbound'}) - ${fullCredits * SECONDS_PER_CREDIT}s billed, ${carryAfter}s carried`, {
+          duration: fullCredits * SECONDS_PER_CREDIT, // seconds charged now
           messageCount: undefined,
           mobile: mobile || null,
           callDirection: callDirection || null,
@@ -2137,15 +2137,15 @@ const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobil
       }
     }
 
-    // Always persist updated rollover seconds, even if no full minute billed
+    // Always persist updated rollover seconds, even if no full credit billed
     creditRecord.rolloverSeconds = carryAfter
     try { await creditRecord.save() } catch (e) {}
 
     if (callLogId) {
       await CallLog.findByIdAndUpdate(callLogId, {
         'metadata.billing': {
-          billedMinutes: fullMinutes,
-          ratePerMinute: CREDITS_PER_MINUTE,
+          billedCredits: fullCredits,
+          secondsPerCredit: SECONDS_PER_CREDIT,
           requiredCredits,
           deductedCredits: deducted,
           balanceBefore,
@@ -2160,6 +2160,7 @@ const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobil
     }
 
     billedStreamSids.add(streamSid)
+    console.log(`💰 [CALL-BILLING] Call: ${currentSeconds}s + ${carriedBefore}s carried = ${totalSeconds}s total. Charged: ${fullCredits} credits, carried: ${carryAfter}s`)
   } catch (e) {
     // Swallow billing errors to not affect call flow
   }
@@ -2175,13 +2176,13 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
       console.log("⚠️ [WHATSAPP-BILLING] Insufficient credits to deduct for WhatsApp message")
       return
     }
-    await creditRecord.useCredits(1, 'whatsapp', 'WhatsApp message sent', {
+    await creditRecord.useCredits(1, 'whatsapp', `WhatsApp message sent to ${mobile || 'unknown'} with link: ${link || 'none'}`, {
       mobile: mobile || null,
       link: link || null,
       callLogId: callLogId || null,
       streamSid: streamSid || null,
     })
-    console.log("✅ [WHATSAPP-BILLING] Deducted 1 credit for WhatsApp message")
+    console.log(`💰 [WHATSAPP-BILLING] Deducted 1 credit for WhatsApp message to ${mobile}`)
   } catch (e) {
     console.log("❌ [WHATSAPP-BILLING] Error deducting credit:", e.message)
   }
