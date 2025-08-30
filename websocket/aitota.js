@@ -32,8 +32,8 @@ if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
 
 const fetch = globalThis.fetch || require("node-fetch")
 
-// WhatsApp send-info API config (can override via env)
-const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL
+// WhatsApp send-info API config (will be retrieved from agent config)
+let WHATSAPP_API_URL = null
 
 // Normalize Indian mobile to 91XXXXXXXXXX format (no +)
 const normalizeIndianMobile = (raw) => {
@@ -51,13 +51,19 @@ const normalizeIndianMobile = (raw) => {
 }
 
 // Send WhatsApp info via external endpoint (fire-and-forget safe)
-const sendWhatsAppTemplateMessage = async (toNumber, link = null) => {
+const sendWhatsAppTemplateMessage = async (toNumber, link = null, whatsappUrl = null) => {
   const body = link ? { to: toNumber, link } : { to: toNumber }
+  const apiUrl = whatsappUrl || WHATSAPP_API_URL
+
+  if (!apiUrl) {
+    console.log("❌ [WHATSAPP] No WhatsApp API URL configured")
+    return { ok: false, error: "No WhatsApp API URL configured" }
+  }
 
   try {
-    console.log("📨 [WHATSAPP] POST", WHATSAPP_API_URL)
+    console.log("📨 [WHATSAPP] POST", apiUrl)
     console.log("📨 [WHATSAPP] Payload:", JSON.stringify(body))
-    const res = await fetch(WHATSAPP_API_URL, {
+    const res = await fetch(apiUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -429,6 +435,10 @@ class EnhancedCallLogger {
     this.callSid = null
     this.accountSid = null
     this.ws = null // Store WebSocket reference for disconnection
+    this.uniqueid = null // Store uniqueid for outbound calls
+    this.currentLeadStatus = 'not_connected' // Track current lead status
+    this.whatsappSent = false // Track if WhatsApp was already sent
+    this.whatsappRequested = false // Track if user requested WhatsApp
   }
 
   // Create initial call log entry immediately when call starts
@@ -1028,6 +1038,48 @@ class EnhancedCallLogger {
     }
   }
 
+  // Update lead status
+  updateLeadStatus(newStatus) {
+    this.currentLeadStatus = newStatus
+    console.log(`📊 [LEAD-STATUS] Updated to: ${newStatus}`)
+  }
+
+  // Mark WhatsApp as sent
+  markWhatsAppSent() {
+    this.whatsappSent = true
+    console.log(`📨 [WHATSAPP-TRACKING] Marked as sent`)
+  }
+
+  // Mark WhatsApp as requested
+  markWhatsAppRequested() {
+    this.whatsappRequested = true
+    console.log(`📨 [WHATSAPP-TRACKING] Marked as requested by user`)
+  }
+
+  // Check if WhatsApp should be sent based on lead status and user request
+  shouldSendWhatsApp() {
+    // Don't send if already sent
+    if (this.whatsappSent) {
+      console.log(`📨 [WHATSAPP-LOGIC] Skipping - already sent`)
+      return false
+    }
+
+    // Send if user is VVI (very very interested)
+    if (this.currentLeadStatus === 'vvi') {
+      console.log(`📨 [WHATSAPP-LOGIC] Sending - user is VVI`)
+      return true
+    }
+
+    // Send if user explicitly requested WhatsApp
+    if (this.whatsappRequested) {
+      console.log(`📨 [WHATSAPP-LOGIC] Sending - user requested WhatsApp`)
+      return true
+    }
+
+    console.log(`📨 [WHATSAPP-LOGIC] Skipping - not VVI and no request`)
+    return false
+  }
+
   getStats() {
     return {
       duration: this.totalDuration,
@@ -1037,7 +1089,10 @@ class EnhancedCallLogger {
       startTime: this.callStartTime,
       callDirection: this.callDirection,
       callLogId: this.callLogId,
-      pendingTranscripts: this.pendingTranscripts.length
+      pendingTranscripts: this.pendingTranscripts.length,
+      currentLeadStatus: this.currentLeadStatus,
+      whatsappSent: this.whatsappSent,
+      whatsappRequested: this.whatsappRequested
     }
   }
 }
@@ -1135,6 +1190,72 @@ const processWithOpenAI = async (
   }
 }
 
+// Intelligent lead status detection using OpenAI
+const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("LEAD_STATUS_DETECTION")
+  try {
+    const leadStatusPrompt = `Analyze the user's interest level and conversation context to determine the appropriate lead status.
+
+Available statuses:
+- 'vvi' (very very interested): User shows high enthusiasm, asks detailed questions, wants to proceed immediately
+- 'maybe': User shows some interest but is hesitant or needs more information
+- 'enrolled': User has agreed to enroll, sign up, or take action
+- 'junk_lead': User is clearly not interested, rude, or spam
+- 'not_required': User says they don't need the service
+- 'enrolled_other': User mentions they're already enrolled elsewhere
+- 'decline': User explicitly declines the offer
+- 'not_eligible': User doesn't meet requirements
+- 'wrong_number': Wrong number or person
+- 'hot_followup': User wants to be called back later with high interest
+- 'cold_followup': User wants to be called back later with low interest
+- 'schedule': User wants to schedule something
+- 'not_connected': Call didn't connect or was very short
+
+User message: "${userMessage}"
+Conversation context: ${conversationHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join(' | ')}
+
+Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on the user's current interest level and intent.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: leadStatusPrompt },
+        ],
+        max_tokens: 15,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "maybe" // Default to maybe on error
+    }
+
+    const data = await response.json()
+    const detectedStatus = data.choices[0]?.message?.content?.trim().toLowerCase()
+
+    // Validate the detected status
+    const validStatuses = ['vvi', 'maybe', 'enrolled', 'junk_lead', 'not_required', 'enrolled_other', 'decline', 'not_eligible', 'wrong_number', 'hot_followup', 'cold_followup', 'schedule', 'not_connected']
+    
+    if (validStatuses.includes(detectedStatus)) {
+      console.log(`🕒 [LEAD-STATUS-DETECTION] ${timer.end()}ms - Detected: ${detectedStatus}`)
+      return detectedStatus
+    } else {
+      console.log(`⚠️ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Invalid status detected: ${detectedStatus}, defaulting to maybe`)
+      return "maybe"
+    }
+  } catch (error) {
+    console.log(`❌ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "maybe" // Default to maybe on error
+  }
+}
+
 // Intelligent call disconnection detection using OpenAI
 const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
   const timer = createTimer("DISCONNECTION_DETECTION")
@@ -1183,6 +1304,58 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
   } catch (error) {
     console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
     return "CONTINUE" // Default to continue on error
+  }
+}
+
+// Intelligent WhatsApp request detection using OpenAI
+const detectWhatsAppRequest = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("WHATSAPP_REQUEST_DETECTION")
+  try {
+    const whatsappPrompt = `Analyze if the user is asking for WhatsApp information, link, or contact details. Look for:
+- "WhatsApp", "whatsapp", "WA", "wa"
+- "send me", "share", "link", "contact", "number"
+- "message me", "text me", "connect on WhatsApp"
+- "send details", "share information"
+- Any request for digital communication or messaging
+
+User message: "${userMessage}"
+
+Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if not.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: whatsappPrompt },
+        ],
+        max_tokens: 15,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "NO_REQUEST" // Default to no request on error
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
+
+    if (result === "WHATSAPP_REQUEST") {
+      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - User wants WhatsApp info`)
+      return "WHATSAPP_REQUEST"
+    } else {
+      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - No WhatsApp request`)
+      return "NO_REQUEST"
+    }
+  } catch (error) {
+    console.log(`❌ [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "NO_REQUEST" // Default to no request on error
   }
 }
 
@@ -1437,7 +1610,6 @@ const setupUnifiedVoiceServer = (wss) => {
     let callDirection = "inbound"
     let agentConfig = null
     let userName = null
-    let whatsappSent = false
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -1564,27 +1736,28 @@ const setupUnifiedVoiceServer = (wss) => {
           currentLanguage = detectedLanguage
         }
 
-        // Check if user wants to disconnect (fast detection to minimize latency)
-        console.log("🔍 [USER-UTTERANCE] Checking disconnection intent...")
+        // Run all AI detections in parallel for efficiency
+        console.log("🔍 [USER-UTTERANCE] Running AI detections...")
         
-        // Start disconnection detection in parallel with other processing
-        const disconnectionCheckPromise = detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
-        
-        // Continue with other processing while checking disconnection
-        console.log("🤖 [USER-UTTERANCE] Processing with OpenAI...")
-        const openaiPromise = processWithOpenAI(
-          text,
-          conversationHistory,
-          detectedLanguage,
-          callLogger,
-          agentConfig,
-        )
-        
-        // Wait for both operations to complete
-        const [disconnectionIntent, aiResponse] = await Promise.all([
-          disconnectionCheckPromise,
-          openaiPromise
+        const [
+          disconnectionIntent, 
+          leadStatus, 
+          whatsappRequest, 
+          aiResponse
+        ] = await Promise.all([
+          detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
+          detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
+          detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
+          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig)
         ])
+
+        // Update call logger with detected information
+        if (callLogger) {
+          callLogger.updateLeadStatus(leadStatus)
+          if (whatsappRequest === "WHATSAPP_REQUEST") {
+            callLogger.markWhatsAppRequested()
+          }
+        }
         
         if (disconnectionIntent === "DISCONNECT") {
           console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
@@ -1794,6 +1967,8 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("✅ [SIP-AGENT-LOOKUP] Language:", agentConfig.language)
               console.log("✅ [SIP-AGENT-LOOKUP] Voice Selection:", agentConfig.voiceSelection)
               console.log("✅ [SIP-AGENT-LOOKUP] First Message:", agentConfig.firstMessage)
+              console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp Enabled:", agentConfig.whatsappEnabled)
+              console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp API URL:", agentConfig.whatsapplink)
               console.log("✅ [SIP-AGENT-LOOKUP] ======================================")
 
               if (!agentConfig) {
@@ -1938,14 +2113,15 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
             console.log("🛑 [SIP-STOP] Mobile:", mobile)
 
-            // Attempt WhatsApp send with agent's link if enabled
+            // Intelligent WhatsApp send based on lead status and user requests
             try {
-              if (!whatsappSent && agentConfig?.whatsappEnabled) {
+              if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
                 const waLink = getAgentWhatsappLink(agentConfig)
                 const waNumber = normalizeIndianMobile(mobile)
-                console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", normalized=", waNumber)
-                if (waLink && waNumber) {
-                  sendWhatsAppTemplateMessage(waNumber, waLink)
+                const waApiUrl = agentConfig?.whatsapplink
+                console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+                if (waLink && waNumber && waApiUrl) {
+                  sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
                     .then(async (r) => {
                       console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
                       if (r?.ok) {
@@ -1956,11 +2132,22 @@ const setupUnifiedVoiceServer = (wss) => {
                           callLogId: callLogger?.callLogId,
                           streamSid,
                         })
+                        callLogger.markWhatsAppSent()
                       }
                     })
                     .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
-                  whatsappSent = true
+                } else {
+                  console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
                 }
+              } else {
+                console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
+                  hasCallLogger: !!callLogger,
+                  whatsappEnabled: agentConfig?.whatsappEnabled,
+                  shouldSend: callLogger?.shouldSendWhatsApp(),
+                  leadStatus: callLogger?.currentLeadStatus,
+                  alreadySent: callLogger?.whatsappSent,
+                  requested: callLogger?.whatsappRequested
+                })
               }
             } catch (waErr) {
               console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
@@ -1988,7 +2175,9 @@ const setupUnifiedVoiceServer = (wss) => {
               
               try {
                 console.log("💾 [SIP-STOP] Saving final call log to database...")
-                const savedLog = await callLogger.saveToDatabase("maybe")
+                const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
+                console.log("📊 [SIP-STOP] Final lead status:", finalLeadStatus)
+                const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
                 console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
               } catch (error) {
                 console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
@@ -2018,14 +2207,15 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
       console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
       
-      // Safety: Attempt WhatsApp send on close if not yet sent
+      // Safety: Intelligent WhatsApp send on close if conditions are met
       try {
-        if (!whatsappSent && agentConfig?.whatsappEnabled) {
+        if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
           const waLink = getAgentWhatsappLink(agentConfig)
           const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
-          console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", normalized=", waNumber)
-          if (waLink && waNumber) {
-            sendWhatsAppTemplateMessage(waNumber, waLink)
+          const waApiUrl = agentConfig?.whatsapplink
+          console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+          if (waLink && waNumber && waApiUrl) {
+            sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
               .then(async (r) => {
                 console.log("📨 [WHATSAPP] close-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
                 if (r?.ok) {
@@ -2036,11 +2226,22 @@ const setupUnifiedVoiceServer = (wss) => {
                     callLogId: callLogger?.callLogId,
                     streamSid,
                   })
+                  callLogger.markWhatsAppSent()
                 }
               })
               .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
-            whatsappSent = true
+          } else {
+            console.log("📨 [WHATSAPP] close-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
           }
+        } else {
+          console.log("📨 [WHATSAPP] close-event skipped → conditions not met:", {
+            hasCallLogger: !!callLogger,
+            whatsappEnabled: agentConfig?.whatsappEnabled,
+            shouldSend: callLogger?.shouldSendWhatsApp(),
+            leadStatus: callLogger?.currentLeadStatus,
+            alreadySent: callLogger?.whatsappSent,
+            requested: callLogger?.whatsappRequested
+          })
         }
       } catch (waErr) {
         console.log("❌ [WHATSAPP] close-event unexpected:", waErr.message)
@@ -2063,7 +2264,9 @@ const setupUnifiedVoiceServer = (wss) => {
         
         try {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
-          const savedLog = await callLogger.saveToDatabase("maybe")
+          const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
+          console.log("📊 [SIP-CLOSE] Final lead status:", finalLeadStatus)
+          const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)

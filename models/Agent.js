@@ -120,6 +120,9 @@ const agentSchema = new mongoose.Schema({
 
   // Convenience single WhatsApp link for quick access
   whatsapplink: { type: String },
+  
+  // WhatsApp API configuration
+  whatsappApiUrl: { type: String },
 
   whatsapp: [
     {
