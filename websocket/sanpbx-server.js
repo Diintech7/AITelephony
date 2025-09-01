@@ -85,40 +85,33 @@ const setupSanPbxWebSocketServer = (ws) => {
    * Check for quick responses first (0ms latency)
    */
   const getQuickResponse = (text) => {
-    const raw = text.toLowerCase().trim()
-    const normalized = raw.replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim()
-
-    // Direct exact match only
+    const normalized = text.toLowerCase().trim()
+    
+    // Direct match
     if (QUICK_RESPONSES[normalized]) {
-      console.log(`[QUICK] Exact match for: "${normalized}")`)
       return QUICK_RESPONSES[normalized]
     }
-
-    const matchesWord = (word) => new RegExp(`(^|\\s)${word}(\\s|$)`).test(normalized)
-
-    // Greetings
-    if (matchesWord("hi") || matchesWord("hello")) {
-      console.log(`[QUICK] Greeting matched (hi/hello) in: "${normalized}")`)
+    
+    // Partial match for common variations
+    for (const [key, response] of Object.entries(QUICK_RESPONSES)) {
+      if (normalized.includes(key) || key.includes(normalized)) {
+        return response
+      }
+    }
+    
+    // Handle common variations
+    if (normalized.includes("hello") || normalized.includes("hi")) {
       return QUICK_RESPONSES.hello
     }
-
-    // Thanks
-    if (matchesWord("thanks") || /(^|\s)thank(s|\s+you)?(\s|$)/.test(normalized)) {
-      console.log(`[QUICK] Thanks matched in: "${normalized}")`)
+    
+    if (normalized.includes("thank")) {
       return QUICK_RESPONSES["thank you"]
     }
-
-    // Farewells
-    if (matchesWord("bye") || matchesWord("goodbye")) {
-      console.log(`[QUICK] Farewell matched (bye/goodbye) in: "${normalized}")`)
+    
+    if (normalized.includes("bye") || normalized.includes("goodbye")) {
       return QUICK_RESPONSES.bye
     }
-
-    // Short affirmations/negations
-    if (matchesWord("yes")) return QUICK_RESPONSES["yes"]
-    if (matchesWord("no")) return QUICK_RESPONSES["no"]
-    if (matchesWord("okay")) return QUICK_RESPONSES["okay"]
-
+    
     return null
   }
 
