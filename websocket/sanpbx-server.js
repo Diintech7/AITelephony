@@ -270,7 +270,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       const startTime = Date.now()
 
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 5000)
+      const timeoutId = setTimeout(() => controller.abort(), 3500)
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -284,7 +284,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           target_language_code: language,
           speaker: "meera",
           pitch: 0,
-          pace: 1.4,
+          pace: 1.55,
           loudness: 1.0,
           speech_sample_rate: 8000, // FIXED: 8kHz to match SanIPPBX format
           enable_preprocessing: true,
@@ -392,7 +392,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         language: "en",
         interim_results: "true",
         smart_format: "true",
-        endpointing: "300",
+        endpointing: "120",
         punctuate: "true",
         diarize: "false",
         multichannel: "false",
@@ -403,7 +403,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         model: "base",
         language: "en",
         interim_results: "true",
-        endpointing: "200",
+        endpointing: "100",
       }
     }
 
@@ -511,7 +511,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       ]
 
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 4000)
+      const timeoutId = setTimeout(() => controller.abort(), 2500)
 
       const response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -522,8 +522,8 @@ const setupSanPbxWebSocketServer = (ws) => {
         body: JSON.stringify({
           model: "gpt-4o-mini",
           messages: messages,
-          max_tokens: 80,
-          temperature: 0.5,
+          max_tokens: 50,
+          temperature: 0.3,
           stream: false,
         }),
         signal: controller.signal,
@@ -553,11 +553,15 @@ const setupSanPbxWebSocketServer = (ws) => {
   const processUserInput = async (transcript) => {
     const responseId = trackResponse()
     
-    if (isProcessing || !transcript.trim()) return
+    if (!transcript.trim()) return
+    if (isProcessing) {
+      console.log(`[PROCESS] Busy. Skipping new transcript while speaking: "${transcript}"`)
+      return
+    }
 
-    // Prevent duplicate processing of same transcript within 3 seconds
+    // Prevent duplicate processing of same transcript within 1.2 seconds
     const now = Date.now()
-    if (transcript === lastProcessedTranscript && (now - lastProcessedTime) < 3000) {
+    if (transcript === lastProcessedTranscript && (now - lastProcessedTime) < 1200) {
       console.log(`[PROCESS] Skipping duplicate transcript: "${transcript}"`)
       return
     }
@@ -582,6 +586,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: quickResponse })
 
         await synthesizeAndStreamAudio(quickResponse)
+        console.log(`[PROCESS] TTS finished for quick response.`)
       } else if (isResponseActive(responseId)) {
         console.log(`[PROCESS] Getting AI response for: "${transcript}"`)
         
@@ -597,6 +602,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
 
           await synthesizeAndStreamAudio(aiResponse)
+          console.log(`[PROCESS] TTS finished for AI response.`)
         }
       }
 
@@ -605,9 +611,8 @@ const setupSanPbxWebSocketServer = (ws) => {
     } catch (error) {
       console.error("[PROCESS] Error processing user input:", error.message)
     } finally {
-      if (isResponseActive(responseId)) {
-        isProcessing = false
-      }
+      isProcessing = false
+      console.log(`[PROCESS] isProcessing reset. Ready for next input.`)
     }
   }
 
