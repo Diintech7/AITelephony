@@ -10,7 +10,6 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@elevenlabs/elevenlabs-js": "^0.12.0",
     "@ai-sdk/openai": "^2.0.0",
     "@deepgram/sdk": "^4.11.2",
     "ai": "^5.0.0",

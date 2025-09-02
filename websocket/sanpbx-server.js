@@ -13,12 +13,6 @@ if (!DEEPGRAM_API_KEY || !ELEVEN_API_KEY || !OPENAI_API_KEY) {
 }
 
 const fetch = globalThis.fetch || require("node-fetch")
-const { ElevenLabsClient } = require('@elevenlabs/elevenlabs-js')
-
-// Initialize ElevenLabs client
-const elevenlabs = new ElevenLabsClient({
-  apiKey: ELEVEN_API_KEY,
-})
 
 // Precompiled responses for common queries (instant responses)
 const QUICK_RESPONSES = {
@@ -263,7 +257,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   }
 
   /**
-   * Text-to-speech via ElevenLabs at 44.1kHz PCM mono
+   * Text-to-speech via ElevenLabs REST at 44.1kHz PCM mono
    */
   const synthesizeAndStreamAudio = async (text, language = "en") => {
     try {
@@ -273,42 +267,29 @@ const setupSanPbxWebSocketServer = (ws) => {
       const startTime = Date.now()
 
       const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb' // default voice; can be made configurable
-      // Request raw PCM 44.1kHz mono if available
-      const outputFormat = 'pcm_44100'
-
-      const audio = await elevenlabs.textToSpeech.convert(VOICE_ID, {
-        text: text,
-        modelId: 'eleven_multilingual_v2',
-        outputFormat,
+      // Request raw PCM 44.1kHz mono via REST
+      const url = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=pcm_44100`
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'xi-api-key': ELEVEN_API_KEY,
+          'Content-Type': 'application/json',
+          'Accept': 'application/octet-stream',
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: 0.5, similarity_boost: 0.7 },
+        }),
       })
 
-      let audioBuffer
-      if (audio && typeof audio.getReader === 'function') {
-        // ReadableStream
-        const reader = audio.getReader()
-        const chunks = []
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          chunks.push(value)
-        }
-        const totalLength = chunks.reduce((acc, c) => acc + c.length, 0)
-        const combined = new Uint8Array(totalLength)
-        let offset = 0
-        for (const c of chunks) { combined.set(c, offset); offset += c.length }
-        audioBuffer = Buffer.from(combined)
-      } else if (audio instanceof ArrayBuffer) {
-        audioBuffer = Buffer.from(audio)
-      } else if (Buffer.isBuffer(audio)) {
-        audioBuffer = audio
-      } else {
-        audioBuffer = Buffer.from(audio)
+      if (!resp.ok) {
+        const errTxt = await resp.text().catch(() => '')
+        throw new Error(`ElevenLabs error ${resp.status}: ${errTxt}`)
       }
 
-      if (!audioBuffer || audioBuffer.length === 0) {
-        throw new Error('No audio data received from ElevenLabs')
-      }
-
+      const arrayBuf = await resp.arrayBuffer()
+      const audioBuffer = Buffer.from(arrayBuf)
       const audioBase64 = audioBuffer.toString('base64')
 
       const ttsTime = Date.now() - startTime
