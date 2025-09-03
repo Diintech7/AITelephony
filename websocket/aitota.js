@@ -1644,9 +1644,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        // Optimized for lower latency (only using supported parameters)
-        deepgramUrl.searchParams.append("endpointing", "100")  // Reduced from 200ms to 100ms
-        deepgramUrl.searchParams.append("utterance_end_ms", "500")  // Reduced from 1000ms to 500ms
+        // Reverted to original working parameters - latency optimizations will come from other areas
 
         console.log("🔗 [DEEPGRAM] Connecting to:", deepgramUrl.toString())
         
@@ -1742,11 +1740,12 @@ const setupUnifiedVoiceServer = (wss) => {
           } else {
             // Handle interim results for faster response
             const interimText = transcript.trim()
-            if (interimText && interimText.length > 3) { // Only process meaningful interim results
+            if (interimText && interimText.length > 2) { // Reduced threshold for faster response
               console.log(`🔄 [STT-INTERIM] "${interimText}"`)
               
-              // For very short interim results, process immediately to reduce latency
-              if (interimText.length < 20 && !isProcessing) {
+              // Process interim results more aggressively for lower latency
+              if (interimText.length < 30 && !isProcessing && interimText.length > 5) {
+                console.log(`⚡ [STT-INTERIM] Processing short interim result for faster response`)
                 await processUserUtterance(interimText)
               }
             }
@@ -2124,17 +2123,17 @@ const setupUnifiedVoiceServer = (wss) => {
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
                 deepgramWs.send(audioBuffer)
               } else {
-                // Optimized queue management for lower latency
+                // Ultra-optimized queue management for minimal latency
                 deepgramAudioQueue.push(audioBuffer)
                 
-                // Limit queue size to prevent excessive buffering (reduced from unlimited to 50 packets)
-                if (deepgramAudioQueue.length > 50) {
-                  // Remove oldest packets to maintain low latency
-                  deepgramAudioQueue = deepgramAudioQueue.slice(-25) // Keep only last 25 packets
-                  console.log("⚡ [SIP-MEDIA] Audio queue optimized for latency")
+                // More aggressive queue limiting for ultra-low latency
+                if (deepgramAudioQueue.length > 30) { // Reduced from 50 to 30
+                  // Keep only the most recent packets for minimal latency
+                  deepgramAudioQueue = deepgramAudioQueue.slice(-15) // Reduced from 25 to 15
+                  console.log("⚡ [SIP-MEDIA] Audio queue ultra-optimized for minimal latency")
                 }
                 
-                if (deepgramAudioQueue.length % 25 === 0) {
+                if (deepgramAudioQueue.length % 15 === 0) { // Reduced from 25 to 15
                   console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
                 }
               }
