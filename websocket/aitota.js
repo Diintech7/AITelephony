@@ -1412,7 +1412,7 @@ class SimplifiedSarvamTTSProcessor {
           speech_sample_rate: 8000,
           enable_preprocessing: false,
           enable_preprocessing: true,
-          model: "bulbul:v1",
+          model: "bulbul:v2",
         }),
       })
 
