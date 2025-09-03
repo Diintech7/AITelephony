@@ -431,14 +431,13 @@ const setupSanPbxWebSocketServer = (ws) => {
         const confidence = response.channel?.alternatives?.[0]?.confidence
 
         if (transcript?.trim()) {
-          console.log(JSON.stringify({
-            source: "Deepgram",
-            type: isFinal ? "final" : "interim",
-            transcript,
-            confidence
-          }, null, 2))
+          // Explicit readable logs for interim/final text from Deepgram
+          if (isFinal) {
+            console.log(`[STT:FINAL] ${transcript.trim()} (conf=${typeof confidence === 'number' ? confidence.toFixed(2) : confidence})`)
+          } else {
+            console.log(`[STT:INTERIM] ${transcript.trim()} (conf=${typeof confidence === 'number' ? confidence.toFixed(2) : confidence})`)
+          }
 
-          // forward anything Deepgram believes is speech, even low-confidence, for visibility
           if (isFinal) {
             if (silenceTimer) {
               clearTimeout(silenceTimer)
@@ -707,6 +706,8 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Forward audio data to Deepgram for transcription
           if (data.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             const audioBuffer = Buffer.from(data.payload, "base64")
+            // Clear summary log of SIP media frame
+            console.log(`[SANPBX-MEDIA-IN] bytes=${audioBuffer.length}, streamId=${data.streamId || streamId}, callId=${data.callId || callId}, channelId=${data.channelId || channelId}`)
             deepgramWs.send(audioBuffer)
             
             chunkCounter++
