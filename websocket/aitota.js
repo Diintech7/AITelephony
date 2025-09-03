@@ -315,7 +315,8 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
   }
 }
 
-// Fallback to OpenAI for uncertain cases
+// Fallback to OpenAI for uncertain cases - COMMENTED OUT FOR LATENCY TESTING
+/*
 const detectLanguageWithOpenAI = async (text) => {
   const timer = createTimer("LLM_LANGUAGE_DETECTION")
   try {
@@ -372,6 +373,7 @@ Return only the language code, nothing else.`,
     return "en"
   }
 }
+*/
 
 // Enhanced hybrid language detection
 const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
@@ -392,9 +394,10 @@ const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
     return francResult
   }
   
-  if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
-    return await detectLanguageWithOpenAI(text)
-  }
+  // OpenAI fallback is commented out for latency testing
+  // if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
+  //   return await detectLanguageWithOpenAI(text)
+  // }
   
   return francResult
 }
