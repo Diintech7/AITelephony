@@ -619,6 +619,9 @@ const setupSanPbxWebSocketServer = (ws) => {
   ws.on("message", async (message) => {
     try {
       const messageStr = message.toString()
+      // Log the raw SIP message exactly as received (may include large base64 payloads)
+      console.log(`[SANPBX-RAW-IN] length=${messageStr.length}`)
+      console.log(`[SANPBX-RAW-IN:DATA] ${messageStr}`)
 
       if (!messageStr.startsWith("{")) {
         return
