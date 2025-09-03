@@ -1610,17 +1610,22 @@ class SarvamWSClient {
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
       const chunk = audioBuffer.slice(position, position + chunkSize)
 
+      const base64Payload = chunk.toString("base64")
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
-        media: {
-          payload: chunk.toString("base64"),
-        },
+        media: { payload: base64Payload },
+      }
+      const compatMessage = {
+        event: "audio",
+        streamSid: this.streamSid,
+        audio: { payload: base64Payload, encoding: "pcm_s16le", sampleRate: 8000 },
       }
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
+          this.ws.send(JSON.stringify(compatMessage))
           successfulChunks++
         } catch (error) {
           break
@@ -1692,13 +1697,20 @@ class SarvamWSClient {
         if (this.isInterrupted || streamingSession.interrupt) return
         // Flush remaining
         if (pcmBuffer.length > 0) {
+          const base64Payload = pcmBuffer.toString('base64')
           const mediaMessage = {
             event: 'media',
             streamSid: this.streamSid,
-            media: { payload: pcmBuffer.toString('base64') }
+            media: { payload: base64Payload }
+          }
+          const compatMessage = {
+            event: 'audio',
+            streamSid: this.streamSid,
+            audio: { payload: base64Payload, encoding: 'pcm_s16le', sampleRate: 8000 }
           }
           if (this.ws.readyState === WebSocket.OPEN) {
             try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) {}
+            try { this.ws.send(JSON.stringify(compatMessage)) } catch (_) {}
           }
         }
         this.currentAudioStreaming = null
