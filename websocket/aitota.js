@@ -1244,10 +1244,10 @@ Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on th
     const validStatuses = ['vvi', 'maybe', 'enrolled', 'junk_lead', 'not_required', 'enrolled_other', 'decline', 'not_eligible', 'wrong_number', 'hot_followup', 'cold_followup', 'schedule', 'not_connected']
     
     if (validStatuses.includes(detectedStatus)) {
-      console.log(`🕒 [LEAD-STATUS-DETECTION] ${timer.end()}ms - Detected: ${detectedStatus}`)
+      // console.log(`🕒 [LEAD-STATUS-DETECTION] ${timer.end()}ms - Detected: ${detectedStatus}`)
       return detectedStatus
     } else {
-      console.log(`⚠️ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Invalid status detected: ${detectedStatus}, defaulting to maybe`)
+      // console.log(`⚠️ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Invalid status detected: ${detectedStatus}, defaulting to maybe`)
       return "maybe"
     }
   } catch (error) {
@@ -1295,10 +1295,10 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
     const result = data.choices[0]?.message?.content?.trim().toUpperCase()
 
     if (result === "DISCONNECT") {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
+      // console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
       return "DISCONNECT"
     } else {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
+      // console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
       return "CONTINUE"
     }
   } catch (error) {
@@ -1347,10 +1347,10 @@ Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if n
     const result = data.choices[0]?.message?.content?.trim().toUpperCase()
 
     if (result === "WHATSAPP_REQUEST") {
-      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - User wants WhatsApp info`)
+      // console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - User wants WhatsApp info`)
       return "WHATSAPP_REQUEST"
     } else {
-      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - No WhatsApp request`)
+      // console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - No WhatsApp request`)
       return "NO_REQUEST"
     }
   } catch (error) {
@@ -1760,46 +1760,16 @@ const setupUnifiedVoiceServer = (wss) => {
           currentLanguage = detectedLanguage
         }
 
-        // Run all AI detections in parallel for efficiency
-        console.log("🔍 [USER-UTTERANCE] Running AI detections...")
-        
-        const [
-          disconnectionIntent, 
-          leadStatus, 
-          whatsappRequest, 
-          aiResponse
-        ] = await Promise.all([
-          detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
-          detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
-          detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
-          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig)
-        ])
+        // Disabled auxiliary flows (disconnect/lead/whatsapp) for now; only get AI response
+        const aiResponse = await processWithOpenAI(
+          text,
+          conversationHistory,
+          detectedLanguage,
+          callLogger,
+          agentConfig
+        )
 
-        // Update call logger with detected information
-        if (callLogger) {
-          callLogger.updateLeadStatus(leadStatus)
-          if (whatsappRequest === "WHATSAPP_REQUEST") {
-            callLogger.markWhatsAppRequested()
-          }
-        }
-        
-        if (disconnectionIntent === "DISCONNECT") {
-          console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
-          
-          // Wait 2 seconds to ensure last message is processed, then terminate
-          setTimeout(async () => {
-            if (callLogger) {
-              try {
-                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
-                console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
-              } catch (err) {
-                console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
-              }
-            }
-          }, 2000)
-          
-          return
-        }
+        // Skipped lead status/WhatsApp/disconnect intent flows
 
         if (processingRequestId === currentRequestId && aiResponse) {
           console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
