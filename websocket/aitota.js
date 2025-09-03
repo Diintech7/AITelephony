@@ -1605,6 +1605,7 @@ class SarvamWSClient {
     let chunkIndex = 0
     let successfulChunks = 0
 
+    let sentCount = 0
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
       const remaining = audioBuffer.length - position
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
@@ -1621,12 +1622,19 @@ class SarvamWSClient {
         streamSid: this.streamSid,
         audio: { payload: base64Payload, encoding: "pcm_s16le", sampleRate: 8000 },
       }
+      const ttsMessage = {
+        event: "tts",
+        streamSid: this.streamSid,
+        audio: { payload: base64Payload, encoding: "audio/linear16", sampleRate: 8000 }
+      }
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
           this.ws.send(JSON.stringify(compatMessage))
+          this.ws.send(JSON.stringify(ttsMessage))
           successfulChunks++
+          sentCount++
         } catch (error) {
           break
         }
@@ -1645,6 +1653,7 @@ class SarvamWSClient {
     }
 
     this.currentAudioStreaming = null
+    try { if (sentCount > 0) console.log(`🔊 [SARVAM-TTS] Chunks sent: ${sentCount} (direct PCM)`) } catch (_) {}
   }
 
   // properties required by existing code
@@ -1672,6 +1681,7 @@ class SarvamWSClient {
 
       let pcmBuffer = Buffer.alloc(0)
 
+      let sentCount = 0
       child.stdout.on('data', async (chunk) => {
         if (this.isInterrupted || streamingSession.interrupt) return
         pcmBuffer = Buffer.concat([pcmBuffer, chunk])
@@ -1684,12 +1694,25 @@ class SarvamWSClient {
             streamSid: this.streamSid,
             media: { payload: outChunk.toString('base64') }
           }
+          const compatMessage = {
+            event: 'audio',
+            streamSid: this.streamSid,
+            audio: { payload: outChunk.toString('base64'), encoding: 'pcm_s16le', sampleRate: 8000 }
+          }
+          const ttsMessage = {
+            event: 'tts',
+            streamSid: this.streamSid,
+            audio: { payload: outChunk.toString('base64'), encoding: 'audio/linear16', sampleRate: 8000 }
+          }
           if (this.ws.readyState === WebSocket.OPEN) {
             try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) {}
+            try { this.ws.send(JSON.stringify(compatMessage)) } catch (_) {}
+            try { this.ws.send(JSON.stringify(ttsMessage)) } catch (_) {}
           }
           // pacing
           const chunkDurationMs = Math.floor(outChunk.length / BYTES_PER_MS)
           await new Promise(r => setTimeout(r, Math.max(chunkDurationMs - 2, 8)))
+          sentCount++
         }
       })
 
@@ -1714,6 +1737,7 @@ class SarvamWSClient {
           }
         }
         this.currentAudioStreaming = null
+        try { if (sentCount > 0) console.log(`🔊 [SARVAM-TTS] Chunks sent: ${sentCount} (mp3→pcm)`) } catch (_) {}
       })
 
       child.stderr.on('data', () => {})
