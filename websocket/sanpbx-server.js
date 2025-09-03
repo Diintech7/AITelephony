@@ -59,6 +59,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   let silenceTimer = null
   let sttFailed = false
   let chunkCounter = 0
+  let binaryMediaMode = false // auto-detected if PBX sends raw 320-byte frames
   
   // Add duplicate prevention tracking
   let lastProcessedTranscript = ""
@@ -169,50 +170,41 @@ const setupSanPbxWebSocketServer = (ws) => {
         // Prepare payload
         const payloadBase64 = paddedChunk.toString("base64")
 
-        // Minimal spec-compliant message
-        const mediaMessage = {
-          event: "reverse-media",
-          payload: payloadBase64,
-          streamId: streamId,
-          channelId: channelId,
-          callId: callId,
-        }
-
         try {
-          // Extra spec-check logging only on first chunk
-          if (!firstChunkSpecChecked) {
-            const usedEventName = mediaMessage.event
-            const eventOk = usedEventName === "reverse-media"
-            const sizeOk = paddedChunk.length === CHUNK_SIZE
-            const durOk = CHUNK_DURATION_MS === 20
-            const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
-            console.log(
-              `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${eventOk} (used=${usedEventName}), size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS}), format_ok=${fmtOk}`,
-            )
-            if (!eventOk) {
-              console.warn(
-                `[SPEC-WARN] Outgoing event name should be "reverse-media" but is "${usedEventName}". Update if your PBX expects reverse direction.`,
+          if (binaryMediaMode) {
+            // Send raw 320-byte PCM frame directly when PBX expects binary frames
+            if (!firstChunkSpecChecked) {
+              const sizeOk = paddedChunk.length === CHUNK_SIZE
+              const durOk = CHUNK_DURATION_MS === 20
+              console.log(
+                `[SPEC-CHECK:CHUNK#${currentChunk}] binary_mode=true, size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS})`,
               )
+              firstChunkSpecChecked = true
             }
-            if (!sizeOk) {
-              console.warn(
-                `[SPEC-WARN] Chunk size should be 320 bytes for 20ms @ 8kHz 16-bit mono.`,
+            ws.send(paddedChunk)
+          } else {
+            // JSON reverse-media mode
+            const mediaMessage = {
+              event: "reverse-media",
+              payload: payloadBase64,
+              streamId: streamId,
+              channelId: channelId,
+              callId: callId,
+            }
+            if (!firstChunkSpecChecked) {
+              const usedEventName = mediaMessage.event
+              const sizeOk = paddedChunk.length === CHUNK_SIZE
+              const durOk = CHUNK_DURATION_MS === 20
+              const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
+              console.log(
+                `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${usedEventName === 'reverse-media'}, size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS}), format_ok=${fmtOk}`,
               )
+              firstChunkSpecChecked = true
             }
-            if (!fmtOk) {
-              console.warn(
-                `[SPEC-WARN] Format should be LINEAR16, 8000 Hz, 1 channel. Current: encoding=${ENCODING}, sample_rate_hz=${SAMPLE_RATE_HZ}, channels=${CHANNELS}`,
-              )
-            }
-            firstChunkSpecChecked = true
+            ws.send(JSON.stringify(mediaMessage))
           }
-
-          // Log without payload to avoid noise
-          console.log(`[SANPBX-SEND] reverse-media chunk #${currentChunk}`)
-          ws.send(JSON.stringify(mediaMessage))
           chunksSuccessfullySent++
           currentChunk++
-
           if (chunksSuccessfullySent % 20 === 0) {
             console.log(`[SANPBX-STREAM] Sent ${chunksSuccessfullySent} chunks`)
           }
@@ -233,15 +225,19 @@ const setupSanPbxWebSocketServer = (ws) => {
       try {
         for (let i = 0; i < 3; i++) {
           const silenceChunk = Buffer.alloc(CHUNK_SIZE)
-          const silenceMessage = {
-            event: "reverse-media",
-            payload: silenceChunk.toString("base64"),
-            streamId: streamId,
-            channelId: channelId,
-            callId: callId,
+          if (binaryMediaMode) {
+            ws.send(silenceChunk)
+          } else {
+            const silenceMessage = {
+              event: "reverse-media",
+              payload: silenceChunk.toString("base64"),
+              streamId: streamId,
+              channelId: channelId,
+              callId: callId,
+            }
+            console.log(`[SANPBX-SEND] reverse-media silence chunk #${currentChunk}`)
+            ws.send(JSON.stringify(silenceMessage))
           }
-          console.log(`[SANPBX-SEND] reverse-media silence chunk #${currentChunk}`)
-          ws.send(JSON.stringify(silenceMessage))
           currentChunk++
           await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
         }
@@ -618,12 +614,32 @@ const setupSanPbxWebSocketServer = (ws) => {
   // Handle incoming messages from SanIPPBX
   ws.on("message", async (message) => {
     try {
+      // If message is Buffer or not valid JSON, treat as binary media
+      if (Buffer.isBuffer(message)) {
+        const buf = message
+        console.log(`[SANPBX-RAW-IN:BINARY] bytes=${buf.length}`)
+        // Auto-enable binary mode on first binary frame
+        if (!binaryMediaMode && buf.length === 320) {
+          binaryMediaMode = true
+          console.log(`[SANPBX] Binary media mode enabled (detected 320-byte PCM frames)`)
+        }
+        // Forward raw PCM directly to Deepgram if connected
+        if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+          try { deepgramWs.send(buf) } catch (e) {}
+        }
+        // Count chunks for diagnostics
+        chunkCounter++
+        if (chunkCounter % 50 === 0) {
+          console.log(`[SANPBX] Processed ${chunkCounter} binary audio chunks`)
+        }
+        return
+      }
+
       const messageStr = message.toString()
-      // Log the raw SIP message exactly as received (may include large base64 payloads)
       console.log(`[SANPBX-RAW-IN] length=${messageStr.length}`)
       console.log(`[SANPBX-RAW-IN:DATA] ${messageStr}`)
 
-      if (!messageStr.startsWith("{")) {
+      if (!messageStr.trim().startsWith("{")) {
         return
       }
 
@@ -709,7 +725,6 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Forward audio data to Deepgram for transcription
           if (data.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             const audioBuffer = Buffer.from(data.payload, "base64")
-            // Clear summary log of SIP media frame
             console.log(`[SANPBX-MEDIA-IN] bytes=${audioBuffer.length}, streamId=${data.streamId || streamId}, callId=${data.callId || callId}, channelId=${data.channelId || channelId}`)
             deepgramWs.send(audioBuffer)
             
