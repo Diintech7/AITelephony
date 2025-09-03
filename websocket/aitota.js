@@ -1501,11 +1501,27 @@ class SimplifiedSarvamTTSProcessor {
     console.log(`📝 [SARVAM-WS] Sent text (${text.length} chars) and flush`)
 
     // Warn if no audio arrives shortly
-    const audioWarnTimer = setTimeout(() => {
+    const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        console.log('⚠️ [SARVAM-WS] No audio received within 1.5s after text; check API key/codec/config')
+        console.log('⚠️ [SARVAM-WS] No audio received within 1.5s after text; attempting one reconnect and resend')
+        try {
+          // One-shot reconnect and resend
+          try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
+          this.sarvamWsConnected = false
+          this.configAcked = false
+          const reconnected = await this.connectSarvamWs(requestId).catch(() => false)
+          if (reconnected && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
+            const startWait2 = Date.now()
+            while (!this.configAcked && Date.now() - startWait2 < 400) {
+              await new Promise(r => setTimeout(r, 20))
+            }
+            try { this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text } })) } catch (_) {}
+            try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
+            console.log('🔁 [SARVAM-WS] Resent text after reconnect')
+          }
+        } catch (_) {}
       }
-    }, 1500)
+    }, 1000)
 
     if (this.callLogger && text) {
       this.callLogger.logAIResponse(text, this.language)
