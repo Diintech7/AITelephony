@@ -1100,7 +1100,7 @@ class EnhancedCallLogger {
   }
 }
 
-// Simplified OpenAI processing
+// Optimized OpenAI processing with reduced latency
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
@@ -1112,34 +1112,29 @@ const processWithOpenAI = async (
   const timer = createTimer("LLM_PROCESSING")
 
   try {
-    // Build a stricter system prompt that embeds firstMessage and sets answering policy
+    // Simplified system prompt for faster processing
     const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
     const firstMessage = (agentConfig.firstMessage || "").trim()
-    const knowledgeBlock = firstMessage
-      ? `FirstGreeting: "${firstMessage}"\n`
+    
+    // Concise system prompt to reduce token count
+    const systemPrompt = firstMessage 
+      ? `${basePrompt}\n\nFirstGreeting: "${firstMessage}"\n\nKeep responses under 50 tokens. Always end with a question.`
+      : `${basePrompt}\n\nKeep responses under 50 tokens. Always end with a question.`
+
+    // Add user name if available
+    const personalization = userName && userName.trim() 
+      ? `User's name: ${userName.trim()}. `
       : ""
 
-    const policyBlock = [
-      "Answer strictly using the information provided above.",
-      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
-      "If the information is not present, reply briefly that you don't have that information.",
-      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
-      "Keep the entire reply under 100 tokens.",
-      "Do not give any styles like bold, italic, underline, etc. and do not add slash(/) kind of this in the reply.",
-    ].join(" ")
-
-    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
-
-    const personalizationMessage = userName && userName.trim()
-      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
-      : null
-
     const messages = [
-      { role: "system", content: systemPrompt },
-      ...(personalizationMessage ? [personalizationMessage] : []),
-      ...conversationHistory.slice(-6),
+      { role: "system", content: `${personalization}${systemPrompt}` },
+      ...conversationHistory.slice(-3), // Reduced from 6 to 3 for faster processing
       { role: "user", content: userMessage },
     ]
+
+    // Add timeout control and abort controller
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 2000) // 2 second timeout
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -1150,10 +1145,14 @@ const processWithOpenAI = async (
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 120,
+        max_tokens: 60, // Reduced from 120 to 60
         temperature: 0.3,
+        stream: false, // Explicitly set to false
       }),
+      signal: controller.signal,
     })
+
+    clearTimeout(timeoutId)
 
     if (!response.ok) {
       console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
@@ -1165,22 +1164,19 @@ const processWithOpenAI = async (
 
     console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
 
-    // Ensure a follow-up question is present at the end
-    if (fullResponse) {
-      const needsFollowUp = !/[?]\s*$/.test(fullResponse)
-      if (needsFollowUp) {
-        const followUps = {
-          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
-          en: "Is there anything else I can help you with?",
-          bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
-          ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
-          te: "ఇంకేమైనా సహాయం కావాలా?",
-          mr: "आणखी काही मदत हवी आहे का?",
-          gu: "શું બીજી કોઈ મદદ કરી શકું?",
-        }
-        const fu = followUps[detectedLanguage] || followUps.en
-        fullResponse = `${fullResponse} ${fu}`.trim()
+    // Simplified follow-up logic
+    if (fullResponse && !/[?]\s*$/.test(fullResponse)) {
+      const quickFollowUps = {
+        hi: "कुछ और?",
+        en: "Anything else?",
+        bn: "আর কিছু?",
+        ta: "வேறு ஏதாவது?",
+        te: "ఇంకా ఏమైనా?",
+        mr: "आणखी काही?",
+        gu: "બીજું કંઈક?",
       }
+      const fu = quickFollowUps[detectedLanguage] || quickFollowUps.en
+      fullResponse = `${fullResponse} ${fu}`.trim()
     }
 
     if (callLogger && fullResponse) {
@@ -1189,7 +1185,11 @@ const processWithOpenAI = async (
 
     return fullResponse
   } catch (error) {
-    console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+    if (error.name === 'AbortError') {
+      console.log(`⏰ [LLM-PROCESSING] ${timer.end()}ms - Timeout after 2 seconds`)
+    } else {
+      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+    }
     return null
   }
 }
