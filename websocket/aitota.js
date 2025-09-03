@@ -1419,6 +1419,7 @@ class SimplifiedSarvamTTSProcessor {
           return reject(new Error("Sarvam WS opened for outdated request"))
         }
         this.sarvamWsConnected = true
+        console.log(`🎙️ [SARVAM-WS] Connected (lang=${this.sarvamLanguage}, voice=${this.voice})`)
         const configMessage = {
           type: 'config',
           data: {
@@ -1443,21 +1444,28 @@ class SimplifiedSarvamTTSProcessor {
         if (this.isInterrupted || this.currentSarvamRequestId !== requestId) return
         try {
           const msg = JSON.parse(event.data)
+          if (msg.type === 'config_ack') {
+            console.log('🎙️ [SARVAM-WS] Config acknowledged')
+          }
           if (msg.type === 'audio' && msg.data?.audio) {
             const audioBuffer = Buffer.from(msg.data.audio, 'base64')
             this.audioQueue.push(audioBuffer)
             this.totalAudioBytes += audioBuffer.length
             if (!this.isStreamingToSIP) this.startStreamingToSIP(requestId)
+          } else if (msg.type === 'error') {
+            console.log(`❌ [SARVAM-WS] Error from TTS: ${msg?.data?.message || 'unknown'}`)
           }
         } catch (_) {}
       }
 
       this.sarvamWs.onerror = (err) => {
         this.sarvamWsConnected = false
+        console.log(`❌ [SARVAM-WS] Socket error: ${err?.message || err}`)
         reject(err)
       }
       this.sarvamWs.onclose = () => {
         this.sarvamWsConnected = false
+        console.log('🔌 [SARVAM-WS] Closed')
       }
     })
   }
@@ -1473,21 +1481,39 @@ class SimplifiedSarvamTTSProcessor {
     const textMessage = { type: 'text', data: { text } }
     try { this.sarvamWs.send(JSON.stringify(textMessage)) } catch (_) {}
     try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
+    console.log(`📝 [SARVAM-WS] Sent text (${text.length} chars) and flush`)
+
+    // Warn if no audio arrives shortly
+    const audioWarnTimer = setTimeout(() => {
+      if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
+        console.log('⚠️ [SARVAM-WS] No audio received within 1.5s after text; check API key/codec/config')
+      }
+    }, 1500)
 
     if (this.callLogger && text) {
       this.callLogger.logAIResponse(text, this.language)
     }
+    // Clear timer later when streaming starts
+    const clearTimerInterval = setInterval(() => {
+      if (this.isStreamingToSIP || this.isInterrupted || this.currentSarvamRequestId !== requestId) {
+        clearTimeout(audioWarnTimer)
+        clearInterval(clearTimerInterval)
+      }
+    }, 100)
   }
 
   async startStreamingToSIP(requestId) {
     if (this.isStreamingToSIP || this.isInterrupted || this.currentSarvamRequestId !== requestId) return
     this.isStreamingToSIP = true
+    console.log('🚀 [SARVAM→SIP] Start streaming audio to SIP')
 
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
 
+    let sentChunks = 0
+    let sentBytes = 0
     while (!this.isInterrupted && this.currentSarvamRequestId === requestId) {
       if (this.audioQueue.length === 0) { await new Promise(r => setTimeout(r, 50)); continue }
       const audioBuffer = this.audioQueue.shift()
@@ -1498,7 +1524,7 @@ class SimplifiedSarvamTTSProcessor {
         const chunk = audioBuffer.slice(position, position + chunkSize)
         const mediaMessage = { event: 'media', streamSid: this.streamSid, media: { payload: chunk.toString('base64') } }
         if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-          try { this.ws.send(JSON.stringify(mediaMessage)) } catch (e) { this.isInterrupted = true; break }
+          try { this.ws.send(JSON.stringify(mediaMessage)); sentChunks++; sentBytes += chunk.length } catch (e) { this.isInterrupted = true; break }
         } else { this.isInterrupted = true; break }
         if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
           const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
@@ -1507,8 +1533,12 @@ class SimplifiedSarvamTTSProcessor {
         }
         position += chunkSize
       }
+      if (sentChunks % 50 === 0 && sentChunks > 0) {
+        console.log(`🎧 [SARVAM→SIP] Sent ${sentChunks} chunks, ${(sentBytes/1024).toFixed(1)} KB`) 
+      }
     }
     this.isStreamingToSIP = false
+    console.log('🛑 [SARVAM→SIP] Streaming stopped')
   }
 
   getStats() {
