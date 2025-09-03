@@ -1498,6 +1498,33 @@ class SarvamWSClient {
     this.pendingTexts = []
   }
 
+  // Convert a PCM16LE chunk Buffer to µ-law base64 quickly (per-sample)
+  linear16ChunkToMuLawBase64(chunk) {
+    try {
+      if (!chunk || chunk.length < 2) return ''
+      const sampleCount = Math.floor(chunk.length / 2)
+      const out = Buffer.alloc(sampleCount)
+      for (let i = 0; i < sampleCount; i++) {
+        let sample = chunk.readInt16LE(i * 2)
+        // µ-law companding
+        let sign = 0
+        if (sample < 0) { sign = 0x80; sample = -sample }
+        sample = sample + 132
+        if (sample > 32635) sample = 32635
+        let exponent = 7
+        for (let expMask = 0x4000; (sample & expMask) === 0 && exponent > 0; expMask >>= 1) {
+          exponent--
+        }
+        const mantissa = (sample >> (exponent + 3)) & 0x0f
+        const mu = ~(sign | (exponent << 4) | mantissa) & 0xff
+        out[i] = mu
+      }
+      return out.toString('base64')
+    } catch (_) {
+      return ''
+    }
+  }
+
   async ensureConnected() {
     if (this.socket && this.socket.readyState === WebSocket.OPEN && this.configAck) return
     if (this.connecting) {
@@ -1612,20 +1639,28 @@ class SarvamWSClient {
       const chunk = audioBuffer.slice(position, position + chunkSize)
 
       const base64Payload = chunk.toString("base64")
+      const nowTs = Date.now()
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
-        media: { payload: base64Payload },
+        media: { payload: base64Payload, encoding: "audio/linear16", sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs },
       }
       const compatMessage = {
         event: "audio",
         streamSid: this.streamSid,
-        audio: { payload: base64Payload, encoding: "pcm_s16le", sampleRate: 8000 },
+        audio: { payload: base64Payload, encoding: "pcm_s16le", sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs },
       }
       const ttsMessage = {
         event: "tts",
         streamSid: this.streamSid,
-        audio: { payload: base64Payload, encoding: "audio/linear16", sampleRate: 8000 }
+        audio: { payload: base64Payload, encoding: "audio/linear16", sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs }
+      }
+      // Optional µ-law mirror for stacks expecting mulaw
+      const muBase64 = this.linear16ChunkToMuLawBase64(chunk)
+      const muMediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: { payload: muBase64, encoding: "mulaw", sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs },
       }
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
@@ -1633,6 +1668,7 @@ class SarvamWSClient {
           this.ws.send(JSON.stringify(mediaMessage))
           this.ws.send(JSON.stringify(compatMessage))
           this.ws.send(JSON.stringify(ttsMessage))
+          this.ws.send(JSON.stringify(muMediaMessage))
           successfulChunks++
           sentCount++
         } catch (error) {
@@ -1650,6 +1686,7 @@ class SarvamWSClient {
 
       position += chunkSize
       chunkIndex++
+      this.ttsChunkSeq = (this.ttsChunkSeq || 0) + 1
     }
 
     this.currentAudioStreaming = null
@@ -1689,30 +1726,39 @@ class SarvamWSClient {
         while (pcmBuffer.length >= OPTIMAL_CHUNK_SIZE && !this.isInterrupted && !streamingSession.interrupt) {
           const outChunk = pcmBuffer.slice(0, OPTIMAL_CHUNK_SIZE)
           pcmBuffer = pcmBuffer.slice(OPTIMAL_CHUNK_SIZE)
+          const nowTs = Date.now()
           const mediaMessage = {
             event: 'media',
             streamSid: this.streamSid,
-            media: { payload: outChunk.toString('base64') }
+            media: { payload: outChunk.toString('base64'), encoding: 'audio/linear16', sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs }
           }
           const compatMessage = {
             event: 'audio',
             streamSid: this.streamSid,
-            audio: { payload: outChunk.toString('base64'), encoding: 'pcm_s16le', sampleRate: 8000 }
+            audio: { payload: outChunk.toString('base64'), encoding: 'pcm_s16le', sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs }
           }
           const ttsMessage = {
             event: 'tts',
             streamSid: this.streamSid,
-            audio: { payload: outChunk.toString('base64'), encoding: 'audio/linear16', sampleRate: 8000 }
+            audio: { payload: outChunk.toString('base64'), encoding: 'audio/linear16', sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs }
+          }
+          const muBase64 = this.linear16ChunkToMuLawBase64(outChunk)
+          const muMediaMessage = {
+            event: 'media',
+            streamSid: this.streamSid,
+            media: { payload: muBase64, encoding: 'mulaw', sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs }
           }
           if (this.ws.readyState === WebSocket.OPEN) {
             try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) {}
             try { this.ws.send(JSON.stringify(compatMessage)) } catch (_) {}
             try { this.ws.send(JSON.stringify(ttsMessage)) } catch (_) {}
+            try { this.ws.send(JSON.stringify(muMediaMessage)) } catch (_) {}
           }
           // pacing
           const chunkDurationMs = Math.floor(outChunk.length / BYTES_PER_MS)
           await new Promise(r => setTimeout(r, Math.max(chunkDurationMs - 2, 8)))
           sentCount++
+          this.ttsChunkSeq = (this.ttsChunkSeq || 0) + 1
         }
       })
 
@@ -1721,15 +1767,16 @@ class SarvamWSClient {
         // Flush remaining
         if (pcmBuffer.length > 0) {
           const base64Payload = pcmBuffer.toString('base64')
+          const nowTs = Date.now()
           const mediaMessage = {
             event: 'media',
             streamSid: this.streamSid,
-            media: { payload: base64Payload }
+            media: { payload: base64Payload, encoding: 'audio/linear16', sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs }
           }
           const compatMessage = {
             event: 'audio',
             streamSid: this.streamSid,
-            audio: { payload: base64Payload, encoding: 'pcm_s16le', sampleRate: 8000 }
+            audio: { payload: base64Payload, encoding: 'pcm_s16le', sampleRate: 8000, chunk: this.ttsChunkSeq, timestamp: nowTs }
           }
           if (this.ws.readyState === WebSocket.OPEN) {
             try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) {}
@@ -2079,15 +2126,15 @@ const setupUnifiedVoiceServer = (wss) => {
           })
 
           if (processingRequestId === currentRequestId && streamed) {
-            conversationHistory.push(
-              { role: "user", content: text },
+          conversationHistory.push(
+            { role: "user", content: text },
               { role: "assistant", content: streamed }
-            )
-            if (conversationHistory.length > 10) {
-              conversationHistory = conversationHistory.slice(-10)
-            }
+          )
+          if (conversationHistory.length > 10) {
+            conversationHistory = conversationHistory.slice(-10)
+          }
             console.log("✅ [USER-UTTERANCE] Streaming completed")
-          } else {
+        } else {
             console.log("⏭️ [USER-UTTERANCE] Streaming skipped (newer request in progress)")
           }
         }
