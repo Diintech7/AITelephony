@@ -166,6 +166,128 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   return lang
 }
 
+// Stream OpenAI response to Sarvam WS with throttling and abortion support
+const streamOpenAIToSarvam = async ({
+  text,
+  conversationHistory,
+  detectedLanguage,
+  ws,
+  streamSid,
+  agentConfig,
+  currentRequestId,
+  getProcessingId,
+  setController,
+  callLogger,
+}) => {
+  const timer = createTimer("LLM_STREAMING")
+  try {
+    const systemBase = agentConfig?.systemPrompt || "You are a helpful AI assistant. Keep responses natural and concise for voice."
+    const firstMessage = (agentConfig?.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+    const policyBlock = [
+      "Answer strictly using the info provided above.",
+      "If information isn't present, say so briefly.",
+      "Keep responses suitable for TTS and allow barge-in.",
+    ].join(" ")
+
+    const systemPrompt = `System Prompt:\n${systemBase}\n\n${knowledgeBlock}${policyBlock}`
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...conversationHistory.slice(-6),
+      { role: "user", content: text },
+    ]
+
+    const controller = new AbortController()
+    setController?.(controller)
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        temperature: 0.4,
+        presence_penalty: 0.1,
+        frequency_penalty: 0.2,
+        stream: true,
+        max_tokens: 220,
+      }),
+      signal: controller.signal,
+    })
+
+    if (!response.ok || !response.body) {
+      console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - HTTP ${response.status}`)
+      return null
+    }
+
+    // Prepare Sarvam WS TTS client
+    const tts = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+    await tts.client.ensureConnected()
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder("utf-8")
+    let done = false
+    let buffer = ""
+    let fullText = ""
+    let ttsBuffer = ""
+    let lastSendTs = 0
+
+    const shouldFlush = (chunk) => {
+      if (!chunk) return false
+      const punct = /[\.\!\?\u0964]$/
+      const now = Date.now()
+      return chunk.length >= 40 || punct.test(chunk) || (now - lastSendTs > 140)
+    }
+
+    while (!done && getProcessingId() === currentRequestId) {
+      const { value, done: streamDone } = await reader.read()
+      done = streamDone
+      buffer += decoder.decode(value || new Uint8Array(), { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ""
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith("data:")) continue
+        const payload = trimmed.replace(/^data:\s*/, "")
+        if (payload === "[DONE]") { done = true; break }
+        try {
+          const json = JSON.parse(payload)
+          const delta = json.choices?.[0]?.delta?.content || ""
+          if (delta && getProcessingId() === currentRequestId) {
+            fullText += delta
+            ttsBuffer += delta
+            if (shouldFlush(ttsBuffer)) {
+              tts.client.sendText(ttsBuffer)
+              ttsBuffer = ""
+              lastSendTs = Date.now()
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (ttsBuffer && getProcessingId() === currentRequestId) {
+      tts.client.sendText(ttsBuffer)
+      ttsBuffer = ""
+    }
+    tts.client.flush()
+
+    if (callLogger && fullText) {
+      callLogger.logAIResponse(fullText.trim(), detectedLanguage)
+    }
+    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Stream complete (${fullText.length} chars)`)    
+    return fullText.trim()
+  } catch (error) {
+    console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${error.message}`)
+    try { setController?.(null) } catch (_) {}
+    return null
+  }
+}
+
 // Valid Sarvam voice options
 const VALID_SARVAM_VOICES = new Set([
   "abhilash",
@@ -1359,94 +1481,105 @@ Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if n
   }
 }
 
-// Simplified TTS processor
-class SimplifiedSarvamTTSProcessor {
-  constructor(language, ws, streamSid, callLogger = null) {
+// Sarvam WebSocket streaming client for SIP (8k PCM)
+class SarvamWSClient {
+  constructor(language, ws, streamSid) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
-    this.callLogger = callLogger
-    this.sarvamLanguage = getSarvamLanguage(language)
     this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
-    this.isInterrupted = false
-    this.currentAudioStreaming = null
-    this.totalAudioBytes = 0
+    this.sarvamLanguage = getSarvamLanguage(language)
+    this.socket = null
+    this.connecting = false
+    this.configAck = false
+    this.closed = false
+    this.pendingTexts = []
   }
 
-  interrupt() {
-    this.isInterrupted = true
-    if (this.currentAudioStreaming) {
-      this.currentAudioStreaming.interrupt = true
+  async ensureConnected() {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN && this.configAck) return
+    if (this.connecting) {
+      // wait until open
+      await new Promise((resolve) => {
+        const poll = () => {
+          if (this.socket && this.socket.readyState === WebSocket.OPEN) return resolve()
+          setTimeout(poll, 100)
+        }
+        poll()
+      })
+      return
     }
-  }
-
-  reset(newLanguage) {
-    this.interrupt()
-    if (newLanguage) {
-      this.language = newLanguage
-      this.sarvamLanguage = getSarvamLanguage(newLanguage)
-    }
-    this.isInterrupted = false
-    this.totalAudioBytes = 0
-  }
-
-  async synthesizeAndStream(text) {
-    if (this.isInterrupted) return
-
-    const timer = createTimer("TTS_SYNTHESIS")
-
-    try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
-        },
-        body: JSON.stringify({
-          inputs: [text],
+    this.connecting = true
+    const sarvamUrl = `wss://api.sarvam.ai/text-to-speech/ws?model=bulbul:v2`
+    const s = new WebSocket(sarvamUrl, [`api-subscription-key.${API_KEYS.sarvam}`])
+    this.socket = s
+    this.configAck = false
+    s.onopen = () => {
+      const cfg = {
+        type: 'config',
+        data: {
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
-          pitch: 0,
+          pitch: 0.0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: false,
           enable_preprocessing: true,
-          model: "bulbul:v1",
-        }),
-      })
-
-      if (!response.ok || this.isInterrupted) {
-        if (!this.isInterrupted) {
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
-          throw new Error(`Sarvam API error: ${response.status}`)
+          // Request raw PCM at 8k suitable for SIP
+          output_audio_codec: 'pcm_s16le',
+          speech_sample_rate: 8000,
+          min_buffer_size: 40,
+          max_chunk_length: 140,
         }
-        return
       }
-
-      const responseData = await response.json()
-      const audioBase64 = responseData.audios?.[0]
-
-      if (!audioBase64 || this.isInterrupted) {
-        if (!this.isInterrupted) {
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
-          throw new Error("No audio data received from Sarvam API")
+      try { s.send(JSON.stringify(cfg)) } catch (_) {}
+    }
+    s.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data)
+        if (msg.type === 'config_ack') {
+          this.configAck = true
+          // Flush any buffered texts
+          if (this.pendingTexts.length) {
+            for (const t of this.pendingTexts) this.sendText(t)
+            this.pendingTexts = []
+          }
+        } else if (msg.type === 'audio' && msg.data?.audio) {
+          // msg.data.audio is base64 of PCM s16le at 8k as requested
+          this.streamAudioOptimizedForSIP(msg.data.audio)
         }
-        return
-      }
+      } catch (_) {}
+    }
+    s.onclose = () => {
+      this.configAck = false
+      this.connecting = false
+    }
+    s.onerror = () => {
+      this.connecting = false
+    }
+    // wait briefly for open
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    this.connecting = false
+  }
 
-      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
+  close() {
+    try { this.socket?.close() } catch (_) {}
+    this.socket = null
+    this.configAck = false
+  }
 
-      if (!this.isInterrupted) {
-        await this.streamAudioOptimizedForSIP(audioBase64)
-        const audioBuffer = Buffer.from(audioBase64, "base64")
-        this.totalAudioBytes += audioBuffer.length
-      }
-    } catch (error) {
-      if (!this.isInterrupted) {
-        console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
-        throw error
-      }
+  sendText(text) {
+    if (!text || !text.trim()) return
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.configAck) {
+      this.pendingTexts.push(text)
+      return
+    }
+    const msg = { type: 'text', data: { text } }
+    try { this.socket.send(JSON.stringify(msg)) } catch (_) {}
+  }
+
+  flush() {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      try { this.socket.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
     }
   }
 
@@ -1503,11 +1636,53 @@ class SimplifiedSarvamTTSProcessor {
     this.currentAudioStreaming = null
   }
 
-  getStats() {
-    return {
-      totalAudioBytes: this.totalAudioBytes,
+  // properties required by existing code
+  getStats() { return { totalAudioBytes: this.totalAudioBytes } }
+}
+
+// Simplified TTS processor now proxies to Sarvam WebSocket streaming
+class SimplifiedSarvamTTSProcessor {
+  constructor(language, ws, streamSid, callLogger = null) {
+    this.language = language
+    this.ws = ws
+    this.streamSid = streamSid
+    this.callLogger = callLogger
+    this.client = new SarvamWSClient(language, ws, streamSid)
+    this.isInterrupted = false
+    this.currentAudioStreaming = null
+    this.totalAudioBytes = 0
+  }
+
+  interrupt() {
+    this.isInterrupted = true
+    if (this.currentAudioStreaming) {
+      this.currentAudioStreaming.interrupt = true
     }
   }
+
+  reset(newLanguage) {
+    this.interrupt()
+    if (newLanguage) {
+      this.language = newLanguage
+      this.client = new SarvamWSClient(newLanguage, this.ws, this.streamSid)
+    }
+    this.isInterrupted = false
+    this.totalAudioBytes = 0
+  }
+
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
+    await this.client.ensureConnected()
+    this.client.sendText(text)
+    setTimeout(() => this.client.flush(), 80)
+  }
+
+  // For compatibility when SarvamWSClient pushes audio
+  async streamAudioOptimizedForSIP(audioBase64) {
+    return this.client.streamAudioOptimizedForSIP(audioBase64)
+  }
+
+  getStats() { return { totalAudioBytes: this.totalAudioBytes } }
 }
 
 // Enhanced agent lookup function with isActive check
@@ -1610,6 +1785,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let callDirection = "inbound"
     let agentConfig = null
     let userName = null
+    let openAIStreamController = null
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -1629,7 +1805,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "300")
+        deepgramUrl.searchParams.append("endpointing", "200")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1676,6 +1852,7 @@ const setupUnifiedVoiceServer = (wss) => {
             currentTTS.interrupt()
             isProcessing = false
             processingRequestId++
+            try { openAIStreamController?.abort() } catch (_) {}
           }
 
           if (is_final) {
@@ -1742,13 +1919,11 @@ const setupUnifiedVoiceServer = (wss) => {
         const [
           disconnectionIntent, 
           leadStatus, 
-          whatsappRequest, 
-          aiResponse
+          whatsappRequest
         ] = await Promise.all([
           detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
           detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
-          detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
-          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig)
+          detectWhatsAppRequest(text, conversationHistory, detectedLanguage)
         ])
 
         // Update call logger with detected information
@@ -1777,25 +1952,34 @@ const setupUnifiedVoiceServer = (wss) => {
           return
         }
 
-        if (processingRequestId === currentRequestId && aiResponse) {
-          console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
-          
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(aiResponse)
+        // Stream OpenAI response to Sarvam WS to minimize latency
+        if (processingRequestId === currentRequestId) {
+          console.log("🤖 [USER-UTTERANCE] Starting OpenAI streaming → Sarvam WS")
+          const streamed = await streamOpenAIToSarvam({
+            text,
+            conversationHistory,
+            detectedLanguage,
+            ws,
+            streamSid,
+            agentConfig,
+            currentRequestId,
+            getProcessingId: () => processingRequestId,
+            setController: (c) => { openAIStreamController = c },
+            callLogger
+          })
 
-          conversationHistory.push(
-            { role: "user", content: text },
-            { role: "assistant", content: aiResponse }
-          )
-
-          if (conversationHistory.length > 10) {
-            conversationHistory = conversationHistory.slice(-10)
+          if (processingRequestId === currentRequestId && streamed) {
+            conversationHistory.push(
+              { role: "user", content: text },
+              { role: "assistant", content: streamed }
+            )
+            if (conversationHistory.length > 10) {
+              conversationHistory = conversationHistory.slice(-10)
+            }
+            console.log("✅ [USER-UTTERANCE] Streaming completed")
+          } else {
+            console.log("⏭️ [USER-UTTERANCE] Streaming skipped (newer request in progress)")
           }
-          
-          console.log("✅ [USER-UTTERANCE] Processing completed")
-        } else {
-          console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
         }
       } catch (error) {
         console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
