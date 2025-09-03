@@ -1686,8 +1686,8 @@ const setupUnifiedVoiceServer = (wss) => {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
             if (callLogger && transcript.trim()) {
-              const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
-              callLogger.logUserTranscript(transcript.trim(), detectedLang)
+              // const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
+              callLogger.logUserTranscript(transcript.trim(), currentLanguage || "en")
             }
 
             await processUserUtterance(userUtteranceBuffer)
@@ -1702,8 +1702,8 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (userUtteranceBuffer.trim()) {
           if (callLogger && userUtteranceBuffer.trim()) {
-            const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
+            // const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
+            callLogger.logUserTranscript(userUtteranceBuffer.trim(), currentLanguage || "en")
           }
 
           await processUserUtterance(userUtteranceBuffer)
@@ -1729,13 +1729,9 @@ const setupUnifiedVoiceServer = (wss) => {
       const currentRequestId = ++processingRequestId
 
       try {
-        const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
-        console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
-
-        if (detectedLanguage !== currentLanguage) {
-          console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
-          currentLanguage = detectedLanguage
-        }
+        // Skip dynamic language detection; stick to currentLanguage
+        const detectedLanguage = currentLanguage || "en"
+        console.log("🌐 [USER-UTTERANCE] Using Language:", detectedLanguage)
 
         // Skipping auxiliary detections for speed; only generate AI response
         const aiResponse = await processWithOpenAI(
