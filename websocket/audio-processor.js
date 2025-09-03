@@ -105,17 +105,30 @@ class AudioProcessor extends EventEmitter {
     return processedBuffer
   }
 
-  // Buffer audio chunks for processing
+  // Buffer audio chunks for processing - optimized for low latency
   bufferAudio(audioData) {
     this.audioQueue.push(audioData)
 
-    // Process when we have enough data
-    if (this.audioQueue.length >= 5) {
+    // Reduced buffer size for lower latency (from 5 to 3 chunks)
+    if (this.audioQueue.length >= 3) {
       const combinedBuffer = Buffer.concat(this.audioQueue)
       this.audioQueue = []
 
       const processedBuffer = this.processAudioBuffer(combinedBuffer)
       this.emit("audioProcessed", processedBuffer)
+    }
+  }
+
+  // Low-latency audio processing for real-time applications
+  processLowLatencyAudio(audioData) {
+    try {
+      // Skip buffering for immediate processing
+      const processedBuffer = this.processAudioBuffer(audioData)
+      this.emit("audioProcessed", processedBuffer)
+      return processedBuffer
+    } catch (error) {
+      console.error("❌ [AUDIO] Low-latency processing error:", error)
+      return audioData // Return original on error
     }
   }
 

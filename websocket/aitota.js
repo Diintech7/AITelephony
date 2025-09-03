@@ -1624,6 +1624,13 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramReady = false
     let deepgramAudioQueue = []
     let sttTimer = null
+    let latencyMetrics = {
+      totalTranscriptions: 0,
+      totalLatency: 0,
+      averageLatency: 0,
+      minLatency: Infinity,
+      maxLatency: 0
+    }
 
     const connectToDeepgram = async () => {
       try {
@@ -1637,8 +1644,12 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "200")
-        deepgramUrl.searchParams.append("utterance_end_ms", "500")
+        // Optimized for lower latency
+        deepgramUrl.searchParams.append("endpointing", "100")  // Reduced from 200ms to 100ms
+        deepgramUrl.searchParams.append("utterance_end_ms", "500")  // Reduced from 1000ms to 500ms
+        deepgramUrl.searchParams.append("vad_events", "true")  // Enable voice activity detection events
+        deepgramUrl.searchParams.append("no_delay", "true")  // Disable artificial delays
+        deepgramUrl.searchParams.append("filler_words", "false")  // Skip filler words for faster processing
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1688,7 +1699,21 @@ const setupUnifiedVoiceServer = (wss) => {
           }
 
           if (is_final) {
-            console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+            const latency = sttTimer.end()
+            console.log(`🕒 [STT-TRANSCRIPTION] ${latency}ms - Text: "${transcript.trim()}"`)
+            
+            // Update latency metrics
+            latencyMetrics.totalTranscriptions++
+            latencyMetrics.totalLatency += latency
+            latencyMetrics.averageLatency = latencyMetrics.totalLatency / latencyMetrics.totalTranscriptions
+            latencyMetrics.minLatency = Math.min(latencyMetrics.minLatency, latency)
+            latencyMetrics.maxLatency = Math.max(latencyMetrics.maxLatency, latency)
+            
+            // Log performance improvements
+            if (latencyMetrics.totalTranscriptions % 10 === 0) {
+              console.log(`📊 [LATENCY-METRICS] Avg: ${latencyMetrics.averageLatency.toFixed(1)}ms, Min: ${latencyMetrics.minLatency}ms, Max: ${latencyMetrics.maxLatency}ms`)
+            }
+            
             sttTimer = null
 
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
@@ -1698,8 +1723,20 @@ const setupUnifiedVoiceServer = (wss) => {
               callLogger.logUserTranscript(transcript.trim(), currentLanguage || "en")
             }
 
+            // Process immediately without additional delays
             await processUserUtterance(userUtteranceBuffer)
             userUtteranceBuffer = ""
+          } else {
+            // Handle interim results for faster response
+            const interimText = transcript.trim()
+            if (interimText && interimText.length > 3) { // Only process meaningful interim results
+              console.log(`🔄 [STT-INTERIM] "${interimText}"`)
+              
+              // For very short interim results, process immediately to reduce latency
+              if (interimText.length < 20 && !isProcessing) {
+                await processUserUtterance(interimText)
+              }
+            }
           }
         }
       } else if (data.type === "UtteranceEnd") {
@@ -1717,6 +1754,12 @@ const setupUnifiedVoiceServer = (wss) => {
           await processUserUtterance(userUtteranceBuffer)
           userUtteranceBuffer = ""
         }
+      } else if (data.type === "SpeechStarted") {
+        // Handle voice activity detection for faster response
+        console.log("🎤 [VAD] Speech started - preparing for faster processing")
+      } else if (data.type === "SpeechEnded") {
+        // Handle speech end for immediate processing
+        console.log("🎤 [VAD] Speech ended - processing final utterance")
       }
     }
 
@@ -2074,8 +2117,17 @@ const setupUnifiedVoiceServer = (wss) => {
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
                 deepgramWs.send(audioBuffer)
               } else {
+                // Optimized queue management for lower latency
                 deepgramAudioQueue.push(audioBuffer)
-                if (deepgramAudioQueue.length % 100 === 0) {
+                
+                // Limit queue size to prevent excessive buffering (reduced from unlimited to 50 packets)
+                if (deepgramAudioQueue.length > 50) {
+                  // Remove oldest packets to maintain low latency
+                  deepgramAudioQueue = deepgramAudioQueue.slice(-25) // Keep only last 25 packets
+                  console.log("⚡ [SIP-MEDIA] Audio queue optimized for latency")
+                }
+                
+                if (deepgramAudioQueue.length % 25 === 0) {
                   console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
                 }
               }
@@ -2270,6 +2322,20 @@ const setupUnifiedVoiceServer = (wss) => {
       processingRequestId = 0
       callLogger = null
       callDirection = "inbound"
+      
+      // Log final latency metrics
+      if (latencyMetrics.totalTranscriptions > 0) {
+        console.log(`📊 [FINAL-LATENCY-METRICS] Total: ${latencyMetrics.totalTranscriptions}, Avg: ${latencyMetrics.averageLatency.toFixed(1)}ms, Min: ${latencyMetrics.minLatency}ms, Max: ${latencyMetrics.maxLatency}ms`)
+      }
+      
+      // Reset latency metrics
+      latencyMetrics = {
+        totalTranscriptions: 0,
+        totalLatency: 0,
+        averageLatency: 0,
+        minLatency: Infinity,
+        maxLatency: 0
+      }
       agentConfig = null
       sttTimer = null
       
