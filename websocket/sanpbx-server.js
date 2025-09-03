@@ -146,6 +146,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       console.log(
         `[SANPBX-STREAM] ${streamStartTime} - Starting stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
       )
+      console.log(`[SANPBX-STREAM-MODE] binary_mode=${binaryMediaMode ? 'true' : 'false'}`)
       console.log(
         `[SANPBX-FORMAT] Sending audio -> encoding=${ENCODING}, sample_rate_hz=${SAMPLE_RATE_HZ}, channels=${CHANNELS}, bytes_per_sample=${BYTES_PER_SAMPLE}, chunk_duration_ms=${CHUNK_DURATION_MS}, chunk_size_bytes=${CHUNK_SIZE}`,
       )
@@ -448,6 +449,13 @@ const setupSanPbxWebSocketServer = (ws) => {
           await processUserInput(userUtteranceBuffer)
           userUtteranceBuffer = ""
         }
+      } else {
+        // Log any other Deepgram message types for full visibility
+        try {
+          console.log(`[STT:DG-RAW] ${JSON.stringify(response)}`)
+        } catch (_) {
+          console.log('[STT:DG-RAW] <unserializable message>')
+        }
       }
     })
 
@@ -727,6 +735,9 @@ const setupSanPbxWebSocketServer = (ws) => {
             const audioBuffer = Buffer.from(data.payload, "base64")
             console.log(`[SANPBX-MEDIA-IN] bytes=${audioBuffer.length}, streamId=${data.streamId || streamId}, callId=${data.callId || callId}, channelId=${data.channelId || channelId}`)
             deepgramWs.send(audioBuffer)
+            if (chunkCounter % 25 === 0) {
+              console.log(`[STT:DG-FWD] forwarded_bytes=${audioBuffer.length}`)
+            }
             
             chunkCounter++
             if (chunkCounter % 50 === 0) {
