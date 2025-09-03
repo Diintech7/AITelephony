@@ -1367,7 +1367,7 @@ class SimplifiedSarvamTTSProcessor {
     this.streamSid = streamSid
     this.callLogger = callLogger
     this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
+    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "manisha")
     this.isInterrupted = false
     this.sarvamWs = null
     this.sarvamWsConnected = false
@@ -1375,6 +1375,7 @@ class SimplifiedSarvamTTSProcessor {
     this.isStreamingToSIP = false
     this.totalAudioBytes = 0
     this.currentSarvamRequestId = 0
+    this.configAcked = false
   }
 
   interrupt() {
@@ -1420,11 +1421,18 @@ class SimplifiedSarvamTTSProcessor {
         }
         this.sarvamWsConnected = true
         console.log(`🎙️ [SARVAM-WS] Connected (lang=${this.sarvamLanguage}, voice=${this.voice})`)
+        // Fix misconfiguration: target_language_code must be a BCP-47 code, speaker must be a voice name
+        let resolvedVoice = this.voice
+        const hindiVoices = new Set(["manisha","meera","vidya","arya","anushka","abhilash","karun","hitesh","arvind","amol"])
+        if ((this.sarvamLanguage || "").toLowerCase().startsWith("hi") && !hindiVoices.has((resolvedVoice||"").toLowerCase())) {
+          resolvedVoice = "manisha"
+          console.log(`ℹ️ [SARVAM-WS] Adjusted voice to '${resolvedVoice}' for language ${this.sarvamLanguage}`)
+        }
         const configMessage = {
           type: 'config',
           data: {
-            target_language_code: "manisha",
-            speaker: this.voice,
+            target_language_code: this.sarvamLanguage,
+            speaker: resolvedVoice,
             pitch: 0.0,
             pace: 1.0,
             loudness: 1.0,
@@ -1436,7 +1444,10 @@ class SimplifiedSarvamTTSProcessor {
             enable_preprocessing: false,
           }
         }
-        try { this.sarvamWs.send(JSON.stringify(configMessage)) } catch (_) {}
+        try {
+          console.log("🧩 [SARVAM-WS] Sending config:", JSON.stringify(configMessage))
+          this.sarvamWs.send(JSON.stringify(configMessage))
+        } catch (_) {}
         resolve(true)
       }
 
@@ -1445,6 +1456,7 @@ class SimplifiedSarvamTTSProcessor {
         try {
           const msg = JSON.parse(event.data)
           if (msg.type === 'config_ack') {
+            this.configAcked = true
             console.log('🎙️ [SARVAM-WS] Config acknowledged')
           }
           if (msg.type === 'audio' && msg.data?.audio) {
@@ -1478,6 +1490,11 @@ class SimplifiedSarvamTTSProcessor {
     const connected = await this.connectSarvamWs(requestId).catch(() => false)
     if (!connected || this.isInterrupted || this.currentSarvamRequestId !== requestId) return
 
+    // Wait briefly for config ack to avoid race
+    const startWait = Date.now()
+    while (!this.configAcked && Date.now() - startWait < 400) {
+      await new Promise(r => setTimeout(r, 20))
+    }
     const textMessage = { type: 'text', data: { text } }
     try { this.sarvamWs.send(JSON.stringify(textMessage)) } catch (_) {}
     try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
