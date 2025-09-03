@@ -1410,9 +1410,8 @@ class SimplifiedSarvamTTSProcessor {
           pace: 1.0,
           loudness: 1.0,
           speech_sample_rate: 8000,
-          enable_preprocessing: false,
           enable_preprocessing: true,
-          model: "bulbul:v2",
+          model: "bulbul:v1",
         }),
       })
 
