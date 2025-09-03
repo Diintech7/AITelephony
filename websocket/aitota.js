@@ -1616,6 +1616,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramReady = false
     let deepgramAudioQueue = []
     let sttTimer = null
+    let lastInterimProcessAt = 0
 
     const connectToDeepgram = async () => {
       try {
@@ -1629,7 +1630,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "300")
+        deepgramUrl.searchParams.append("endpointing", "200")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1656,6 +1657,17 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramWs.onclose = () => {
           console.log("🔌 [DEEPGRAM] Connection closed")
           deepgramReady = false
+          // Attempt a quick reconnect if call still active
+          try {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              console.log("🔄 [DEEPGRAM] Attempting quick reconnect in 500ms...")
+              setTimeout(() => {
+                if (!deepgramReady) {
+                  connectToDeepgram().catch(() => {})
+                }
+              }, 500)
+            }
+          } catch (_) {}
         }
       } catch (error) {
         // Silent error handling
@@ -1676,6 +1688,18 @@ const setupUnifiedVoiceServer = (wss) => {
             currentTTS.interrupt()
             isProcessing = false
             processingRequestId++
+          }
+
+          // Opportunistic early processing on strong interim hypotheses
+          if (!is_final) {
+            const text = transcript.trim()
+            const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
+            const longPhrase = text.length >= 40
+            const nowTs = Date.now()
+            if ((endsWithPunct || longPhrase) && nowTs - lastInterimProcessAt > 600) {
+              lastInterimProcessAt = nowTs
+              try { await processUserUtterance(text) } catch (_) {}
+            }
           }
 
           if (is_final) {
@@ -2100,7 +2124,11 @@ const setupUnifiedVoiceServer = (wss) => {
                 deepgramWs.send(audioBuffer)
               } else {
                 deepgramAudioQueue.push(audioBuffer)
-                if (deepgramAudioQueue.length % 100 === 0) {
+                // Cap queue to avoid memory/latency buildup
+                if (deepgramAudioQueue.length > 2000) {
+                  deepgramAudioQueue.splice(0, deepgramAudioQueue.length - 2000)
+                }
+                if (deepgramAudioQueue.length % 200 === 0) {
                   console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
                 }
               }
