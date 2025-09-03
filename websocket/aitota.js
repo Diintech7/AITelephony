@@ -1110,7 +1110,7 @@ const processWithOpenAI = async (
   userName = null,
 ) => {
   const timer = createTimer("LLM_PROCESSING")
-
+  
   try {
     // Simplified system prompt for faster processing
     const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
@@ -1401,7 +1401,7 @@ class SimplifiedSarvamTTSProcessor {
 
     try {
       const controller = new AbortController()
-      const ttsTimeout = setTimeout(() => controller.abort(), 3500)
+      const ttsTimeout = setTimeout(() => controller.abort(), 5000)
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
