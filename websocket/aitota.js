@@ -1064,9 +1064,9 @@ class EnhancedCallLogger {
       return false
     }
 
-    // Send if user is VVI (very very interested)
-    if (this.currentLeadStatus === 'vvi') {
-      console.log(`📨 [WHATSAPP-LOGIC] Sending - user is VVI`)
+    // Send for any lead status except 'not_connected'
+    if (this.currentLeadStatus && this.currentLeadStatus !== 'not_connected') {
+      console.log(`📨 [WHATSAPP-LOGIC] Sending - lead status is ${this.currentLeadStatus}`)
       return true
     }
 
@@ -1076,7 +1076,7 @@ class EnhancedCallLogger {
       return true
     }
 
-    console.log(`📨 [WHATSAPP-LOGIC] Skipping - not VVI and no request`)
+    console.log(`📨 [WHATSAPP-LOGIC] Skipping - status is not_connected and no request`)
     return false
   }
 
