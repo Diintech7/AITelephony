@@ -3,11 +3,11 @@ require("dotenv").config()
 
 // API Keys from environment
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY
-const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
 // Validate API keys
-if (!DEEPGRAM_API_KEY || !ELEVEN_API_KEY || !OPENAI_API_KEY) {
+if (!DEEPGRAM_API_KEY || !SARVAM_API_KEY || !OPENAI_API_KEY) {
   console.error("Missing required API keys in environment variables")
   process.exit(1)
 }
@@ -116,10 +116,10 @@ const setupSanPbxWebSocketServer = (ws) => {
   }
 
   /**
-   * Stream raw PCM (16-bit, mono) audio to SanIPPBX using reverse-media
-   * Default: 44.1kHz, 20ms chunks (1764 bytes)
+   * Stream raw PCM (16-bit, mono, 8kHz) audio to SanIPPBX using reverse-media
+   * Chunks: 20ms (320 bytes) to match PBX expectations
    */
-  const streamAudioToSanIPPBX = async (pcmBase64, opts = {}) => {
+  const streamAudioToSanIPPBX = async (pcmBase64) => {
     if (!streamId || !callId || !channelId) {
       console.error("[SANPBX] Missing required IDs for streaming")
       return
@@ -128,13 +128,14 @@ const setupSanPbxWebSocketServer = (ws) => {
     try {
       const audioBuffer = Buffer.from(pcmBase64, "base64")
       
+      // SanIPPBX format: 8kHz, 16-bit PCM, mono, 20ms chunks
+      // 8000 samples/sec * 0.02 sec * 2 bytes = 320 bytes per chunk
+      const CHUNK_SIZE = 320 // 20ms chunks for 8kHz 16-bit mono
       const CHUNK_DURATION_MS = 20
       const BYTES_PER_SAMPLE = 2
       const CHANNELS = 1
       const ENCODING = "LINEAR16"
-      const SAMPLE_RATE_HZ = Number(opts.sampleRateHz) || 44100
-      // samples per 20ms = sampleRate * 0.02; bytes = samples * 2 (16-bit)
-      const CHUNK_SIZE = Math.round(SAMPLE_RATE_HZ * 0.02) * BYTES_PER_SAMPLE
+      const SAMPLE_RATE_HZ = 8000
       
       let position = 0
       let currentChunk = 1
@@ -151,7 +152,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       // Spec conformance pre-check (one-time per stream)
       console.log(
-        `[SPEC-CHECK:PRE] event=reverse-media, sample_rate=${SAMPLE_RATE_HZ}, channels=1, encoding=LINEAR16, chunk_bytes=${CHUNK_SIZE}, chunk_durn_ms=${CHUNK_DURATION_MS}`,
+        `[SPEC-CHECK:PRE] event=reverse-media, sample_rate=8000, channels=1, encoding=LINEAR16, chunk_bytes=320, chunk_durn_ms=20`,
       )
 
       let chunksSuccessfullySent = 0
@@ -184,7 +185,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             const eventOk = usedEventName === "reverse-media"
             const sizeOk = paddedChunk.length === CHUNK_SIZE
             const durOk = CHUNK_DURATION_MS === 20
-            const fmtOk = ENCODING === "LINEAR16" && CHANNELS === 1
+            const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
             console.log(
               `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${eventOk} (used=${usedEventName}), size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS}), format_ok=${fmtOk}`,
             )
@@ -194,11 +195,13 @@ const setupSanPbxWebSocketServer = (ws) => {
               )
             }
             if (!sizeOk) {
-              console.warn(`[SPEC-WARN] Chunk size should be ${CHUNK_SIZE} bytes for 20ms @ ${SAMPLE_RATE_HZ}Hz 16-bit mono.`)
+              console.warn(
+                `[SPEC-WARN] Chunk size should be 320 bytes for 20ms @ 8kHz 16-bit mono.`,
+              )
             }
             if (!fmtOk) {
               console.warn(
-                `[SPEC-WARN] Format should be LINEAR16, ${SAMPLE_RATE_HZ} Hz, 1 channel. Current: encoding=${ENCODING}, sample_rate_hz=${SAMPLE_RATE_HZ}, channels=${CHANNELS}`,
+                `[SPEC-WARN] Format should be LINEAR16, 8000 Hz, 1 channel. Current: encoding=${ENCODING}, sample_rate_hz=${SAMPLE_RATE_HZ}, channels=${CHANNELS}`,
               )
             }
             firstChunkSpecChecked = true
@@ -257,40 +260,52 @@ const setupSanPbxWebSocketServer = (ws) => {
   }
 
   /**
-   * Text-to-speech via ElevenLabs REST at 44.1kHz PCM mono
+   * Optimized text-to-speech with Sarvam API for 8kHz output
    */
-  const synthesizeAndStreamAudio = async (text, language = "en") => {
+  const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
     try {
       const ttsStartTime = new Date().toISOString()
       console.log(`[TTS-START] ${ttsStartTime} - Starting TTS for: "${text}"`)
 
       const startTime = Date.now()
 
-      const VOICE_ID = 'JBFqnCBsd6RMkjVDRZzb' // default voice; can be made configurable
-      // Request raw PCM 44.1kHz mono via REST
-      const url = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=pcm_44100`
-      const resp = await fetch(url, {
-        method: 'POST',
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 3500)
+
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
         headers: {
-          'xi-api-key': ELEVEN_API_KEY,
-          'Content-Type': 'application/json',
-          'Accept': 'application/octet-stream',
+          "Content-Type": "application/json",
+          "API-Subscription-Key": SARVAM_API_KEY,
+          Connection: "keep-alive",
         },
         body: JSON.stringify({
-          text: text,
-          model_id: 'eleven_multilingual_v2',
-          voice_settings: { stability: 0.5, similarity_boost: 0.7 },
+          inputs: [text],
+          target_language_code: language,
+          speaker: "meera",
+          pitch: 0,
+          pace: 1.55,
+          loudness: 1.0,
+          speech_sample_rate: 8000, // FIXED: 8kHz to match SanIPPBX format
+          enable_preprocessing: true,
+          model: "bulbul:v1",
         }),
+        signal: controller.signal,
       })
 
-      if (!resp.ok) {
-        const errTxt = await resp.text().catch(() => '')
-        throw new Error(`ElevenLabs error ${resp.status}: ${errTxt}`)
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Sarvam API error: ${response.status} - ${errorText}`)
       }
 
-      const arrayBuf = await resp.arrayBuffer()
-      const audioBuffer = Buffer.from(arrayBuf)
-      const audioBase64 = audioBuffer.toString('base64')
+      const data = await response.json()
+      const audioBase64 = data.audios?.[0]
+
+      if (!audioBase64) {
+        throw new Error("No audio data received from Sarvam")
+      }
 
       const ttsTime = Date.now() - startTime
       console.log(`[TTS] Audio generated in ${ttsTime}ms, size: ${audioBase64.length} chars`)
@@ -298,16 +313,18 @@ const setupSanPbxWebSocketServer = (ws) => {
       const streamStartTime = new Date().toISOString()
       console.log(`[SANPBX-STREAM-START] ${streamStartTime} - Starting streaming to SanIPPBX`)
 
-      // Stream audio in SanIPPBX format (reverse-media) at 44.1kHz
-      await streamAudioToSanIPPBX(audioBase64, { sampleRateHz: 44100 })
+      // Convert WAV (if provided) to raw PCM 16-bit mono 8kHz before streaming
+      const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
+
+      // Stream audio in SanIPPBX format (reverse-media)
+      await streamAudioToSanIPPBX(pcmBase64)
       
     } catch (error) {
       console.error("[TTS] Error:", error.message)
 
       // Send simple silence as fallback
-      const fallbackPcmBytes = Math.round(44100 * 0.5) * 2 // 0.5s silence @ 44.1kHz, 16-bit
-      const fallbackAudio = Buffer.alloc(fallbackPcmBytes).toString("base64")
-      await streamAudioToSanIPPBX(fallbackAudio, { sampleRateHz: 44100 })
+      const fallbackAudio = Buffer.alloc(8000).toString("base64") // 1 second of silence
+      await streamAudioToSanIPPBX(fallbackAudio)
     }
   }
 
