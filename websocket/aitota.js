@@ -1411,7 +1411,7 @@ class SimplifiedSarvamTTSProcessor {
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
           pitch: 0,
-          pace: 1.55,
+          pace: 1,
           loudness: 1.0,
           speech_sample_rate: 8000,
           enable_preprocessing: true,
