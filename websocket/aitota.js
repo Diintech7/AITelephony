@@ -4,6 +4,8 @@ const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 const Credit = require("../models/Credit")
+const { spawn } = require('child_process')
+const ffmpegPath = require('ffmpeg-static')
 
 // Import franc with fallback for different versions
 let franc;
@@ -1544,8 +1546,12 @@ class SarvamWSClient {
             this.pendingTexts = []
           }
         } else if (msg.type === 'audio' && msg.data?.audio) {
-          // msg.data.audio is base64 of PCM s16le at 8k as requested
-          this.streamAudioOptimizedForSIP(msg.data.audio)
+          // If Sarvam returns MP3, transcode to PCM s16le 8k quickly using ffmpeg; otherwise stream directly
+          if (msg.data.format === 'mp3' || /mp3/i.test(msg.data.mime || '')) {
+            this.transcodeMp3ToPcmAndStream(msg.data.audio)
+          } else {
+            this.streamAudioOptimizedForSIP(msg.data.audio)
+          }
         }
       } catch (_) {}
     }
@@ -1638,6 +1644,74 @@ class SarvamWSClient {
 
   // properties required by existing code
   getStats() { return { totalAudioBytes: this.totalAudioBytes } }
+
+  // Low-latency MP3→PCM using ffmpeg process piping
+  transcodeMp3ToPcmAndStream(audioBase64) {
+    if (this.isInterrupted) return
+    try {
+      const mp3Buffer = Buffer.from(audioBase64, 'base64')
+      const child = spawn(ffmpegPath, [
+        '-hide_banner', '-loglevel', 'error',
+        '-f', 'mp3', '-i', 'pipe:0',
+        '-ac', '1', '-ar', '8000', '-acodec', 'pcm_s16le',
+        '-f', 's16le', 'pipe:1'
+      ])
+
+      const streamingSession = { interrupt: false }
+      this.currentAudioStreaming = streamingSession
+
+      const SAMPLE_RATE = 8000
+      const BYTES_PER_SAMPLE = 2
+      const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+      const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+
+      let pcmBuffer = Buffer.alloc(0)
+
+      child.stdout.on('data', async (chunk) => {
+        if (this.isInterrupted || streamingSession.interrupt) return
+        pcmBuffer = Buffer.concat([pcmBuffer, chunk])
+        // Stream out in telephony-friendly chunks as they accumulate
+        while (pcmBuffer.length >= OPTIMAL_CHUNK_SIZE && !this.isInterrupted && !streamingSession.interrupt) {
+          const outChunk = pcmBuffer.slice(0, OPTIMAL_CHUNK_SIZE)
+          pcmBuffer = pcmBuffer.slice(OPTIMAL_CHUNK_SIZE)
+          const mediaMessage = {
+            event: 'media',
+            streamSid: this.streamSid,
+            media: { payload: outChunk.toString('base64') }
+          }
+          if (this.ws.readyState === WebSocket.OPEN) {
+            try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) {}
+          }
+          // pacing
+          const chunkDurationMs = Math.floor(outChunk.length / BYTES_PER_MS)
+          await new Promise(r => setTimeout(r, Math.max(chunkDurationMs - 2, 8)))
+        }
+      })
+
+      child.stdout.on('end', async () => {
+        if (this.isInterrupted || streamingSession.interrupt) return
+        // Flush remaining
+        if (pcmBuffer.length > 0) {
+          const mediaMessage = {
+            event: 'media',
+            streamSid: this.streamSid,
+            media: { payload: pcmBuffer.toString('base64') }
+          }
+          if (this.ws.readyState === WebSocket.OPEN) {
+            try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) {}
+          }
+        }
+        this.currentAudioStreaming = null
+      })
+
+      child.stderr.on('data', () => {})
+
+      child.on('error', () => { this.currentAudioStreaming = null })
+      child.on('close', () => { this.currentAudioStreaming = null })
+
+      child.stdin.end(mp3Buffer)
+    } catch (_) {}
+  }
 }
 
 // Simplified TTS processor now proxies to Sarvam WebSocket streaming
