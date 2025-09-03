@@ -1423,7 +1423,7 @@ class SimplifiedSarvamTTSProcessor {
         const configMessage = {
           type: 'config',
           data: {
-            target_language_code: this.sarvamLanguage,
+            target_language_code: "manisha",
             speaker: this.voice,
             pitch: 0.0,
             pace: 1.0,
