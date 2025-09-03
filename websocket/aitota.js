@@ -1610,14 +1610,12 @@ const setupUnifiedVoiceServer = (wss) => {
     let callDirection = "inbound"
     let agentConfig = null
     let userName = null
-    let openAIStreamController = null
 
     // Deepgram WebSocket connection
     let deepgramWs = null
     let deepgramReady = false
     let deepgramAudioQueue = []
     let sttTimer = null
-    let lastInterimProcessAt = 0
 
     const connectToDeepgram = async () => {
       try {
@@ -1631,9 +1629,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("punctuate", "true")
-        // Tighter endpointing for faster UtteranceEnd
-        deepgramUrl.searchParams.append("endpointing", "120")
+        deepgramUrl.searchParams.append("endpointing", "300")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1680,19 +1676,6 @@ const setupUnifiedVoiceServer = (wss) => {
             currentTTS.interrupt()
             isProcessing = false
             processingRequestId++
-            try { openAIStreamController?.abort() } catch (_) {}
-          }
-
-          // Opportunistic early processing on strong interim hypotheses to cut latency
-          if (!is_final) {
-            const text = transcript.trim()
-            const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
-            const longPhrase = text.length >= 35
-            const nowTs = Date.now()
-            if ((endsWithPunct || longPhrase) && nowTs - lastInterimProcessAt > 600) {
-              lastInterimProcessAt = nowTs
-              try { await processUserUtterance(text) } catch (_) {}
-            }
           }
 
           if (is_final) {
@@ -1759,11 +1742,13 @@ const setupUnifiedVoiceServer = (wss) => {
         const [
           disconnectionIntent, 
           leadStatus, 
-          whatsappRequest
+          whatsappRequest, 
+          aiResponse
         ] = await Promise.all([
           detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
           detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
-          detectWhatsAppRequest(text, conversationHistory, detectedLanguage)
+          detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
+          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig)
         ])
 
         // Update call logger with detected information
@@ -1792,34 +1777,25 @@ const setupUnifiedVoiceServer = (wss) => {
           return
         }
 
-        // Stream OpenAI response to Sarvam WS to minimize latency
-        if (processingRequestId === currentRequestId) {
-          console.log("🤖 [USER-UTTERANCE] Starting OpenAI streaming → Sarvam WS")
-          const streamed = await streamOpenAIToSarvam({
-            text,
-            conversationHistory,
-            detectedLanguage,
-            ws,
-            streamSid,
-            agentConfig,
-            currentRequestId,
-            getProcessingId: () => processingRequestId,
-            setController: (c) => { openAIStreamController = c },
-            callLogger
-          })
+        if (processingRequestId === currentRequestId && aiResponse) {
+          console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
+          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+          
+          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          await currentTTS.synthesizeAndStream(aiResponse)
 
-          if (processingRequestId === currentRequestId && streamed) {
           conversationHistory.push(
             { role: "user", content: text },
-              { role: "assistant", content: streamed }
+            { role: "assistant", content: aiResponse }
           )
+
           if (conversationHistory.length > 10) {
             conversationHistory = conversationHistory.slice(-10)
           }
-            console.log("✅ [USER-UTTERANCE] Streaming completed")
+          
+          console.log("✅ [USER-UTTERANCE] Processing completed")
         } else {
-            console.log("⏭️ [USER-UTTERANCE] Streaming skipped (newer request in progress)")
-          }
+          console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
         }
       } catch (error) {
         console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
