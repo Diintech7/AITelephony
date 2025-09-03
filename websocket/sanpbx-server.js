@@ -703,6 +703,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           break
 
         case "media":
+          console.log(data)
           // Forward audio data to Deepgram for transcription
           if (data.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             const audioBuffer = Buffer.from(data.payload, "base64")
