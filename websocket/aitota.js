@@ -1647,8 +1647,9 @@ const setupUnifiedVoiceServer = (wss) => {
         // Optimized for lower latency (only using supported parameters)
         deepgramUrl.searchParams.append("endpointing", "100")  // Reduced from 200ms to 100ms
         deepgramUrl.searchParams.append("utterance_end_ms", "500")  // Reduced from 1000ms to 500ms
-        deepgramUrl.searchParams.append("vad_events", "true")  // Enable voice activity detection events
 
+        console.log("🔗 [DEEPGRAM] Connecting to:", deepgramUrl.toString())
+        
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         })
@@ -1766,12 +1767,6 @@ const setupUnifiedVoiceServer = (wss) => {
           await processUserUtterance(userUtteranceBuffer)
           userUtteranceBuffer = ""
         }
-      } else if (data.type === "SpeechStarted") {
-        // Handle voice activity detection for faster response
-        console.log("🎤 [VAD] Speech started - preparing for faster processing")
-      } else if (data.type === "SpeechEnded") {
-        // Handle speech end for immediate processing
-        console.log("🎤 [VAD] Speech ended - processing final utterance")
       }
     }
 
