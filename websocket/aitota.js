@@ -1629,9 +1629,6 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "100")
-        deepgramUrl.searchParams.append("utterance_end_ms", "500")
-        deepgramUrl.searchParams.append("vad_events", "true")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1672,7 +1669,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
-        const confidence = data.channel?.alternatives?.[0]?.confidence || 0
 
         if (transcript?.trim()) {
           if (currentTTS && isProcessing) {
@@ -1681,29 +1677,19 @@ const setupUnifiedVoiceServer = (wss) => {
             processingRequestId++
           }
 
-          // Process interim results with high confidence (>0.8) or final results
-          if (is_final || (!is_final && confidence > 0.8 && transcript.trim().length > 3)) {
-            console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}" (${is_final ? 'FINAL' : 'INTERIM'}, conf: ${confidence.toFixed(2)})`)
-            
-            if (is_final) {
-              sttTimer = null
-              userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
+          if (is_final) {
+            console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+            sttTimer = null
 
-              if (callLogger && transcript.trim()) {
-                const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
-                callLogger.logUserTranscript(transcript.trim(), detectedLang)
-              }
+            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
-              await processUserUtterance(userUtteranceBuffer)
-              userUtteranceBuffer = ""
-            } else {
-              // Process high-confidence interim results immediately
-              if (callLogger && transcript.trim()) {
-                const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
-                callLogger.logUserTranscript(transcript.trim(), detectedLang)
-              }
-              await processUserUtterance(transcript.trim())
+            if (callLogger && transcript.trim()) {
+              const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
+              callLogger.logUserTranscript(transcript.trim(), detectedLang)
             }
+
+            await processUserUtterance(userUtteranceBuffer)
+            userUtteranceBuffer = ""
           }
         }
       } else if (data.type === "UtteranceEnd") {
