@@ -1397,24 +1397,29 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("TTS_SYNTHESIS")
 
     try {
+      const controller = new AbortController()
+      const ttsTimeout = setTimeout(() => controller.abort(), 3500)
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "API-Subscription-Key": API_KEYS.sarvam,
+          "Connection": "keep-alive",
         },
         body: JSON.stringify({
           inputs: [text],
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
           pitch: 0,
-          pace: 1.0,
+          pace: 1.55,
           loudness: 1.0,
           speech_sample_rate: 8000,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
+        signal: controller.signal,
       })
+      clearTimeout(ttsTimeout)
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
