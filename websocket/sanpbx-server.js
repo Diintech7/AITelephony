@@ -625,7 +625,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       // If message is Buffer or not valid JSON, treat as binary media
       if (Buffer.isBuffer(message)) {
         const buf = message
-        console.log(`[SANPBX-RAW-IN:BINARY] bytes=${buf.length}`)
+        console.log(`[SANPBX-RAW-IN:BINARY] bytes=${buf}`)
         // Auto-enable binary mode on first binary frame
         if (!binaryMediaMode && buf.length === 320) {
           binaryMediaMode = true
