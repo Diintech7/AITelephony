@@ -1644,12 +1644,10 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        // Optimized for lower latency
+        // Optimized for lower latency (only using supported parameters)
         deepgramUrl.searchParams.append("endpointing", "100")  // Reduced from 200ms to 100ms
         deepgramUrl.searchParams.append("utterance_end_ms", "500")  // Reduced from 1000ms to 500ms
         deepgramUrl.searchParams.append("vad_events", "true")  // Enable voice activity detection events
-        deepgramUrl.searchParams.append("no_delay", "true")  // Disable artificial delays
-        deepgramUrl.searchParams.append("filler_words", "false")  // Skip filler words for faster processing
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1670,12 +1668,26 @@ const setupUnifiedVoiceServer = (wss) => {
 
         deepgramWs.onerror = (error) => {
           console.log("❌ [DEEPGRAM] Connection error:", error.message)
+          console.log("❌ [DEEPGRAM] Error details:", error)
           deepgramReady = false
         }
 
-        deepgramWs.onclose = () => {
+        deepgramWs.onclose = (event) => {
           console.log("🔌 [DEEPGRAM] Connection closed")
+          console.log("🔌 [DEEPGRAM] Close code:", event.code, "Reason:", event.reason)
           deepgramReady = false
+          
+          // Retry connection if it was closed unexpectedly
+          if (event.code !== 1000 && event.code !== 1001) {
+            console.log("🔄 [DEEPGRAM] Attempting to reconnect...")
+            setTimeout(() => {
+              if (streamSid && !deepgramReady) {
+                connectToDeepgram().catch(err => 
+                  console.log("❌ [DEEPGRAM] Reconnection failed:", err.message)
+                )
+              }
+            }, 2000)
+          }
         }
       } catch (error) {
         // Silent error handling
