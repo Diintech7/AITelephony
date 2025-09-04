@@ -1542,7 +1542,7 @@ class SimplifiedSarvamTTSProcessor {
           this.sarvamWsConnected = true
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected`)
 
-          // Send initial config message with ultra-low latency settings
+          // Send initial config message
           const configMessage = {
             type: "config",
             data: {
@@ -1721,7 +1721,7 @@ class SimplifiedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2 // linear16 is 16-bit, so 2 bytes
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS) // Reduced from 40ms to 20ms for faster streaming
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // 40ms chunks for SIP
 
     while (!this.isInterrupted) {
       if (this.audioQueue.length > 0) {
@@ -1757,7 +1757,7 @@ class SimplifiedSarvamTTSProcessor {
 
           if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
             const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-            const delayMs = Math.max(chunkDurationMs - 5, 5) // Reduced delay for faster streaming
+            const delayMs = Math.max(chunkDurationMs - 2, 10) // Small delay to prevent buffer underrun
             await new Promise((resolve) => setTimeout(resolve, delayMs))
           }
 
@@ -1765,7 +1765,7 @@ class SimplifiedSarvamTTSProcessor {
         }
       } else {
         // No audio in queue, wait for a short period or until new audio arrives
-        await new Promise((resolve) => setTimeout(resolve, 20)) // Reduced from 50ms to 20ms for faster response
+        await new Promise((resolve) => setTimeout(resolve, 50)) // Wait 50ms
       }
     }
     this.isStreamingToSIP = false
@@ -1905,13 +1905,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        // Ultra-low latency optimizations
-        deepgramUrl.searchParams.append("endpointing", "100") // Reduced from 300ms to 100ms
-        deepgramUrl.searchParams.append("utterance_end_ms", "500") // Reduced from 1000ms to 500ms
-        deepgramUrl.searchParams.append("vad_events", "true") // Voice activity detection
-        deepgramUrl.searchParams.append("punctuate", "true") // Enable punctuation for better sentence detection
-        deepgramUrl.searchParams.append("diarize", "false") // Disable speaker diarization for speed
-        deepgramUrl.searchParams.append("multichannel", "false") // Single channel for speed
+        // Reverted to original working parameters - latency optimizations will come from other areas
 
         console.log("🔗 [DEEPGRAM] Connecting to:", deepgramUrl.toString())
         
@@ -2403,14 +2397,14 @@ const setupUnifiedVoiceServer = (wss) => {
                 // Ultra-optimized queue management for minimal latency
                 deepgramAudioQueue.push(audioBuffer)
                 
-                // Ultra-aggressive queue limiting for minimal latency
-                if (deepgramAudioQueue.length > 20) { // Reduced from 30 to 20
+                // More aggressive queue limiting for ultra-low latency
+                if (deepgramAudioQueue.length > 30) { // Reduced from 50 to 30
                   // Keep only the most recent packets for minimal latency
-                  deepgramAudioQueue = deepgramAudioQueue.slice(-10) // Reduced from 15 to 10
+                  deepgramAudioQueue = deepgramAudioQueue.slice(-15) // Reduced from 25 to 15
                   console.log("⚡ [SIP-MEDIA] Audio queue ultra-optimized for minimal latency")
                 }
                 
-                if (deepgramAudioQueue.length % 10 === 0) { // Reduced from 15 to 10
+                if (deepgramAudioQueue.length % 15 === 0) { // Reduced from 25 to 15
                   console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
                 }
               }
