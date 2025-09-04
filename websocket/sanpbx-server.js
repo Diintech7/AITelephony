@@ -264,7 +264,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           target_language_code: language,
           speaker: "meera",
           pitch: 0,
-          pace: 1.55,
+          pace: 1,
           loudness: 1.0,
           speech_sample_rate: 8000, // FIXED: 8kHz to match SanIPPBX format
           enable_preprocessing: true,
