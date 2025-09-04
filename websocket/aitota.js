@@ -1401,7 +1401,7 @@ class SimplifiedSarvamTTSProcessor {
 
     try {
       const controller = new AbortController()
-      const ttsTimeout = setTimeout(() => controller.abort(), 5000)
+      const ttsTimeout = setTimeout(() => controller.abort(), 10000)
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
