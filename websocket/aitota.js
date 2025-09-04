@@ -1100,16 +1100,17 @@ class EnhancedCallLogger {
   }
 }
 
-// Optimized OpenAI processing with reduced latency
-const processWithOpenAI = async (
+// Streaming OpenAI processing with direct Sarvam connection
+const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
   detectedLanguage,
   callLogger,
   agentConfig,
   userName = null,
+  ttsProcessor = null,
 ) => {
-  const timer = createTimer("LLM_PROCESSING")
+  const timer = createTimer("LLM_STREAMING")
   
   try {
     // Simplified system prompt for faster processing
@@ -1134,7 +1135,7 @@ const processWithOpenAI = async (
 
     // Add timeout control and abort controller
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 2000) // 2 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout for streaming
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -1147,7 +1148,7 @@ const processWithOpenAI = async (
         messages,
         max_tokens: 60, // Reduced from 120 to 60
         temperature: 0.3,
-        stream: false, // Explicitly set to false
+        stream: true, // Enable streaming
       }),
       signal: controller.signal,
     })
@@ -1155,14 +1156,94 @@ const processWithOpenAI = async (
     clearTimeout(timeoutId)
 
     if (!response.ok) {
-      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
+      console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${response.status}`)
       return null
     }
 
-    const data = await response.json()
-    let fullResponse = data.choices[0]?.message?.content?.trim()
+    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Starting streaming response`)
 
-    console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
+    let fullResponse = ""
+    let buffer = ""
+    let sentenceBuffer = ""
+    let isFirstChunk = true
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ""
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            if (data === '[DONE]') {
+              // Send any remaining text
+              if (sentenceBuffer.trim()) {
+                if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
+                  const textMessage = {
+                    type: "text",
+                    data: { text: sentenceBuffer.trim() },
+                  }
+                  ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
+                  console.log(`📝 [LLM→SARVAM] Sent final chunk: "${sentenceBuffer.trim()}"`)
+                }
+                fullResponse += sentenceBuffer
+                sentenceBuffer = ""
+              }
+              break
+            }
+
+            try {
+              const parsed = JSON.parse(data)
+              const content = parsed.choices?.[0]?.delta?.content
+              
+              if (content) {
+                fullResponse += content
+                sentenceBuffer += content
+
+                // Send complete sentences to Sarvam immediately
+                const sentences = sentenceBuffer.split(/([.!?।]+)/)
+                if (sentences.length > 1) {
+                  // Send all complete sentences except the last incomplete one
+                  const completeSentences = sentences.slice(0, -1).join('')
+                  if (completeSentences.trim()) {
+                    if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
+                      const textMessage = {
+                        type: "text",
+                        data: { text: completeSentences.trim() },
+                      }
+                      ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
+                      console.log(`📝 [LLM→SARVAM] Sent chunk: "${completeSentences.trim()}"`)
+                    }
+                  }
+                  // Keep the last incomplete sentence in buffer
+                  sentenceBuffer = sentences[sentences.length - 1]
+                }
+              }
+            } catch (parseError) {
+              // Ignore parsing errors for malformed chunks
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    // Send flush signal to Sarvam
+    if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
+      const flushMessage = { type: "flush" }
+      ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage))
+      console.log(`📝 [LLM→SARVAM] Sent flush signal`)
+    }
+
+    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Streaming completed`)
 
     // Simplified follow-up logic
     if (fullResponse && !/[?]\s*$/.test(fullResponse)) {
@@ -1186,9 +1267,9 @@ const processWithOpenAI = async (
     return fullResponse
   } catch (error) {
     if (error.name === 'AbortError') {
-      console.log(`⏰ [LLM-PROCESSING] ${timer.end()}ms - Timeout after 2 seconds`)
+      console.log(`⏰ [LLM-STREAMING] ${timer.end()}ms - Timeout after 5 seconds`)
     } else {
-      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+      console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${error.message}`)
     }
     return null
   }
@@ -1545,6 +1626,68 @@ class SimplifiedSarvamTTSProcessor {
     }
   }
 
+  // New method for streaming text input (used by OpenAI streaming)
+  async startStreamingSynthesis(requestId) {
+    if (this.isInterrupted) return
+
+    this.audioQueue = [] // Clear queue for new synthesis
+    this.isStreamingToSIP = false // Reset streaming flag
+
+    const timer = createTimer("TTS_STREAMING_START")
+
+    try {
+      const connected = await this.connectSarvamWs(requestId)
+      if (!connected || this.isInterrupted || this.currentSarvamRequestId !== requestId) {
+        console.log("❌ [TTS-STREAMING] Sarvam WS not connected or interrupted/outdated request, aborting streaming synthesis")
+        return false
+      }
+
+      console.log(`🕒 [TTS-STREAMING] ${timer.end()}ms - Streaming synthesis started`)
+      return true
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.error(`❌ [TTS-STREAMING] ${timer.end()}ms - Error starting streaming synthesis: ${error.message}`)
+        throw error
+      }
+      return false
+    }
+  }
+
+  // Method to send streaming text chunks to Sarvam
+  sendStreamingText(textChunk) {
+    if (this.isInterrupted || !this.sarvamWs || !this.sarvamWsConnected) {
+      return false
+    }
+
+    try {
+      const textMessage = {
+        type: "text",
+        data: { text: textChunk },
+      }
+      this.sarvamWs.send(JSON.stringify(textMessage))
+      return true
+    } catch (error) {
+      console.error(`❌ [TTS-STREAMING] Error sending text chunk: ${error.message}`)
+      return false
+    }
+  }
+
+  // Method to send flush signal
+  sendFlushSignal() {
+    if (this.isInterrupted || !this.sarvamWs || !this.sarvamWsConnected) {
+      return false
+    }
+
+    try {
+      const flushMessage = { type: "flush" }
+      this.sarvamWs.send(JSON.stringify(flushMessage))
+      return true
+    } catch (error) {
+      console.error(`❌ [TTS-STREAMING] Error sending flush signal: ${error.message}`)
+      return false
+    }
+  }
+
   async startStreamingToSIP(requestId) {
     if (this.isStreamingToSIP || this.isInterrupted || this.currentSarvamRequestId !== requestId) {
       return // Already streaming or interrupted/outdated request
@@ -1885,23 +2028,35 @@ const setupUnifiedVoiceServer = (wss) => {
         const detectedLanguage = currentLanguage || "en"
         console.log("🌐 [USER-UTTERANCE] Using Language:", detectedLanguage)
 
-        // Skipping auxiliary detections for speed; only generate AI response
-        const aiResponse = await processWithOpenAI(
+        // Create TTS processor first for streaming connection
+        currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+        
+        // Start streaming synthesis
+        const streamingStarted = await currentTTS.startStreamingSynthesis(currentRequestId)
+        
+        if (!streamingStarted) {
+          console.log("❌ [USER-UTTERANCE] Failed to start streaming synthesis")
+          return
+        }
+
+        console.log("🎤 [USER-UTTERANCE] Starting streaming TTS...")
+
+        // Use streaming OpenAI with direct Sarvam connection
+        const aiResponse = await processWithOpenAIStreaming(
           text,
           conversationHistory,
           detectedLanguage,
           callLogger,
-          agentConfig
+          agentConfig,
+          userName,
+          currentTTS // Pass TTS processor for direct streaming
         )
 
         // Skipped lead/whatsapp/disconnection detections
 
         if (processingRequestId === currentRequestId && aiResponse) {
           console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
-          
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(aiResponse)
+          console.log("✅ [USER-UTTERANCE] Streaming processing completed")
 
           conversationHistory.push(
             { role: "user", content: text },
@@ -1911,8 +2066,6 @@ const setupUnifiedVoiceServer = (wss) => {
           if (conversationHistory.length > 10) {
             conversationHistory = conversationHistory.slice(-10)
           }
-          
-          console.log("✅ [USER-UTTERANCE] Processing completed")
         } else {
           console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
         }
