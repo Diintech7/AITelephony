@@ -1123,7 +1123,7 @@ const processWithOpenAIStreaming = async (
   ttsProcessor = null,
 ) => {
   const timer = createTimer("LLM_STREAMING")
-
+  
   try {
     // Simplified system prompt for faster processing
     const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
@@ -1159,8 +1159,8 @@ const processWithOpenAIStreaming = async (
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 30, // Further reduced for faster first tokens
-        temperature: 0.0, // Set to 0.0 for fastest, most deterministic responses
+        max_tokens: 40, // Reduced from 60 to 40 for faster generation
+        temperature: 0.1, // Reduced from 0.3 to 0.1 for more deterministic, faster responses
         stream: true, // Enable streaming
         presence_penalty: 0, // Disable for speed
         frequency_penalty: 0, // Disable for speed
@@ -1180,8 +1180,6 @@ const processWithOpenAIStreaming = async (
     let fullResponse = ""
     let buffer = ""
     let sentenceBuffer = ""
-    let tokenBuffer = ""
-    let tokenCount = 0
     let isFirstChunk = true
 
     const reader = response.body.getReader()
@@ -1228,40 +1226,8 @@ const processWithOpenAIStreaming = async (
               if (content) {
                 fullResponse += content
                 sentenceBuffer += content
-                tokenBuffer += content
-                tokenCount += content.split(' ').length
 
-                // Stream partial phrases immediately (5-10 tokens) for <1.5s latency
-                if (tokenCount >= 5) {
-                  const words = tokenBuffer.split(' ')
-                  if (words.length >= 5) {
-                    // Send first 5-8 words as a chunk
-                    const chunkWords = words.slice(0, Math.min(8, words.length))
-                    const chunkText = chunkWords.join(' ').trim()
-                    
-                    if (isValidTextChunk(chunkText)) {
-                      if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
-                        const textMessage = {
-                          type: "text",
-                          data: { text: chunkText },
-                        }
-                        ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                        console.log(`📝 [LLM→SARVAM] Sent partial chunk (${chunkWords.length} words): "${chunkText}"`)
-                        
-                        // Send flush signal after short phrase for immediate audio
-                        const flushMessage = { type: "flush" }
-                        ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage))
-                        console.log(`📝 [LLM→SARVAM] Sent flush after partial chunk`)
-                      }
-                    }
-                    
-                    // Remove sent words from buffer
-                    tokenBuffer = words.slice(Math.min(8, words.length)).join(' ')
-                    tokenCount = tokenBuffer.split(' ').length
-                  }
-                }
-
-                // Also handle complete sentences for longer phrases
+                // Send complete sentences to Sarvam immediately
                 const sentences = sentenceBuffer.split(/([.!?।]+)/)
                 if (sentences.length > 1) {
                   // Send all complete sentences except the last incomplete one
@@ -1274,10 +1240,10 @@ const processWithOpenAIStreaming = async (
                         data: { text: cleanText },
                       }
                       ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                      console.log(`📝 [LLM→SARVAM] Sent sentence chunk: "${cleanText}"`)
+                      console.log(`📝 [LLM→SARVAM] Sent chunk: "${cleanText}"`)
                     }
                   } else {
-                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid sentence chunk: "${cleanText}"`)
+                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${cleanText}"`)
                   }
                   // Keep the last incomplete sentence in buffer
                   sentenceBuffer = sentences[sentences.length - 1]
@@ -1586,12 +1552,12 @@ class SimplifiedSarvamTTSProcessor {
           const configMessage = {
             type: "config",
             data: {
-          target_language_code: this.sarvamLanguage,
+              target_language_code: this.sarvamLanguage,
               speaker: "manisha",
-          pitch: 0,
+              pitch: 0,
               pace: 1, // Match sanpbx settings for faster synthesis
-          loudness: 1.0,
-          enable_preprocessing: true,
+              loudness: 1.0,
+              enable_preprocessing: true,
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
@@ -1767,39 +1733,39 @@ class SimplifiedSarvamTTSProcessor {
 
         let position = 0
         while (position < audioBuffer.length && !this.isInterrupted) {
-      const remaining = audioBuffer.length - position
-      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-      const chunk = audioBuffer.slice(position, position + chunkSize)
+          const remaining = audioBuffer.length - position
+          const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+          const chunk = audioBuffer.slice(position, position + chunkSize)
 
-      const mediaMessage = {
-        event: "media",
-        streamSid: this.streamSid,
-        media: {
-          payload: chunk.toString("base64"),
-        },
-      }
+          const mediaMessage = {
+            event: "media",
+            streamSid: this.streamSid,
+            media: {
+              payload: chunk.toString("base64"),
+            },
+          }
 
-      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-        try {
-          this.ws.send(JSON.stringify(mediaMessage))
-        } catch (error) {
+          if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+            try {
+              this.ws.send(JSON.stringify(mediaMessage))
+            } catch (error) {
               console.error("❌ [SARVAM→SIP] Error sending media to SIP WS:", error.message)
               this.isInterrupted = true // Stop streaming on error
-          break
-        }
-      } else {
+              break
+            }
+          } else {
             console.log("🛑 [SARVAM→SIP] SIP WS not open or interrupted, stopping streaming")
             this.isInterrupted = true
-        break
-      }
+            break
+          }
 
-      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
+          if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+            const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
             const delayMs = Math.max(chunkDurationMs - 2, 10) // Small delay to prevent buffer underrun
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
-      }
+            await new Promise((resolve) => setTimeout(resolve, delayMs))
+          }
 
-      position += chunkSize
+          position += chunkSize
         }
       } else {
         // No audio in queue, wait for a short period or until new audio arrives
@@ -1948,7 +1914,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Reverted to original working parameters - latency optimizations will come from other areas
 
         console.log("🔗 [DEEPGRAM] Connecting to:", deepgramUrl.toString())
-
+        
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         })
@@ -2116,10 +2082,6 @@ const setupUnifiedVoiceServer = (wss) => {
           currentTTS.reset(detectedLanguage)
         }
         
-        // PARALLELIZE: Start TTS connection before LLM output (hot WebSocket)
-        console.log("🔥 [PARALLEL-TTS] Pre-connecting TTS WebSocket for hot connection...")
-        const ttsConnectionPromise = currentTTS.connectSarvamWs(currentRequestId)
-        
         // Start streaming synthesis
         const streamingStarted = await currentTTS.startStreamingSynthesis(currentRequestId)
         
@@ -2129,10 +2091,6 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         console.log("🎤 [USER-UTTERANCE] Starting streaming TTS...")
-
-        // Wait for TTS connection to be ready (parallel optimization)
-        await ttsConnectionPromise
-        console.log("🔥 [PARALLEL-TTS] TTS WebSocket is hot and ready!")
 
         // Use streaming OpenAI with direct Sarvam connection
         const aiResponse = await processWithOpenAIStreaming(
