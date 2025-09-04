@@ -59,7 +59,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   let silenceTimer = null
   let sttFailed = false
   let chunkCounter = 0
-  let binaryMediaMode = false // auto-detected if PBX sends raw 320-byte frames
+  // Always use JSON base64 media; binary mode disabled
   
   // Add duplicate prevention tracking
   let lastProcessedTranscript = ""
@@ -146,7 +146,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       console.log(
         `[SANPBX-STREAM] ${streamStartTime} - Starting stream: ${audioBuffer.length} bytes in ${Math.ceil(audioBuffer.length / CHUNK_SIZE)} chunks`,
       )
-      console.log(`[SANPBX-STREAM-MODE] binary_mode=${binaryMediaMode ? 'true' : 'false'}`)
+      console.log(`[SANPBX-STREAM-MODE] json_base64=true`)
       console.log(
         `[SANPBX-FORMAT] Sending audio -> encoding=${ENCODING}, sample_rate_hz=${SAMPLE_RATE_HZ}, channels=${CHANNELS}, bytes_per_sample=${BYTES_PER_SAMPLE}, chunk_duration_ms=${CHUNK_DURATION_MS}, chunk_size_bytes=${CHUNK_SIZE}`,
       )
@@ -172,38 +172,25 @@ const setupSanPbxWebSocketServer = (ws) => {
         const payloadBase64 = paddedChunk.toString("base64")
 
         try {
-          if (binaryMediaMode) {
-            // Send raw 320-byte PCM frame directly when PBX expects binary frames
-            if (!firstChunkSpecChecked) {
-              const sizeOk = paddedChunk.length === CHUNK_SIZE
-              const durOk = CHUNK_DURATION_MS === 20
-              console.log(
-                `[SPEC-CHECK:CHUNK#${currentChunk}] binary_mode=true, size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS})`,
-              )
-              firstChunkSpecChecked = true
-            }
-            ws.send(paddedChunk)
-          } else {
-            // JSON reverse-media mode
-            const mediaMessage = {
-              event: "reverse-media",
-              payload: payloadBase64,
-              streamId: streamId,
-              channelId: channelId,
-              callId: callId,
-            }
-            if (!firstChunkSpecChecked) {
-              const usedEventName = mediaMessage.event
-              const sizeOk = paddedChunk.length === CHUNK_SIZE
-              const durOk = CHUNK_DURATION_MS === 20
-              const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
-              console.log(
-                `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${usedEventName === 'reverse-media'}, size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS}), format_ok=${fmtOk}`,
-              )
-              firstChunkSpecChecked = true
-            }
-            ws.send(JSON.stringify(mediaMessage))
+          // JSON reverse-media mode only
+          const mediaMessage = {
+            event: "reverse-media",
+            payload: payloadBase64,
+            streamId: streamId,
+            channelId: channelId,
+            callId: callId,
           }
+          if (!firstChunkSpecChecked) {
+            const usedEventName = mediaMessage.event
+            const sizeOk = paddedChunk.length === CHUNK_SIZE
+            const durOk = CHUNK_DURATION_MS === 20
+            const fmtOk = ENCODING === "LINEAR16" && SAMPLE_RATE_HZ === 8000 && CHANNELS === 1
+            console.log(
+              `[SPEC-CHECK:CHUNK#${currentChunk}] event_ok=${usedEventName === 'reverse-media'}, size_ok=${sizeOk} (bytes=${paddedChunk.length}), duration_ok=${durOk} (ms=${CHUNK_DURATION_MS}), format_ok=${fmtOk}`,
+            )
+            firstChunkSpecChecked = true
+          }
+          ws.send(JSON.stringify(mediaMessage))
           chunksSuccessfullySent++
           currentChunk++
           if (chunksSuccessfullySent % 20 === 0) {
@@ -226,19 +213,15 @@ const setupSanPbxWebSocketServer = (ws) => {
       try {
         for (let i = 0; i < 3; i++) {
           const silenceChunk = Buffer.alloc(CHUNK_SIZE)
-          if (binaryMediaMode) {
-            ws.send(silenceChunk)
-          } else {
-            const silenceMessage = {
-              event: "reverse-media",
-              payload: silenceChunk.toString("base64"),
-              streamId: streamId,
-              channelId: channelId,
-              callId: callId,
-            }
-            console.log(`[SANPBX-SEND] reverse-media silence chunk #${currentChunk}`)
-            ws.send(JSON.stringify(silenceMessage))
+          const silenceMessage = {
+            event: "reverse-media",
+            payload: silenceChunk.toString("base64"),
+            streamId: streamId,
+            channelId: channelId,
+            callId: callId,
           }
+          console.log(`[SANPBX-SEND] reverse-media silence chunk #${currentChunk}`)
+          ws.send(JSON.stringify(silenceMessage))
           currentChunk++
           await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
         }
@@ -622,35 +605,9 @@ const setupSanPbxWebSocketServer = (ws) => {
   // Handle incoming messages from SanIPPBX
   ws.on("message", async (message) => {
     try {
-      // If message is Buffer or not valid JSON, treat as binary media
-      if (Buffer.isBuffer(message)) {
-        const buf = message
-        console.log(`[SANPBX-RAW-IN:BINARY] bytes=${buf}`)
-        // Auto-enable binary mode on first binary frame
-        if (!binaryMediaMode && buf.length === 320) {
-          binaryMediaMode = true
-          console.log(`[SANPBX] Binary media mode enabled (detected 320-byte PCM frames)`)
-        }
-        // Forward raw PCM directly to Deepgram if connected
-        if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-          try { deepgramWs.send(buf) } catch (e) {}
-        }
-        // Count chunks for diagnostics
-        chunkCounter++
-        if (chunkCounter % 50 === 0) {
-          console.log(`[SANPBX] Processed ${chunkCounter} binary audio chunks`)
-        }
-        return
-      }
-
-      const messageStr = message.toString()
-      console.log(`[SANPBX-RAW-IN] length=${messageStr.length}`)
-      console.log(`[SANPBX-RAW-IN:DATA] ${messageStr}`)
-
-      if (!messageStr.trim().startsWith("{")) {
-        return
-      }
-
+      // Normalize to string and parse JSON; PBX must send JSON base64 media
+      const messageStr = Buffer.isBuffer(message) ? message.toString() : String(message)
+      console.log(`[SANPBX-IN] length=${messageStr.length}`)
       const data = JSON.parse(messageStr)
 
       switch (data.event) {
@@ -729,19 +686,13 @@ const setupSanPbxWebSocketServer = (ws) => {
           break
 
         case "media":
-          console.log(data)
-          // Forward audio data to Deepgram for transcription
+          // Expect base64 payload; forward decoded PCM to Deepgram
           if (data.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             const audioBuffer = Buffer.from(data.payload, "base64")
-            console.log(`[SANPBX-MEDIA-IN] bytes=${audioBuffer.length}, streamId=${data.streamId || streamId}, callId=${data.callId || callId}, channelId=${data.channelId || channelId}`)
             deepgramWs.send(audioBuffer)
-            if (chunkCounter % 25 === 0) {
-              console.log(`[STT:DG-FWD] forwarded_bytes=${audioBuffer.length}`)
-            }
-            
             chunkCounter++
-            if (chunkCounter % 50 === 0) {
-              console.log(`[SANPBX] Processed ${chunkCounter} audio chunks`)
+            if (chunkCounter % 25 === 0) {
+              console.log(`[SANPBX-MEDIA-IN] chunks=${chunkCounter}, last_bytes=${audioBuffer.length}`)
             }
           } else if (sttFailed) {
             console.log("[STT] Audio received but STT unavailable - consider implementing DTMF fallback")
