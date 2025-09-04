@@ -1147,20 +1147,23 @@ const processWithOpenAIStreaming = async (
 
     // Add timeout control and abort controller
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout for streaming
+    const timeoutId = setTimeout(() => controller.abort(), 3000) // Reduced from 5s to 3s for faster timeout
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${API_KEYS.openai}`,
+        "Connection": "keep-alive", // Keep connection alive for faster subsequent requests
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 60, // Reduced from 120 to 60
-        temperature: 0.3,
+        max_tokens: 40, // Reduced from 60 to 40 for faster generation
+        temperature: 0.1, // Reduced from 0.3 to 0.1 for more deterministic, faster responses
         stream: true, // Enable streaming
+        presence_penalty: 0, // Disable for speed
+        frequency_penalty: 0, // Disable for speed
       }),
       signal: controller.signal,
     })
@@ -1539,21 +1542,23 @@ class SimplifiedSarvamTTSProcessor {
           this.sarvamWsConnected = true
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected`)
 
-          // Send initial config message
+          // Send initial config message with ultra-low latency settings
           const configMessage = {
             type: "config",
             data: {
               target_language_code: this.sarvamLanguage,
               speaker: "manisha",
               pitch: 0,
-              pace: 1, // Match sanpbx settings for faster synthesis
+              pace: 1.8, // Increased from 1 to 1.8 for faster synthesis
               loudness: 1.0,
               enable_preprocessing: true,
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
-              min_buffer_size: 50, // As per HTML example
-              max_chunk_length: 150, // As per HTML example
+              min_buffer_size: 20, // Reduced from 50 to 20 for faster streaming
+              max_chunk_length: 100, // Reduced from 150 to 100 for faster chunks
+              streaming_mode: true, // Enable streaming mode
+              low_latency: true, // Enable low latency mode
             },
           }
           this.sarvamWs.send(JSON.stringify(configMessage))
@@ -1716,7 +1721,7 @@ class SimplifiedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2 // linear16 is 16-bit, so 2 bytes
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // 40ms chunks for SIP
+    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS) // Reduced from 40ms to 20ms for faster streaming
 
     while (!this.isInterrupted) {
       if (this.audioQueue.length > 0) {
@@ -1752,7 +1757,7 @@ class SimplifiedSarvamTTSProcessor {
 
           if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
             const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-            const delayMs = Math.max(chunkDurationMs - 2, 10) // Small delay to prevent buffer underrun
+            const delayMs = Math.max(chunkDurationMs - 5, 5) // Reduced delay for faster streaming
             await new Promise((resolve) => setTimeout(resolve, delayMs))
           }
 
@@ -1760,7 +1765,7 @@ class SimplifiedSarvamTTSProcessor {
         }
       } else {
         // No audio in queue, wait for a short period or until new audio arrives
-        await new Promise((resolve) => setTimeout(resolve, 50)) // Wait 50ms
+        await new Promise((resolve) => setTimeout(resolve, 20)) // Reduced from 50ms to 20ms for faster response
       }
     }
     this.isStreamingToSIP = false
@@ -1900,7 +1905,13 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        // Reverted to original working parameters - latency optimizations will come from other areas
+        // Ultra-low latency optimizations
+        deepgramUrl.searchParams.append("endpointing", "100") // Reduced from 300ms to 100ms
+        deepgramUrl.searchParams.append("utterance_end_ms", "500") // Reduced from 1000ms to 500ms
+        deepgramUrl.searchParams.append("vad_events", "true") // Voice activity detection
+        deepgramUrl.searchParams.append("punctuate", "true") // Enable punctuation for better sentence detection
+        deepgramUrl.searchParams.append("diarize", "false") // Disable speaker diarization for speed
+        deepgramUrl.searchParams.append("multichannel", "false") // Single channel for speed
 
         console.log("🔗 [DEEPGRAM] Connecting to:", deepgramUrl.toString())
         
@@ -2392,14 +2403,14 @@ const setupUnifiedVoiceServer = (wss) => {
                 // Ultra-optimized queue management for minimal latency
                 deepgramAudioQueue.push(audioBuffer)
                 
-                // More aggressive queue limiting for ultra-low latency
-                if (deepgramAudioQueue.length > 30) { // Reduced from 50 to 30
+                // Ultra-aggressive queue limiting for minimal latency
+                if (deepgramAudioQueue.length > 20) { // Reduced from 30 to 20
                   // Keep only the most recent packets for minimal latency
-                  deepgramAudioQueue = deepgramAudioQueue.slice(-15) // Reduced from 25 to 15
+                  deepgramAudioQueue = deepgramAudioQueue.slice(-10) // Reduced from 15 to 10
                   console.log("⚡ [SIP-MEDIA] Audio queue ultra-optimized for minimal latency")
                 }
                 
-                if (deepgramAudioQueue.length % 15 === 0) { // Reduced from 25 to 15
+                if (deepgramAudioQueue.length % 10 === 0) { // Reduced from 15 to 10
                   console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
                 }
               }
