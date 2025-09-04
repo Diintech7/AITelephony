@@ -2181,44 +2181,18 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
             console.log("🛑 [SIP-STOP] Mobile:", mobile)
 
-            // Intelligent WhatsApp send based on lead status and user requests
+            // WhatsApp sending disabled as per requirement; persist intent only
             try {
-              if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
-                const waLink = getAgentWhatsappLink(agentConfig)
-                const waNumber = normalizeIndianMobile(mobile)
-                const waApiUrl = agentConfig?.whatsapplink
-                console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
-                if (waLink && waNumber && waApiUrl) {
-                  sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
-                    .then(async (r) => {
-                      console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
-                      if (r?.ok) {
-                        await billWhatsAppCredit({
-                          clientId: agentConfig.clientId || accountSid,
-                          mobile,
-                          link: waLink,
-                          callLogId: callLogger?.callLogId,
-                          streamSid,
-                        })
-                        callLogger.markWhatsAppSent()
-                      }
-                    })
-                    .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
-                } else {
-                  console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
-                }
-              } else {
-                console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
-                  hasCallLogger: !!callLogger,
-                  whatsappEnabled: agentConfig?.whatsappEnabled,
-                  shouldSend: callLogger?.shouldSendWhatsApp(),
-                  leadStatus: callLogger?.currentLeadStatus,
-                  alreadySent: callLogger?.whatsappSent,
-                  requested: callLogger?.whatsappRequested
-                })
+              if (callLogger?.callLogId) {
+                await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                  'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                  'metadata.whatsappMessageSent': false,
+                  'metadata.lastUpdated': new Date()
+                }).catch(() => {})
+                console.log("📨 [WHATSAPP] stop-event: sending disabled; intent recorded")
               }
             } catch (waErr) {
-              console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
+              console.log("❌ [WHATSAPP] stop-event persistence error:", waErr.message)
             }
             
             // Handle external call disconnection
@@ -2275,44 +2249,18 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
       console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
       
-      // Safety: Intelligent WhatsApp send on close if conditions are met
+      // WhatsApp sending disabled as per requirement; persist intent only
       try {
-        if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
-          const waLink = getAgentWhatsappLink(agentConfig)
-          const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
-          const waApiUrl = agentConfig?.whatsapplink
-          console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
-          if (waLink && waNumber && waApiUrl) {
-            sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
-              .then(async (r) => {
-                console.log("📨 [WHATSAPP] close-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
-                if (r?.ok) {
-                  await billWhatsAppCredit({
-                    clientId: agentConfig.clientId || callLogger?.clientId,
-                    mobile: callLogger?.mobile || null,
-                    link: waLink,
-                    callLogId: callLogger?.callLogId,
-                    streamSid,
-                  })
-                  callLogger.markWhatsAppSent()
-                }
-              })
-              .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
-          } else {
-            console.log("📨 [WHATSAPP] close-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
-          }
-        } else {
-          console.log("📨 [WHATSAPP] close-event skipped → conditions not met:", {
-            hasCallLogger: !!callLogger,
-            whatsappEnabled: agentConfig?.whatsappEnabled,
-            shouldSend: callLogger?.shouldSendWhatsApp(),
-            leadStatus: callLogger?.currentLeadStatus,
-            alreadySent: callLogger?.whatsappSent,
-            requested: callLogger?.whatsappRequested
-          })
+        if (callLogger?.callLogId) {
+          await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+            'metadata.whatsappMessageSent': false,
+            'metadata.lastUpdated': new Date()
+          }).catch(() => {})
+          console.log("📨 [WHATSAPP] close-event: sending disabled; intent recorded")
         }
       } catch (waErr) {
-        console.log("❌ [WHATSAPP] close-event unexpected:", waErr.message)
+        console.log("❌ [WHATSAPP] close-event persistence error:", waErr.message)
       }
       
       if (callLogger) {

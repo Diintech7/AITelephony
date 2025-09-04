@@ -61,7 +61,10 @@ const CallLogSchema = new mongoose.Schema({
     // Technical details
     sttProvider: { type: String, default: 'deepgram' },
     ttsProvider: { type: String, default: 'sarvam' },
-    llmProvider: { type: String, default: 'openai' }
+    llmProvider: { type: String, default: 'openai' },
+    // WhatsApp tracking (persist intent and send status)
+    whatsappRequested: { type: Boolean, default: false },
+    whatsappMessageSent: { type: Boolean, default: false }
   }
 }, {
   timestamps: true
