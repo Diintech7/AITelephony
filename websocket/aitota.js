@@ -1551,23 +1551,21 @@ class SimplifiedSarvamTTSProcessor {
           this.isInterrupted = false // Reset interrupted flag when connection opens
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected`)
 
-          // Send initial config message with ultra-low latency settings
+          // Send initial config message with valid Sarvam parameters
           const configMessage = {
             type: "config",
             data: {
               target_language_code: this.sarvamLanguage,
               speaker: "manisha",
               pitch: 0,
-              pace: 2.0, // Increased from 1 to 2.0 for faster synthesis
+              pace: 1.8, // Optimized for faster synthesis while staying within valid range
               loudness: 1.0,
               enable_preprocessing: true,
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
-              min_buffer_size: 10, // Reduced from 50 to 10 for faster streaming
-              max_chunk_length: 80, // Reduced from 150 to 80 for faster chunks
-              streaming_mode: true, // Enable streaming mode
-              low_latency: true, // Enable low latency mode
+              min_buffer_size: 20, // Valid range for faster streaming
+              max_chunk_length: 100, // Valid range for faster chunks
             },
           }
           this.sarvamWs.send(JSON.stringify(configMessage))
