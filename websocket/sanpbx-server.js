@@ -46,6 +46,48 @@ function last10Digits(value) {
   return digits.slice(-10)
 }
 
+// Map simple lang codes to Sarvam codes (align with aitota.js)
+const LANGUAGE_MAPPING = {
+  hi: "hi-IN",
+  en: "en-IN",
+  bn: "bn-IN",
+  te: "te-IN",
+  ta: "ta-IN",
+  mr: "mr-IN",
+  gu: "gu-IN",
+  kn: "kn-IN",
+  ml: "ml-IN",
+  pa: "pa-IN",
+  or: "or-IN",
+  as: "as-IN",
+  ur: "ur-IN",
+}
+
+const getSarvamLanguage = (detectedLang, defaultLang = "en") => {
+  const lang = (detectedLang || defaultLang || "en").toLowerCase()
+  return LANGUAGE_MAPPING[lang] || LANGUAGE_MAPPING.en
+}
+
+const VALID_SARVAM_VOICES = new Set([
+  "abhilash","anushka","meera","pavithra","maitreyi","arvind","amol","amartya","diya","neel","misha","vian","arjun","maya","manisha","vidya","arya","karun","hitesh"
+])
+
+const getValidSarvamVoice = (voiceSelection = "pavithra") => {
+  const normalized = (voiceSelection || "").toString().trim().toLowerCase()
+  if (VALID_SARVAM_VOICES.has(normalized)) return normalized
+  const voiceMapping = {
+    "male-professional": "arvind",
+    "female-professional": "pavithra",
+    "male-friendly": "amol",
+    "female-friendly": "maya",
+    neutral: "pavithra",
+    default: "pavithra",
+    male: "arvind",
+    female: "pavithra",
+  }
+  return voiceMapping[normalized] || "pavithra"
+}
+
 /**
  * Setup unified voice server for SanIPPBX integration
  * @param {WebSocket} ws - The WebSocket connection from SanIPPBX
@@ -253,7 +295,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   /**
    * Optimized text-to-speech with Sarvam API for 8kHz output
    */
-  const synthesizeAndStreamAudio = async (text, language = "en-IN") => {
+  const synthesizeAndStreamAudio = async (text, language = "en") => {
     try {
       const ttsStartTime = new Date().toISOString()
       console.log(`[TTS-START] ${ttsStartTime} - Starting TTS for: "${text}"`)
@@ -272,10 +314,10 @@ const setupSanPbxWebSocketServer = (ws) => {
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: language,
-          speaker: "meera",
+          target_language_code: getSarvamLanguage(language),
+          speaker: getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra"),
           pitch: 0,
-          pace: 1.55,
+          pace: 1.1,
           loudness: 1.0,
           speech_sample_rate: 8000, // FIXED: 8kHz to match SanIPPBX format
           enable_preprocessing: true,
@@ -495,16 +537,23 @@ const setupSanPbxWebSocketServer = (ws) => {
         return quickResponse
       }
 
+      // Mirror aitota.js prompt structure
+      const basePrompt = (ws.sessionAgentConfig?.systemPrompt || "You are a helpful AI assistant.").trim()
+      const firstMessage = (ws.sessionAgentConfig?.firstMessage || "").trim()
+      const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+      const policyBlock = [
+        "Answer strictly using the information provided above.",
+        "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
+        "If the information is not present, reply briefly that you don't have that information.",
+        "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
+        "Keep the entire reply under 100 tokens.",
+      ].join(" ")
+      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+
       const messages = [
-        {
-          role: "system",
-          content: "You are a helpful AI assistant. Give very concise responses (1-2 sentences max). Be direct and helpful.",
-        },
-        ...conversationHistory.slice(-4),
-        {
-          role: "user",
-          content: userMessage,
-        },
+        { role: "system", content: systemPrompt },
+        ...conversationHistory.slice(-6),
+        { role: "user", content: userMessage },
       ]
 
       const controller = new AbortController()
@@ -518,8 +567,8 @@ const setupSanPbxWebSocketServer = (ws) => {
         },
         body: JSON.stringify({
           model: "gpt-4o-mini",
-          messages: messages,
-          max_tokens: 50,
+          messages,
+          max_tokens: 120,
           temperature: 0.3,
           stream: false,
         }),
@@ -533,7 +582,22 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
 
       const data = await response.json()
-      const aiResponse = data.choices[0]?.message?.content?.trim()
+      let aiResponse = data.choices[0]?.message?.content?.trim()
+
+      // Ensure a follow-up question exists (mirrors aitota.js)
+      if (aiResponse && !/[?]\s*$/.test(aiResponse)) {
+        const lang = (ws.sessionAgentConfig?.language || "en").toLowerCase()
+        const followUps = {
+          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
+          en: "Is there anything else I can help you with?",
+          bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
+          ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
+          te: "ఇంకేమైనా సహాయం కావాలా?",
+          mr: "आणखी काही मदत हवी आहे का?",
+          gu: "શું બીજી કોઈ મદદ કરી શકું?",
+        }
+        aiResponse = `${aiResponse} ${followUps[lang] || followUps.en}`.trim()
+      }
 
       const llmTime = Date.now() - startTime
       console.log(`[LLM] Response: "${aiResponse}" (${llmTime}ms)`)
@@ -727,11 +791,15 @@ const setupSanPbxWebSocketServer = (ws) => {
           connectToDeepgram(0)
 
           // Send greeting after call is established
-          const greeting = "Hi! How can I help you?"
+          // Use agent-configured greeting (mirror aitota.js)
+          let greeting = ws.sessionAgentConfig?.firstMessage || "Hello! How can I help you today?"
+          if (callerIdValue && typeof callerIdValue === 'string') {
+            // optional personalization can be added if you later parse name
+          }
           console.log("[SANPBX] Sending greeting:", greeting)
 
           setTimeout(async () => {
-            await synthesizeAndStreamAudio(greeting)
+            await synthesizeAndStreamAudio(greeting, ws.sessionAgentConfig?.language || "en")
           }, 1500) // Wait for call to be fully established
           break
 
