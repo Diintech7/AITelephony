@@ -1595,8 +1595,8 @@ class SimplifiedSarvamTTSProcessor {
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
-              min_buffer_size: 15, // Reduced for faster audio return
-              max_chunk_length: 100, // Reduced for faster chunks
+              min_buffer_size: 50, // As per HTML example
+              max_chunk_length: 150, // As per HTML example
             },
           }
           this.sarvamWs.send(JSON.stringify(configMessage))
