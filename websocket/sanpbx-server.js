@@ -745,8 +745,8 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           // Resolve agent using DID→Agent.callerId priority (like aitota.js style)
           try {
-            const fromNumber = startInfo.from || data.from || callerIdValue
-            const toNumber = startInfo.to || data.to || didValue
+            const fromNumber = (data.start && data.start.from) || data.from || callerIdValue
+            const toNumber = (data.start && data.start.to) || data.to || didValue
             const fromLast = last10Digits(fromNumber)
             const toLast = last10Digits(toNumber)
 
