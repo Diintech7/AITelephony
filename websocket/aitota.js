@@ -1100,6 +1100,18 @@ class EnhancedCallLogger {
   }
 }
 
+// Helper function to validate text chunks before sending to Sarvam
+const isValidTextChunk = (text) => {
+  if (!text || typeof text !== 'string') return false
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return false
+  // Check if text contains only punctuation, quotes, or whitespace
+  if (/^[.!?।\s""''`~\-_]*$/.test(trimmed)) return false
+  // Check if text has at least one letter or number
+  if (!/[a-zA-Z0-9\u0900-\u097F\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0980-\u09FF]/.test(trimmed)) return false
+  return true
+}
+
 // Streaming OpenAI processing with direct Sarvam connection
 const processWithOpenAIStreaming = async (
   userMessage,
@@ -1184,15 +1196,20 @@ const processWithOpenAIStreaming = async (
             const data = line.slice(6)
             if (data === '[DONE]') {
               // Send any remaining text
-              if (sentenceBuffer.trim() && sentenceBuffer.trim().length > 0 && !/^[.!?।\s]*$/.test(sentenceBuffer.trim())) {
+              const finalText = sentenceBuffer.trim()
+              if (isValidTextChunk(finalText)) {
                 if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
                   const textMessage = {
                     type: "text",
-                    data: { text: sentenceBuffer.trim() },
+                    data: { text: finalText },
                   }
                   ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                  console.log(`📝 [LLM→SARVAM] Sent final chunk: "${sentenceBuffer.trim()}"`)
+                  console.log(`📝 [LLM→SARVAM] Sent final chunk: "${finalText}"`)
                 }
+                fullResponse += sentenceBuffer
+                sentenceBuffer = ""
+              } else {
+                console.log(`⚠️ [LLM→SARVAM] Skipping invalid final chunk: "${finalText}"`)
                 fullResponse += sentenceBuffer
                 sentenceBuffer = ""
               }
@@ -1212,15 +1229,18 @@ const processWithOpenAIStreaming = async (
                 if (sentences.length > 1) {
                   // Send all complete sentences except the last incomplete one
                   const completeSentences = sentences.slice(0, -1).join('')
-                  if (completeSentences.trim() && completeSentences.trim().length > 0 && !/^[.!?।\s]*$/.test(completeSentences.trim())) {
+                  const cleanText = completeSentences.trim()
+                  if (isValidTextChunk(cleanText)) {
                     if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
                       const textMessage = {
                         type: "text",
-                        data: { text: completeSentences.trim() },
+                        data: { text: cleanText },
                       }
                       ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                      console.log(`📝 [LLM→SARVAM] Sent chunk: "${completeSentences.trim()}"`)
+                      console.log(`📝 [LLM→SARVAM] Sent chunk: "${cleanText}"`)
                     }
+                  } else {
+                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${cleanText}"`)
                   }
                   // Keep the last incomplete sentence in buffer
                   sentenceBuffer = sentences[sentences.length - 1]
