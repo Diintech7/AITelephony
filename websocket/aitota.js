@@ -1113,7 +1113,6 @@ const isValidTextChunk = (text) => {
 }
 
 // Streaming OpenAI processing with direct Sarvam connection
-// Uses token-based chunking (5-10 tokens) instead of punctuation-based chunking for lower latency
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -1124,10 +1123,6 @@ const processWithOpenAIStreaming = async (
   ttsProcessor = null,
 ) => {
   const timer = createTimer("LLM_STREAMING")
-  
-  // Token-based chunking configuration for lower latency
-  const MIN_CHUNK_TOKENS = 2  // Minimum tokens before sending a chunk
-  const MAX_CHUNK_TOKENS = 8  // Maximum tokens per chunk
   
   try {
     // Simplified system prompt for faster processing
@@ -1182,10 +1177,18 @@ const processWithOpenAIStreaming = async (
 
     console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Starting streaming response`)
 
+    // Prewarm Sarvam TTS connection (ensure WS is hot before text arrives)
+    if (ttsProcessor && (!ttsProcessor.sarvamWsConnected || (ttsProcessor.sarvamWs && ttsProcessor.sarvamWs.readyState !== WebSocket.OPEN))) {
+      try {
+        await ttsProcessor.startStreamingSynthesis(ttsProcessor.currentSarvamRequestId || Date.now())
+      } catch (_) {}
+    }
+
     let fullResponse = ""
     let buffer = ""
     let sentenceBuffer = ""
     let isFirstChunk = true
+    let lastChunkAt = Date.now()
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
@@ -1203,7 +1206,7 @@ const processWithOpenAIStreaming = async (
           if (line.startsWith('data: ')) {
             const data = line.slice(6)
             if (data === '[DONE]') {
-              // Send any remaining text in buffer
+              // Send any remaining text
               const finalText = sentenceBuffer.trim()
               if (isValidTextChunk(finalText)) {
                 if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
@@ -1232,29 +1235,32 @@ const processWithOpenAIStreaming = async (
                 fullResponse += content
                 sentenceBuffer += content
 
-                // Send short chunks (5-10 tokens) to Sarvam instead of waiting for punctuation
-                const words = sentenceBuffer.split(/\s+/).filter(word => word.trim().length > 0)
-                if (words.length >= MIN_CHUNK_TOKENS) { // Send when we have enough tokens
-                  // Take first MAX_CHUNK_TOKENS words (or all if less) to keep chunks manageable
-                  const chunkWords = words.slice(0, Math.min(MAX_CHUNK_TOKENS, words.length))
-                  const chunkText = chunkWords.join(' ').trim()
-                  
-                  if (isValidTextChunk(chunkText)) {
+                // Emit short phrases (~1s) instead of waiting for full sentences
+                const now = Date.now()
+                const CHUNK_MIN_CHARS = 24
+                const hasSentenceEnd = /[.!?।]/.test(sentenceBuffer)
+                const hasPhraseBoundary = /[,;:]/.test(sentenceBuffer)
+                const enoughLength = sentenceBuffer.length >= CHUNK_MIN_CHARS
+
+                if (hasSentenceEnd || hasPhraseBoundary || enoughLength) {
+                  const toSend = sentenceBuffer
+                  const cleanText = toSend.trim()
+                  if (isValidTextChunk(cleanText)) {
                     if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
-                      const textMessage = {
-                        type: "text",
-                        data: { text: chunkText },
-                      }
+                      const textMessage = { type: "text", data: { text: cleanText } }
                       ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                      console.log(`📝 [LLM→SARVAM] Sent chunk (${chunkWords.length} tokens): "${chunkText}"`)
+                      // Send flush right after a short phrase so audio starts immediately
+                      try {
+                        const flushMessage = { type: "flush" }
+                        ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage))
+                      } catch (_) {}
+                      console.log(`📝 [LLM→SARVAM] Sent phrase chunk: "${cleanText}"`)
                     }
                   } else {
-                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${chunkText}"`)
+                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${cleanText}"`)
                   }
-                  
-                  // Keep remaining words in buffer
-                  const remainingWords = words.slice(chunkWords.length)
-                  sentenceBuffer = remainingWords.length > 0 ? remainingWords.join(' ') : ''
+                  sentenceBuffer = ""
+                  lastChunkAt = now
                 }
               }
             } catch (parseError) {
@@ -1267,11 +1273,20 @@ const processWithOpenAIStreaming = async (
       reader.releaseLock()
     }
 
-    // Send flush signal to Sarvam
+    // Flush any remaining buffered text and ensure Sarvam starts/finishes promptly
+    if (sentenceBuffer.trim()) {
+      const remaining = sentenceBuffer.trim()
+      if (isValidTextChunk(remaining) && ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
+        try {
+          const textMessage = { type: "text", data: { text: remaining } }
+          ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
+        } catch (_) {}
+      }
+    }
     if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
       const flushMessage = { type: "flush" }
-      ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage))
-      console.log(`📝 [LLM→SARVAM] Sent flush signal`)
+      try { ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage)) } catch (_) {}
+      console.log(`📝 [LLM→SARVAM] Sent final flush signal`)
     }
 
     console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Streaming completed`)
