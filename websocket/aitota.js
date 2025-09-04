@@ -1209,13 +1209,9 @@ const processWithOpenAIStreaming = async (
               // Send any remaining text
               const finalText = sentenceBuffer.trim()
               if (isValidTextChunk(finalText)) {
-                if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
-                  const textMessage = {
-                    type: "text",
-                    data: { text: finalText },
-                  }
-                  ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                  console.log(`📝 [LLM→SARVAM] Sent final chunk: "${finalText}"`)
+                if (ttsProcessor && typeof ttsProcessor.queuePhrase === 'function') {
+                  ttsProcessor.queuePhrase(finalText)
+                  console.log(`📝 [LLM→SARVAM] Queued final chunk: "${finalText}"`)
                 }
                 fullResponse += sentenceBuffer
                 sentenceBuffer = ""
@@ -1246,15 +1242,9 @@ const processWithOpenAIStreaming = async (
                   const toSend = sentenceBuffer
                   const cleanText = toSend.trim()
                   if (isValidTextChunk(cleanText)) {
-                    if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
-                      const textMessage = { type: "text", data: { text: cleanText } }
-                      ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                      // Send flush right after a short phrase so audio starts immediately
-                      try {
-                        const flushMessage = { type: "flush" }
-                        ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage))
-                      } catch (_) {}
-                      console.log(`📝 [LLM→SARVAM] Sent phrase chunk: "${cleanText}"`)
+                    if (ttsProcessor && typeof ttsProcessor.queuePhrase === 'function') {
+                      ttsProcessor.queuePhrase(cleanText)
+                      console.log(`📝 [LLM→SARVAM] Queued phrase chunk: "${cleanText}"`)
                     }
                   } else {
                     console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${cleanText}"`)
@@ -1273,20 +1263,12 @@ const processWithOpenAIStreaming = async (
       reader.releaseLock()
     }
 
-    // Flush any remaining buffered text and ensure Sarvam starts/finishes promptly
+    // Queue any remaining buffered text; queue handles its own flush
     if (sentenceBuffer.trim()) {
       const remaining = sentenceBuffer.trim()
-      if (isValidTextChunk(remaining) && ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
-        try {
-          const textMessage = { type: "text", data: { text: remaining } }
-          ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-        } catch (_) {}
+      if (isValidTextChunk(remaining) && ttsProcessor && typeof ttsProcessor.queuePhrase === 'function') {
+        ttsProcessor.queuePhrase(remaining)
       }
-    }
-    if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
-      const flushMessage = { type: "flush" }
-      try { ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage)) } catch (_) {}
-      console.log(`📝 [LLM→SARVAM] Sent final flush signal`)
     }
 
     console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Streaming completed`)
@@ -1506,6 +1488,10 @@ class SimplifiedSarvamTTSProcessor {
     this.isStreamingToSIP = false // Flag to prevent multiple streaming loops
     this.totalAudioBytes = 0
     this.currentSarvamRequestId = 0 // To manage multiple TTS requests and interruptions
+    this.isUtteranceInProgress = false
+    this.phraseQueue = []
+    this.lastAudioReceivedAt = 0
+    this._utteranceSettleTimer = null
   }
 
   interrupt() {
@@ -1603,6 +1589,7 @@ class SimplifiedSarvamTTSProcessor {
               const audioBuffer = Buffer.from(response.data.audio, "base64")
               this.audioQueue.push(audioBuffer)
               this.totalAudioBytes += audioBuffer.length
+              this.lastAudioReceivedAt = Date.now()
               if (!this.isStreamingToSIP) {
                 this.startStreamingToSIP()
               }
@@ -1630,6 +1617,66 @@ class SimplifiedSarvamTTSProcessor {
       console.error(`❌ [SARVAM-WS-CONNECT] ${timer.end()}ms - Failed to connect to Sarvam TTS WebSocket: ${error.message}`)
       return false
     }
+  }
+
+  // Enqueue a phrase and ensure only one phrase is synthesized/played at a time
+  async queuePhrase(text) {
+    if (this.isInterrupted) return
+    const clean = (text || "").trim()
+    if (!clean) return
+    this.phraseQueue.push(clean)
+    this._processPhraseQueue().catch(() => {})
+  }
+
+  async _processPhraseQueue() {
+    if (this.isInterrupted) return
+    if (this.isUtteranceInProgress) return
+    if (this.phraseQueue.length === 0) return
+
+    const phrase = this.phraseQueue.shift()
+    this.isUtteranceInProgress = true
+
+    try {
+      const connected = await this.connectSarvamWs(this.currentSarvamRequestId || Date.now())
+      if (!connected || this.isInterrupted) {
+        this.isUtteranceInProgress = false
+        return
+      }
+
+      // Send the phrase
+      const textMessage = { type: "text", data: { text: phrase } }
+      this.sarvamWs.send(JSON.stringify(textMessage))
+      // Flush to start playback immediately
+      const flushMessage = { type: "flush" }
+      this.sarvamWs.send(JSON.stringify(flushMessage))
+
+      // Wait until audio has drained to SIP
+      await this._waitForPlaybackToDrain()
+    } catch (e) {
+      // Swallow to keep queue moving
+    } finally {
+      this.isUtteranceInProgress = false
+      // Process next phrase if queued
+      if (this.phraseQueue.length > 0) {
+        this._processPhraseQueue().catch(() => {})
+      }
+    }
+  }
+
+  _waitForPlaybackToDrain() {
+    return new Promise((resolve) => {
+      const SETTLE_MS = 100
+      const check = () => {
+        if (this.isInterrupted) return resolve()
+        const queueEmpty = this.audioQueue.length === 0
+        const lastDelta = Date.now() - this.lastAudioReceivedAt
+        if (queueEmpty && lastDelta >= SETTLE_MS) {
+          return resolve()
+        }
+        this._utteranceSettleTimer = setTimeout(check, 40)
+      }
+      check()
+    })
   }
 
   async synthesizeAndStream(text) {
