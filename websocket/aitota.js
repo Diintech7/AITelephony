@@ -1487,13 +1487,10 @@ class SimplifiedSarvamTTSProcessor {
 
   interrupt() {
     this.isInterrupted = true
-    if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) {
-      this.sarvamWs.close() // Close Sarvam TTS WS to stop generation
-    }
-    this.sarvamWsConnected = false
+    // Don't close the WebSocket immediately - let it finish current synthesis
     this.audioQueue = [] // Clear any pending audio
     this.isStreamingToSIP = false
-    console.log("🛑 [TTS-INTERRUPT] TTS interrupted and Sarvam WS closed")
+    console.log("🛑 [TTS-INTERRUPT] TTS interrupted (keeping WS open for reuse)")
   }
 
   reset(newLanguage) {
@@ -1509,15 +1506,24 @@ class SimplifiedSarvamTTSProcessor {
   }
 
   async connectSarvamWs(requestId) {
-    if (this.sarvamWsConnected && this.sarvamWs?.readyState === WebSocket.OPEN) {
-      return true // Already connected
+    // Reuse existing connection if it's still open and not interrupted
+    if (this.sarvamWsConnected && this.sarvamWs?.readyState === WebSocket.OPEN && !this.isInterrupted) {
+      console.log("🔄 [SARVAM-WS] Reusing existing connection")
+      return true // Already connected and ready
+    }
+
+    // If connection exists but is interrupted, reset the interrupted flag
+    if (this.sarvamWsConnected && this.sarvamWs?.readyState === WebSocket.OPEN && this.isInterrupted) {
+      console.log("🔄 [SARVAM-WS] Resetting interrupted flag on existing connection")
+      this.isInterrupted = false
+      return true
     }
 
     if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.CONNECTING) {
       // Wait for existing connection attempt to complete
       return new Promise((resolve, reject) => {
         const checkInterval = setInterval(() => {
-          if (this.sarvamWsConnected) {
+          if (this.sarvamWsConnected && !this.isInterrupted) {
             clearInterval(checkInterval)
             resolve(true)
           } else if (this.sarvamWs?.readyState === WebSocket.CLOSED) {
@@ -1538,8 +1544,8 @@ class SimplifiedSarvamTTSProcessor {
 
       return new Promise((resolve, reject) => {
         this.sarvamWs.onopen = () => {
-          // Don't check requestId here - connection is valid once opened
           this.sarvamWsConnected = true
+          this.isInterrupted = false // Reset interrupted flag when connection opens
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected`)
 
           // Send initial config message
@@ -1877,6 +1883,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let callDirection = "inbound"
     let agentConfig = null
     let userName = null
+    let lastProcessTime = 0
+    let processDebounceTimer = null
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -1962,7 +1970,9 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          if (currentTTS && isProcessing) {
+          // Don't interrupt TTS for interim results - only for final results
+          if (is_final && currentTTS && isProcessing) {
+            console.log("🛑 [STT-FINAL] Interrupting TTS for final transcript")
             currentTTS.interrupt()
             isProcessing = false
             processingRequestId++
@@ -2031,11 +2041,26 @@ const setupUnifiedVoiceServer = (wss) => {
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
+      // Debounce rapid processing to prevent connection cycling
+      const now = Date.now()
+      if (now - lastProcessTime < 500) { // 500ms debounce
+        console.log("⏳ [USER-UTTERANCE] Debouncing rapid processing...")
+        if (processDebounceTimer) {
+          clearTimeout(processDebounceTimer)
+        }
+        processDebounceTimer = setTimeout(() => {
+          processUserUtterance(text)
+        }, 500)
+        return
+      }
+      lastProcessTime = now
+
       console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
       console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
       console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
 
-      if (currentTTS) {
+      // Only interrupt if we're actually processing something different
+      if (currentTTS && isProcessing && text !== lastProcessedText) {
         console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
         currentTTS.interrupt()
       }
@@ -2049,8 +2074,13 @@ const setupUnifiedVoiceServer = (wss) => {
         const detectedLanguage = currentLanguage || "en"
         console.log("🌐 [USER-UTTERANCE] Using Language:", detectedLanguage)
 
-        // Create TTS processor first for streaming connection
-        currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+        // Reuse existing TTS processor or create new one
+        if (!currentTTS || currentTTS.isInterrupted) {
+          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+        } else {
+          // Reset the existing processor for new synthesis
+          currentTTS.reset(detectedLanguage)
+        }
         
         // Start streaming synthesis
         const streamingStarted = await currentTTS.startStreamingSynthesis(currentRequestId)
@@ -2597,6 +2627,11 @@ const setupUnifiedVoiceServer = (wss) => {
       processingRequestId = 0
       callLogger = null
       callDirection = "inbound"
+      lastProcessTime = 0
+      if (processDebounceTimer) {
+        clearTimeout(processDebounceTimer)
+        processDebounceTimer = null
+      }
       
       // Log final latency metrics
       if (latencyMetrics.totalTranscriptions > 0) {
