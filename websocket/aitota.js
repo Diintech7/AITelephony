@@ -1446,7 +1446,7 @@ class SimplifiedSarvamTTSProcessor {
             type: "config",
             data: {
               target_language_code: this.sarvamLanguage,
-              speaker: this.voice,
+              speaker: "manisha",
               pitch: 0,
               pace: 1.55, // Match sanpbx settings for faster synthesis
               loudness: 1.0,
