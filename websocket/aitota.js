@@ -315,8 +315,7 @@ const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
   }
 }
 
-// Fallback to OpenAI for uncertain cases - COMMENTED OUT FOR LATENCY TESTING
-/*
+// Fallback to OpenAI for uncertain cases
 const detectLanguageWithOpenAI = async (text) => {
   const timer = createTimer("LLM_LANGUAGE_DETECTION")
   try {
@@ -373,7 +372,6 @@ Return only the language code, nothing else.`,
     return "en"
   }
 }
-*/
 
 // Enhanced hybrid language detection
 const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
@@ -394,10 +392,9 @@ const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
     return francResult
   }
   
-  // OpenAI fallback is commented out for latency testing
-  // if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
-  //   return await detectLanguageWithOpenAI(text)
-  // }
+  if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
+    return await detectLanguageWithOpenAI(text)
+  }
   
   return francResult
 }
@@ -1067,9 +1064,9 @@ class EnhancedCallLogger {
       return false
     }
 
-    // Send for any lead status except 'not_connected'
-    if (this.currentLeadStatus && this.currentLeadStatus !== 'not_connected') {
-      console.log(`📨 [WHATSAPP-LOGIC] Sending - lead status is ${this.currentLeadStatus}`)
+    // Send if user is VVI (very very interested)
+    if (this.currentLeadStatus === 'vvi') {
+      console.log(`📨 [WHATSAPP-LOGIC] Sending - user is VVI`)
       return true
     }
 
@@ -1079,7 +1076,7 @@ class EnhancedCallLogger {
       return true
     }
 
-    console.log(`📨 [WHATSAPP-LOGIC] Skipping - status is not_connected and no request`)
+    console.log(`📨 [WHATSAPP-LOGIC] Skipping - not VVI and no request`)
     return false
   }
 
@@ -1100,7 +1097,7 @@ class EnhancedCallLogger {
   }
 }
 
-// Optimized OpenAI processing with reduced latency
+// Simplified OpenAI processing
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
@@ -1110,31 +1107,35 @@ const processWithOpenAI = async (
   userName = null,
 ) => {
   const timer = createTimer("LLM_PROCESSING")
-  
+
   try {
-    // Simplified system prompt for faster processing
+    // Build a stricter system prompt that embeds firstMessage and sets answering policy
     const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
     const firstMessage = (agentConfig.firstMessage || "").trim()
-    
-    // Concise system prompt to reduce token count
-    const systemPrompt = firstMessage 
-      ? `${basePrompt}\n\nFirstGreeting: "${firstMessage}"\n\nKeep responses under 50 tokens. Always end with a question.`
-      : `${basePrompt}\n\nKeep responses under 50 tokens. Always end with a question.`
-
-    // Add user name if available
-    const personalization = userName && userName.trim() 
-      ? `User's name: ${userName.trim()}. `
+    const knowledgeBlock = firstMessage
+      ? `FirstGreeting: "${firstMessage}"\n`
       : ""
 
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
+      "If the information is not present, reply briefly that you don't have that information.",
+      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
+      "Keep the entire reply under 100 tokens.",
+    ].join(" ")
+
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
+      : null
+
     const messages = [
-      { role: "system", content: `${personalization}${systemPrompt}` },
-      ...conversationHistory.slice(-3), // Reduced from 6 to 3 for faster processing
+      { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
+      ...conversationHistory.slice(-6),
       { role: "user", content: userMessage },
     ]
-
-    // Add timeout control and abort controller
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 2000) // 2 second timeout
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -1145,14 +1146,10 @@ const processWithOpenAI = async (
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 60, // Reduced from 120 to 60
+        max_tokens: 120,
         temperature: 0.3,
-        stream: false, // Explicitly set to false
       }),
-      signal: controller.signal,
     })
-
-    clearTimeout(timeoutId)
 
     if (!response.ok) {
       console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
@@ -1164,19 +1161,22 @@ const processWithOpenAI = async (
 
     console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
 
-    // Simplified follow-up logic
-    if (fullResponse && !/[?]\s*$/.test(fullResponse)) {
-      const quickFollowUps = {
-        hi: "कुछ और?",
-        en: "Anything else?",
-        bn: "আর কিছু?",
-        ta: "வேறு ஏதாவது?",
-        te: "ఇంకా ఏమైనా?",
-        mr: "आणखी काही?",
-        gu: "બીજું કંઈક?",
+    // Ensure a follow-up question is present at the end
+    if (fullResponse) {
+      const needsFollowUp = !/[?]\s*$/.test(fullResponse)
+      if (needsFollowUp) {
+        const followUps = {
+          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
+          en: "Is there anything else I can help you with?",
+          bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
+          ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
+          te: "ఇంకేమైనా సహాయం కావాలా?",
+          mr: "आणखी काही मदत हवी आहे का?",
+          gu: "શું બીજી કોઈ મદદ કરી શકું?",
+        }
+        const fu = followUps[detectedLanguage] || followUps.en
+        fullResponse = `${fullResponse} ${fu}`.trim()
       }
-      const fu = quickFollowUps[detectedLanguage] || quickFollowUps.en
-      fullResponse = `${fullResponse} ${fu}`.trim()
     }
 
     if (callLogger && fullResponse) {
@@ -1185,11 +1185,7 @@ const processWithOpenAI = async (
 
     return fullResponse
   } catch (error) {
-    if (error.name === 'AbortError') {
-      console.log(`⏰ [LLM-PROCESSING] ${timer.end()}ms - Timeout after 2 seconds`)
-    } else {
-      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
-    }
+    console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
     return null
   }
 }
@@ -1400,29 +1396,25 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      const controller = new AbortController()
-      const ttsTimeout = setTimeout(() => controller.abort(), 10000)
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "API-Subscription-Key": API_KEYS.sarvam,
-          "Connection": "keep-alive",
         },
         body: JSON.stringify({
           inputs: [text],
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
           pitch: 0,
-          pace: 1,
+          pace: 1.0,
           loudness: 1.0,
           speech_sample_rate: 8000,
+          enable_preprocessing: false,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
-        signal: controller.signal,
       })
-      clearTimeout(ttsTimeout)
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
@@ -1624,13 +1616,6 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramReady = false
     let deepgramAudioQueue = []
     let sttTimer = null
-    let latencyMetrics = {
-      totalTranscriptions: 0,
-      totalLatency: 0,
-      averageLatency: 0,
-      minLatency: Infinity,
-      maxLatency: 0
-    }
 
     const connectToDeepgram = async () => {
       try {
@@ -1644,10 +1629,8 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        // Reverted to original working parameters - latency optimizations will come from other areas
+        deepgramUrl.searchParams.append("endpointing", "300")
 
-        console.log("🔗 [DEEPGRAM] Connecting to:", deepgramUrl.toString())
-        
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         })
@@ -1667,26 +1650,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         deepgramWs.onerror = (error) => {
           console.log("❌ [DEEPGRAM] Connection error:", error.message)
-          console.log("❌ [DEEPGRAM] Error details:", error)
           deepgramReady = false
         }
 
-        deepgramWs.onclose = (event) => {
+        deepgramWs.onclose = () => {
           console.log("🔌 [DEEPGRAM] Connection closed")
-          console.log("🔌 [DEEPGRAM] Close code:", event.code, "Reason:", event.reason)
           deepgramReady = false
-          
-          // Retry connection if it was closed unexpectedly
-          if (event.code !== 1000 && event.code !== 1001) {
-            console.log("🔄 [DEEPGRAM] Attempting to reconnect...")
-            setTimeout(() => {
-              if (streamSid && !deepgramReady) {
-                connectToDeepgram().catch(err => 
-                  console.log("❌ [DEEPGRAM] Reconnection failed:", err.message)
-                )
-              }
-            }, 2000)
-          }
         }
       } catch (error) {
         // Silent error handling
@@ -1710,45 +1679,18 @@ const setupUnifiedVoiceServer = (wss) => {
           }
 
           if (is_final) {
-            const latency = sttTimer.end()
-            console.log(`🕒 [STT-TRANSCRIPTION] ${latency}ms - Text: "${transcript.trim()}"`)
-            
-            // Update latency metrics
-            latencyMetrics.totalTranscriptions++
-            latencyMetrics.totalLatency += latency
-            latencyMetrics.averageLatency = latencyMetrics.totalLatency / latencyMetrics.totalTranscriptions
-            latencyMetrics.minLatency = Math.min(latencyMetrics.minLatency, latency)
-            latencyMetrics.maxLatency = Math.max(latencyMetrics.maxLatency, latency)
-            
-            // Log performance improvements
-            if (latencyMetrics.totalTranscriptions % 10 === 0) {
-              console.log(`📊 [LATENCY-METRICS] Avg: ${latencyMetrics.averageLatency.toFixed(1)}ms, Min: ${latencyMetrics.minLatency}ms, Max: ${latencyMetrics.maxLatency}ms`)
-            }
-            
+            console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
             sttTimer = null
 
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
             if (callLogger && transcript.trim()) {
-              // const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
-              callLogger.logUserTranscript(transcript.trim(), currentLanguage || "en")
+              const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
+              callLogger.logUserTranscript(transcript.trim(), detectedLang)
             }
 
-            // Process immediately without additional delays
             await processUserUtterance(userUtteranceBuffer)
             userUtteranceBuffer = ""
-          } else {
-            // Handle interim results for faster response
-            const interimText = transcript.trim()
-            if (interimText && interimText.length > 2) { // Reduced threshold for faster response
-              console.log(`🔄 [STT-INTERIM] "${interimText}"`)
-              
-              // Process interim results more aggressively for lower latency
-              if (interimText.length < 30 && !isProcessing && interimText.length > 5) {
-                console.log(`⚡ [STT-INTERIM] Processing short interim result for faster response`)
-                await processUserUtterance(interimText)
-              }
-            }
           }
         }
       } else if (data.type === "UtteranceEnd") {
@@ -1759,8 +1701,8 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (userUtteranceBuffer.trim()) {
           if (callLogger && userUtteranceBuffer.trim()) {
-            // const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), currentLanguage || "en")
+            const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
+            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
           }
 
           await processUserUtterance(userUtteranceBuffer)
@@ -1786,60 +1728,59 @@ const setupUnifiedVoiceServer = (wss) => {
       const currentRequestId = ++processingRequestId
 
       try {
-        // Detect language dynamically and update if changed
         const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
         console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
+
         if (detectedLanguage !== currentLanguage) {
           console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
           currentLanguage = detectedLanguage
         }
 
-        // Run all detections in parallel along with LLM response
+        // Run all AI detections in parallel for efficiency
         console.log("🔍 [USER-UTTERANCE] Running AI detections...")
+        
         const [
-          disconnectionIntent,
-          leadStatus,
-          whatsappRequest,
-          aiResponse,
+          disconnectionIntent, 
+          leadStatus, 
+          whatsappRequest, 
+          aiResponse
         ] = await Promise.all([
           detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
           detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
           detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
-          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig),
+          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig)
         ])
 
-        // Update call logger state
+        // Update call logger with detected information
         if (callLogger) {
           callLogger.updateLeadStatus(leadStatus)
           if (whatsappRequest === "WHATSAPP_REQUEST") {
             callLogger.markWhatsAppRequested()
           }
         }
-
-        // Handle user-requested disconnection
+        
         if (disconnectionIntent === "DISCONNECT") {
           console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
+          
+          // Wait 2 seconds to ensure last message is processed, then terminate
           setTimeout(async () => {
             if (callLogger) {
               try {
-                await callLogger.ultraFastTerminateWithMessage(
-                  "Thank you for your time. Have a great day!",
-                  detectedLanguage,
-                  'user_requested_disconnect'
-                )
+                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
                 console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
               } catch (err) {
                 console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
               }
             }
           }, 2000)
+          
           return
         }
 
         if (processingRequestId === currentRequestId && aiResponse) {
           console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
           console.log("🎤 [USER-UTTERANCE] Starting TTS...")
-
+          
           currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
           await currentTTS.synthesizeAndStream(aiResponse)
 
@@ -1851,7 +1792,7 @@ const setupUnifiedVoiceServer = (wss) => {
           if (conversationHistory.length > 10) {
             conversationHistory = conversationHistory.slice(-10)
           }
-
+          
           console.log("✅ [USER-UTTERANCE] Processing completed")
         } else {
           console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
@@ -2158,17 +2099,8 @@ const setupUnifiedVoiceServer = (wss) => {
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
                 deepgramWs.send(audioBuffer)
               } else {
-                // Ultra-optimized queue management for minimal latency
                 deepgramAudioQueue.push(audioBuffer)
-                
-                // More aggressive queue limiting for ultra-low latency
-                if (deepgramAudioQueue.length > 30) { // Reduced from 50 to 30
-                  // Keep only the most recent packets for minimal latency
-                  deepgramAudioQueue = deepgramAudioQueue.slice(-15) // Reduced from 25 to 15
-                  console.log("⚡ [SIP-MEDIA] Audio queue ultra-optimized for minimal latency")
-                }
-                
-                if (deepgramAudioQueue.length % 15 === 0) { // Reduced from 25 to 15
+                if (deepgramAudioQueue.length % 100 === 0) {
                   console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
                 }
               }
@@ -2181,18 +2113,44 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
             console.log("🛑 [SIP-STOP] Mobile:", mobile)
 
-            // WhatsApp sending disabled as per requirement; persist intent only
+            // Intelligent WhatsApp send based on lead status and user requests
             try {
-              if (callLogger?.callLogId) {
-                await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                  'metadata.whatsappRequested': !!callLogger.whatsappRequested,
-                  'metadata.whatsappMessageSent': false,
-                  'metadata.lastUpdated': new Date()
-                }).catch(() => {})
-                console.log("📨 [WHATSAPP] stop-event: sending disabled; intent recorded")
+              if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+                const waLink = getAgentWhatsappLink(agentConfig)
+                const waNumber = normalizeIndianMobile(mobile)
+                const waApiUrl = agentConfig?.whatsapplink
+                console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+                if (waLink && waNumber && waApiUrl) {
+                  sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+                    .then(async (r) => {
+                      console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+                      if (r?.ok) {
+                        await billWhatsAppCredit({
+                          clientId: agentConfig.clientId || accountSid,
+                          mobile,
+                          link: waLink,
+                          callLogId: callLogger?.callLogId,
+                          streamSid,
+                        })
+                        callLogger.markWhatsAppSent()
+                      }
+                    })
+                    .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
+                } else {
+                  console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
+                }
+              } else {
+                console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
+                  hasCallLogger: !!callLogger,
+                  whatsappEnabled: agentConfig?.whatsappEnabled,
+                  shouldSend: callLogger?.shouldSendWhatsApp(),
+                  leadStatus: callLogger?.currentLeadStatus,
+                  alreadySent: callLogger?.whatsappSent,
+                  requested: callLogger?.whatsappRequested
+                })
               }
             } catch (waErr) {
-              console.log("❌ [WHATSAPP] stop-event persistence error:", waErr.message)
+              console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
             }
             
             // Handle external call disconnection
@@ -2249,18 +2207,44 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🔌 [SIP-CLOSE] StreamSID:", streamSid)
       console.log("🔌 [SIP-CLOSE] Call Direction:", callDirection)
       
-      // WhatsApp sending disabled as per requirement; persist intent only
+      // Safety: Intelligent WhatsApp send on close if conditions are met
       try {
-        if (callLogger?.callLogId) {
-          await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
-            'metadata.whatsappMessageSent': false,
-            'metadata.lastUpdated': new Date()
-          }).catch(() => {})
-          console.log("📨 [WHATSAPP] close-event: sending disabled; intent recorded")
+        if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+          const waLink = getAgentWhatsappLink(agentConfig)
+          const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+          const waApiUrl = agentConfig?.whatsapplink
+          console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+          if (waLink && waNumber && waApiUrl) {
+            sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+              .then(async (r) => {
+                console.log("📨 [WHATSAPP] close-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+                if (r?.ok) {
+                  await billWhatsAppCredit({
+                    clientId: agentConfig.clientId || callLogger?.clientId,
+                    mobile: callLogger?.mobile || null,
+                    link: waLink,
+                    callLogId: callLogger?.callLogId,
+                    streamSid,
+                  })
+                  callLogger.markWhatsAppSent()
+                }
+              })
+              .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
+          } else {
+            console.log("📨 [WHATSAPP] close-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
+          }
+        } else {
+          console.log("📨 [WHATSAPP] close-event skipped → conditions not met:", {
+            hasCallLogger: !!callLogger,
+            whatsappEnabled: agentConfig?.whatsappEnabled,
+            shouldSend: callLogger?.shouldSendWhatsApp(),
+            leadStatus: callLogger?.currentLeadStatus,
+            alreadySent: callLogger?.whatsappSent,
+            requested: callLogger?.whatsappRequested
+          })
         }
       } catch (waErr) {
-        console.log("❌ [WHATSAPP] close-event persistence error:", waErr.message)
+        console.log("❌ [WHATSAPP] close-event unexpected:", waErr.message)
       }
       
       if (callLogger) {
@@ -2311,20 +2295,6 @@ const setupUnifiedVoiceServer = (wss) => {
       processingRequestId = 0
       callLogger = null
       callDirection = "inbound"
-      
-      // Log final latency metrics
-      if (latencyMetrics.totalTranscriptions > 0) {
-        console.log(`📊 [FINAL-LATENCY-METRICS] Total: ${latencyMetrics.totalTranscriptions}, Avg: ${latencyMetrics.averageLatency.toFixed(1)}ms, Min: ${latencyMetrics.minLatency}ms, Max: ${latencyMetrics.maxLatency}ms`)
-      }
-      
-      // Reset latency metrics
-      latencyMetrics = {
-        totalTranscriptions: 0,
-        totalLatency: 0,
-        averageLatency: 0,
-        minLatency: Infinity,
-        maxLatency: 0
-      }
       agentConfig = null
       sttTimer = null
       
