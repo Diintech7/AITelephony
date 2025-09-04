@@ -1549,16 +1549,14 @@ class SimplifiedSarvamTTSProcessor {
               target_language_code: this.sarvamLanguage,
               speaker: "manisha",
               pitch: 0,
-              pace: 1.8, // Increased from 1 to 1.8 for faster synthesis
+              pace: 1, // Match sanpbx settings for faster synthesis
               loudness: 1.0,
               enable_preprocessing: true,
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
-              min_buffer_size: 20, // Reduced from 50 to 20 for faster streaming
-              max_chunk_length: 100, // Reduced from 150 to 100 for faster chunks
-              streaming_mode: true, // Enable streaming mode
-              low_latency: true, // Enable low latency mode
+              min_buffer_size: 50, // As per HTML example
+              max_chunk_length: 150, // As per HTML example
             },
           }
           this.sarvamWs.send(JSON.stringify(configMessage))
