@@ -66,6 +66,176 @@ const setupSanPbxWebSocketServer = (ws) => {
   let lastProcessedTime = 0
   let activeResponseId = null
 
+  // Sarvam WS TTS processor (streams base64 PCM via reverse-media)
+  class SarvamWSTTSProcessor {
+    constructor(language, ws, ids) {
+      this.language = language || "en-IN"
+      this.ws = ws
+      this.streamId = ids?.streamId || null
+      this.callId = ids?.callId || null
+      this.channelId = ids?.channelId || null
+      this.sarvamWs = null
+      this.sarvamWsConnected = false
+      this.isInterrupted = false
+      this.audioQueue = []
+      this.isStreamingOut = false
+      this.totalAudioBytes = 0
+      this.currentRequestId = 0
+      this.pendingPhraseCarry = ""
+      this.voice = "meera"
+      this.sarvamLanguage = language || "en-IN"
+    }
+
+    interrupt() {
+      this.isInterrupted = true
+      this.audioQueue = []
+      this.isStreamingOut = false
+    }
+
+    reset(newLanguage) {
+      this.interrupt()
+      if (newLanguage) {
+        this.language = newLanguage
+        this.sarvamLanguage = newLanguage
+      }
+      this.isInterrupted = false
+      this.totalAudioBytes = 0
+      this.currentRequestId = 0
+    }
+
+    async connectSarvamWs(requestId) {
+      if (this.sarvamWsConnected && this.sarvamWs?.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        return true
+      }
+      const url = new URL("wss://api.sarvam.ai/text-to-speech/ws")
+      url.searchParams.append("model", "bulbul:v2")
+      return new Promise((resolve, reject) => {
+        try {
+          this.sarvamWs = new WebSocket(url.toString(), [`api-subscription-key.${SARVAM_API_KEY}`])
+        } catch (e) {
+          return reject(e)
+        }
+        this.sarvamWs.onopen = () => {
+          this.sarvamWsConnected = true
+          this.isInterrupted = false
+          const config = {
+            type: "config",
+            data: {
+              target_language_code: this.sarvamLanguage,
+              speaker: this.voice,
+              pitch: 0,
+              pace: 1,
+              loudness: 1.0,
+              output_audio_codec: "linear16",
+              speech_sample_rate: 8000,
+              min_buffer_size: 50,
+              max_chunk_length: 150,
+            },
+          }
+          try { this.sarvamWs.send(JSON.stringify(config)) } catch (_) {}
+          resolve(true)
+        }
+        this.sarvamWs.onmessage = (evt) => {
+          if (this.isInterrupted) return
+          try {
+            const msg = JSON.parse(evt.data)
+            if (msg.type === "audio" && msg.data?.audio) {
+              const buf = Buffer.from(msg.data.audio, "base64")
+              this.audioQueue.push(buf)
+              this.totalAudioBytes += buf.length
+              if (!this.isStreamingOut) {
+                this.startStreamingOut()
+              }
+            }
+          } catch (_) {}
+        }
+        this.sarvamWs.onerror = (err) => {
+          this.sarvamWsConnected = false
+          reject(err)
+        }
+        this.sarvamWs.onclose = () => {
+          this.sarvamWsConnected = false
+        }
+      })
+    }
+
+    async startStreamingOut() {
+      if (this.isStreamingOut || this.isInterrupted) return
+      this.isStreamingOut = true
+      const SAMPLE_RATE = 8000
+      const BYTES_PER_SAMPLE = 2
+      const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+      const CHUNK_MS = 20
+      const CHUNK_SIZE = CHUNK_MS * BYTES_PER_MS // 160*2=320 bytes
+      while (!this.isInterrupted) {
+        if (this.audioQueue.length === 0) {
+          await new Promise(r => setTimeout(r, 30))
+          continue
+        }
+        const audioBuffer = this.audioQueue.shift()
+        let position = 0
+        while (position < audioBuffer.length && !this.isInterrupted) {
+          const remaining = audioBuffer.length - position
+          const take = Math.min(CHUNK_SIZE, remaining)
+          const chunk = audioBuffer.slice(position, position + take)
+          const padded = chunk.length === CHUNK_SIZE ? chunk : Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)])
+          const payload = padded.toString("base64")
+          const msg = {
+            event: "reverse-media",
+            payload,
+            streamId: this.streamId,
+            channelId: this.channelId,
+            callId: this.callId,
+          }
+          if (this.ws.readyState === WebSocket.OPEN) {
+            try { this.ws.send(JSON.stringify(msg)) } catch (_) { this.isInterrupted = true; break }
+          } else {
+            this.isInterrupted = true
+            break
+          }
+          position += take
+          if (position < audioBuffer.length && !this.isInterrupted) {
+            await new Promise(r => setTimeout(r, CHUNK_MS))
+          }
+        }
+      }
+      this.isStreamingOut = false
+    }
+
+    async synthesizeAndStream(text) {
+      if (this.isInterrupted) return
+      const requestId = ++this.currentRequestId
+      this.audioQueue = []
+      this.isStreamingOut = false
+      const ok = await this.connectSarvamWs(requestId).catch(() => false)
+      if (!ok || this.isInterrupted || this.currentRequestId !== requestId) return
+      try {
+        this.sarvamWs.send(JSON.stringify({ type: "text", data: { text } }))
+        this.sarvamWs.send(JSON.stringify({ type: "flush" }))
+      } catch (_) {}
+    }
+
+    async startStreamingSynthesis(requestId) {
+      if (this.isInterrupted) return false
+      this.audioQueue = []
+      this.isStreamingOut = false
+      this.currentRequestId = requestId
+      const ok = await this.connectSarvamWs(requestId).catch(() => false)
+      return !!ok
+    }
+
+    queuePhrase(text) {
+      if (this.isInterrupted) return
+      const t = (text || "").trim()
+      if (!t) return
+      try { this.sarvamWs?.send(JSON.stringify({ type: "text", data: { text: t } })) } catch (_) {}
+    }
+
+    sendFlush() {
+      try { this.sarvamWs?.send(JSON.stringify({ type: "flush" })) } catch (_) {}
+    }
+  }
+
   /**
    * Track response to prevent multiple responses to same input
    */
@@ -533,6 +703,54 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
   }
 
+  // OpenAI streaming that feeds Sarvam WS progressively
+  const processWithOpenAIStreaming = async (userMessage, ttsProcessor) => {
+    try {
+      const system = {
+        role: "system",
+        content: "You are a helpful AI assistant. Keep responses brief and conversational.",
+      }
+      const messages = [system, ...conversationHistory.slice(-3), { role: "user", content: userMessage }]
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 4000)
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: JSON.stringify({ model: "gpt-4o-mini", messages, max_tokens: 80, temperature: 0.2, stream: true }),
+        signal: controller.signal,
+      })
+      clearTimeout(timeoutId)
+      if (!res.ok) return null
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let full = ""
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ""
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6)
+          if (data === '[DONE]') { ttsProcessor?.sendFlush(); break }
+          try {
+            const parsed = JSON.parse(data)
+            const delta = parsed.choices?.[0]?.delta?.content
+            if (delta) {
+              full += delta
+              if (delta.trim()) ttsProcessor?.queuePhrase(delta)
+            }
+          } catch (_) {}
+        }
+      }
+      return full.trim()
+    } catch (e) {
+      return null
+    }
+  }
+
   /**
    * Process user speech input with duplicate prevention and response tracking
    */
@@ -568,27 +786,18 @@ const setupSanPbxWebSocketServer = (ws) => {
       const quickResponse = getQuickResponse(transcript)
 
       if (quickResponse && isResponseActive(responseId)) {
-        console.log(`[PROCESS] Quick response found: "${quickResponse}"`)
         conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: quickResponse })
-
-        await synthesizeAndStreamAudio(quickResponse)
-        console.log(`[PROCESS] TTS finished for quick response.`)
+        const tts = new SarvamWSTTSProcessor("en-IN", ws, { streamId, callId, channelId })
+        await tts.synthesizeAndStream(quickResponse)
       } else if (isResponseActive(responseId)) {
-        console.log(`[PROCESS] Getting AI response for: "${transcript}"`)
-        
-        const aiResponse = await getAIResponse(transcript)
-        if (aiResponse && isResponseActive(responseId)) {
-          console.log(`[PROCESS] AI response received: "${aiResponse}"`)
-          
-          conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
-
-          // Keep history lean for performance
-          if (conversationHistory.length > 6) {
-            conversationHistory = conversationHistory.slice(-6)
+        const tts = new SarvamWSTTSProcessor("en-IN", ws, { streamId, callId, channelId })
+        const started = await tts.startStreamingSynthesis(responseId)
+        if (started) {
+          const aiResponse = await processWithOpenAIStreaming(transcript, tts)
+          if (aiResponse && isResponseActive(responseId)) {
+            conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
+            if (conversationHistory.length > 6) conversationHistory = conversationHistory.slice(-6)
           }
-
-          await synthesizeAndStreamAudio(aiResponse)
-          console.log(`[PROCESS] TTS finished for AI response.`)
         }
       }
 
@@ -672,13 +881,19 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0)
 
-          // Send greeting after call is established
+          // Send greeting using Sarvam WS streaming after call is established
           const greeting = "Hi! How can I help you?"
           console.log("[SANPBX] Sending greeting:", greeting)
 
           setTimeout(async () => {
-            await synthesizeAndStreamAudio(greeting)
-          }, 1500) // Wait for call to be fully established
+            try {
+              const tts = new SarvamWSTTSProcessor("en-IN", ws, { streamId, callId, channelId })
+              await tts.synthesizeAndStream(greeting)
+            } catch (e) {
+              // Fallback to HTTP TTS if WS fails
+              await synthesizeAndStreamAudio(greeting)
+            }
+          }, 1500)
           break
 
         case "answer":
