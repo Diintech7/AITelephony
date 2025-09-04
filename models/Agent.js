@@ -15,6 +15,7 @@ const agentSchema = new mongoose.Schema({
   agentId: {type: String},
   // Active Status
   isActive: { type: Boolean, default: true, index: true },
+  isApproved: { type: Boolean, default: false, index: true },
 
   // Personal Information
   agentName: { type: String, required: true },
@@ -87,9 +88,14 @@ const agentSchema = new mongoose.Schema({
   callerId: { type: String, index: true }, // For outbound call matching
   serviceProvider: {
     type: String,
-    enum: ["twilio", "vonage", "plivo", "bandwidth", "other", "c-zentrix", "tata"],
+    enum: ["twilio", "vonage", "plivo", "bandwidth", "other", "c-zentrix", "tata", "snapbx"],
   },
   X_API_KEY: { type: String }, // Add missing X_API_KEY field
+
+  // SnapBX provider fields
+  didNumber: { type: String },
+  accessToken: { type: String },
+  accessKey: { type: String },
 
   // Audio storage - Store as base64 string instead of Buffer
   audioFile: { type: String }, // File path (legacy support)
@@ -120,9 +126,6 @@ const agentSchema = new mongoose.Schema({
 
   // Convenience single WhatsApp link for quick access
   whatsapplink: { type: String },
-  
-  // WhatsApp API configuration
-  whatsappApiUrl: { type: String },
 
   whatsapp: [
     {
@@ -147,6 +150,28 @@ const agentSchema = new mongoose.Schema({
 
   // Assigned templates (admin -> agent)
   templates: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Template' }],
+  
+  // WhatsApp template data for approved templates
+  whatsappTemplates: [
+    {
+      templateId: { type: String },
+      templateName: { type: String },
+      templateUrl: { type: String },
+      description: { type: String },
+      language: { type: String },
+      status: { type: String },
+      category: { type: String },
+      assignedAt: { type: Date, default: Date.now }
+    }
+  ],
+
+  // Default template for each platform
+  defaultTemplate: {
+    templateId: { type: String },
+    templateName: { type: String },
+    templateUrl: { type: String },
+    platform: { type: String }
+  },
 
   // Timestamps
   createdAt: { type: Date, default: Date.now },
@@ -186,6 +211,7 @@ agentSchema.pre("save", function (next) {
   // Clean up disabled social media fields
   if (!this.whatsappEnabled) {
     this.whatsapp = undefined;
+    this.whatsapplink = undefined;
   }
   if (!this.telegramEnabled) {
     this.telegram = undefined;

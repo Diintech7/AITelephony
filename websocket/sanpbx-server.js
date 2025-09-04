@@ -1,5 +1,6 @@
 const WebSocket = require("ws")
 require("dotenv").config()
+const Agent = require("../models/Agent")
 
 // API Keys from environment
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY
@@ -33,6 +34,16 @@ const QUICK_RESPONSES = {
   "that's all": "Alright! Is there anything else you need?",
   "nothing else": "Perfect! Have a wonderful day!",
   "that's it": "Great! Feel free to call back if you need anything else.",
+}
+
+// Helpers
+function extractDigits(value) {
+  if (!value) return ""
+  return String(value).replace(/\D+/g, "")
+}
+function last10Digits(value) {
+  const digits = extractDigits(value)
+  return digits.slice(-10)
 }
 
 /**
@@ -667,6 +678,49 @@ const setupSanPbxWebSocketServer = (ws) => {
             inputEncoding = 'linear16'
             inputSampleRateHz = 8000
             inputChannels = 1
+          }
+
+          // Resolve agent using DID/CallerID priority (like aitota.js style)
+          try {
+            const fromNumber = startInfo.from || data.from || callerIdValue
+            const toNumber = startInfo.to || data.to || didValue
+            const fromLast = last10Digits(fromNumber)
+            const toLast = last10Digits(toNumber)
+
+            let agent = null
+            let matchReason = "none"
+
+            if (!agent && didValue) {
+              agent = await Agent.findOne({ isActive: true, callerId: String(didValue) })
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId")
+                .lean()
+              if (agent) matchReason = "callerId==DID"
+            }
+
+            if (!agent && callerIdValue) {
+              agent = await Agent.findOne({ isActive: true, callerId: String(callerIdValue) })
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId")
+                .lean()
+              if (agent) matchReason = "callerId==CallerID"
+            }
+
+            if (!agent) {
+              try {
+                const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
+                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId")
+                  .lean()
+                agent = candidates.find((a) => last10Digits(a.callingNumber) === toLast || last10Digits(a.callingNumber) === fromLast) || null
+                if (agent) matchReason = "callingNumber(last10)==to/from"
+              } catch (_) {}
+            }
+
+            if (agent) {
+              console.log(`[SANPBX] Agent matched: ${agent.agentName} (reason=${matchReason})`)
+            } else {
+              console.log(`[SANPBX] No agent matched via DID/CallerID/last10. Proceeding without agent binding.`)
+            }
+          } catch (e) {
+            console.log(`[SANPBX] Agent matching error: ${e.message}`)
           }
 
           // Connect to Deepgram for speech recognition
