@@ -1113,6 +1113,7 @@ const isValidTextChunk = (text) => {
 }
 
 // Streaming OpenAI processing with direct Sarvam connection
+// Uses token-based chunking (5-10 tokens) instead of punctuation-based chunking for lower latency
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -1123,6 +1124,10 @@ const processWithOpenAIStreaming = async (
   ttsProcessor = null,
 ) => {
   const timer = createTimer("LLM_STREAMING")
+  
+  // Token-based chunking configuration for lower latency
+  const MIN_CHUNK_TOKENS = 5  // Minimum tokens before sending a chunk
+  const MAX_CHUNK_TOKENS = 8  // Maximum tokens per chunk
   
   try {
     // Simplified system prompt for faster processing
@@ -1198,7 +1203,7 @@ const processWithOpenAIStreaming = async (
           if (line.startsWith('data: ')) {
             const data = line.slice(6)
             if (data === '[DONE]') {
-              // Send any remaining text
+              // Send any remaining text in buffer
               const finalText = sentenceBuffer.trim()
               if (isValidTextChunk(finalText)) {
                 if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
@@ -1227,26 +1232,29 @@ const processWithOpenAIStreaming = async (
                 fullResponse += content
                 sentenceBuffer += content
 
-                // Send complete sentences to Sarvam immediately
-                const sentences = sentenceBuffer.split(/([.!?।]+)/)
-                if (sentences.length > 1) {
-                  // Send all complete sentences except the last incomplete one
-                  const completeSentences = sentences.slice(0, -1).join('')
-                  const cleanText = completeSentences.trim()
-                  if (isValidTextChunk(cleanText)) {
+                // Send short chunks (5-10 tokens) to Sarvam instead of waiting for punctuation
+                const words = sentenceBuffer.split(/\s+/).filter(word => word.trim().length > 0)
+                if (words.length >= MIN_CHUNK_TOKENS) { // Send when we have enough tokens
+                  // Take first MAX_CHUNK_TOKENS words (or all if less) to keep chunks manageable
+                  const chunkWords = words.slice(0, Math.min(MAX_CHUNK_TOKENS, words.length))
+                  const chunkText = chunkWords.join(' ').trim()
+                  
+                  if (isValidTextChunk(chunkText)) {
                     if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
                       const textMessage = {
                         type: "text",
-                        data: { text: cleanText },
+                        data: { text: chunkText },
                       }
                       ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                      console.log(`📝 [LLM→SARVAM] Sent chunk: "${cleanText}"`)
+                      console.log(`📝 [LLM→SARVAM] Sent chunk (${chunkWords.length} tokens): "${chunkText}"`)
                     }
                   } else {
-                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${cleanText}"`)
+                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${chunkText}"`)
                   }
-                  // Keep the last incomplete sentence in buffer
-                  sentenceBuffer = sentences[sentences.length - 1]
+                  
+                  // Keep remaining words in buffer
+                  const remainingWords = words.slice(chunkWords.length)
+                  sentenceBuffer = remainingWords.length > 0 ? remainingWords.join(' ') : ''
                 }
               }
             } catch (parseError) {
