@@ -1515,10 +1515,7 @@ class SimplifiedSarvamTTSProcessor {
 
       return new Promise((resolve, reject) => {
         this.sarvamWs.onopen = () => {
-          if (this.isInterrupted || this.currentSarvamRequestId !== requestId) {
-            this.sarvamWs.close()
-            return reject(new Error("Connection opened but interrupted or outdated request"))
-          }
+          // Don't check requestId here - connection is valid once opened
           this.sarvamWsConnected = true
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected`)
 
@@ -1545,8 +1542,8 @@ class SimplifiedSarvamTTSProcessor {
         }
 
         this.sarvamWs.onmessage = async (event) => {
-          if (this.isInterrupted || this.currentSarvamRequestId !== requestId) {
-            return // Ignore messages if interrupted or outdated
+          if (this.isInterrupted) {
+            return // Ignore messages if interrupted
           }
           try {
             const response = JSON.parse(event.data)
@@ -1555,7 +1552,7 @@ class SimplifiedSarvamTTSProcessor {
               this.audioQueue.push(audioBuffer)
               this.totalAudioBytes += audioBuffer.length
               if (!this.isStreamingToSIP) {
-                this.startStreamingToSIP(requestId)
+                this.startStreamingToSIP()
               }
             } else if (response.type === "error") {
               console.error(`❌ [SARVAM-WS] Error: ${response.data.message} (Code: ${response.data.code})`)
@@ -1628,17 +1625,18 @@ class SimplifiedSarvamTTSProcessor {
 
   // New method for streaming text input (used by OpenAI streaming)
   async startStreamingSynthesis(requestId) {
-    if (this.isInterrupted) return
+    if (this.isInterrupted) return false
 
     this.audioQueue = [] // Clear queue for new synthesis
     this.isStreamingToSIP = false // Reset streaming flag
+    this.currentSarvamRequestId = requestId // Set the current request ID
 
     const timer = createTimer("TTS_STREAMING_START")
 
     try {
       const connected = await this.connectSarvamWs(requestId)
-      if (!connected || this.isInterrupted || this.currentSarvamRequestId !== requestId) {
-        console.log("❌ [TTS-STREAMING] Sarvam WS not connected or interrupted/outdated request, aborting streaming synthesis")
+      if (!connected || this.isInterrupted) {
+        console.log("❌ [TTS-STREAMING] Sarvam WS not connected or interrupted, aborting streaming synthesis")
         return false
       }
 
@@ -1688,9 +1686,9 @@ class SimplifiedSarvamTTSProcessor {
     }
   }
 
-  async startStreamingToSIP(requestId) {
-    if (this.isStreamingToSIP || this.isInterrupted || this.currentSarvamRequestId !== requestId) {
-      return // Already streaming or interrupted/outdated request
+  async startStreamingToSIP() {
+    if (this.isStreamingToSIP || this.isInterrupted) {
+      return // Already streaming or interrupted
     }
     this.isStreamingToSIP = true
     console.log("🚀 [SARVAM→SIP] Start streaming audio to SIP")
@@ -1700,12 +1698,12 @@ class SimplifiedSarvamTTSProcessor {
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // 40ms chunks for SIP
 
-    while (!this.isInterrupted && this.currentSarvamRequestId === requestId) {
+    while (!this.isInterrupted) {
       if (this.audioQueue.length > 0) {
         const audioBuffer = this.audioQueue.shift() // Get the next audio chunk
 
         let position = 0
-        while (position < audioBuffer.length && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
+        while (position < audioBuffer.length && !this.isInterrupted) {
           const remaining = audioBuffer.length - position
           const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
           const chunk = audioBuffer.slice(position, position + chunkSize)
@@ -1718,7 +1716,7 @@ class SimplifiedSarvamTTSProcessor {
             },
           }
 
-          if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
+          if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
             try {
               this.ws.send(JSON.stringify(mediaMessage))
             } catch (error) {
@@ -1732,7 +1730,7 @@ class SimplifiedSarvamTTSProcessor {
             break
           }
 
-          if (position + chunkSize < audioBuffer.length && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
+          if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
             const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
             const delayMs = Math.max(chunkDurationMs - 2, 10) // Small delay to prevent buffer underrun
             await new Promise((resolve) => setTimeout(resolve, delayMs))
