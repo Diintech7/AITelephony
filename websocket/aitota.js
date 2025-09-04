@@ -1233,7 +1233,7 @@ const processWithOpenAIStreaming = async (
 
                 // Emit short phrases (~1s) instead of waiting for full sentences
                 const now = Date.now()
-                const CHUNK_MIN_CHARS = 24
+                const CHUNK_MIN_CHARS = 28
                 const hasSentenceEnd = /[.!?।]/.test(sentenceBuffer)
                 const hasPhraseBoundary = /[,;:]/.test(sentenceBuffer)
                 const enoughLength = sentenceBuffer.length >= CHUNK_MIN_CHARS
@@ -1492,6 +1492,7 @@ class SimplifiedSarvamTTSProcessor {
     this.phraseQueue = []
     this.lastAudioReceivedAt = 0
     this._utteranceSettleTimer = null
+    this.pendingPhraseCarry = ""
   }
 
   interrupt() {
@@ -1624,8 +1625,43 @@ class SimplifiedSarvamTTSProcessor {
     if (this.isInterrupted) return
     const clean = (text || "").trim()
     if (!clean) return
-    this.phraseQueue.push(clean)
+    const prepared = this._preparePhraseForLanguage(clean)
+    if (!prepared) {
+      // Hold as carry to merge with next incoming phrase
+      this.pendingPhraseCarry = (this.pendingPhraseCarry + ' ' + clean).trim()
+      return
+    }
+    this.phraseQueue.push(prepared)
     this._processPhraseQueue().catch(() => {})
+  }
+
+  _preparePhraseForLanguage(text) {
+    const combined = (this.pendingPhraseCarry ? (this.pendingPhraseCarry + ' ' + text) : text).trim()
+    this.pendingPhraseCarry = ""
+    if (this._isChunkAllowedForLanguage(combined)) {
+      return combined
+    }
+    // If still not allowed, keep as carry and skip sending now
+    this.pendingPhraseCarry = combined
+    return null
+  }
+
+  _isChunkAllowedForLanguage(text) {
+    const t = (text || "").trim()
+    if (!t) return false
+    // Require at least one letter character
+    const hasLetter = /[A-Za-z\u0900-\u097F\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0980-\u09FF]/.test(t)
+    if (!hasLetter) return false
+    // Language-specific script allowance
+    if (this.sarvamLanguage === 'hi-IN') {
+      return /[\u0900-\u097F]/.test(t)
+    }
+    if (this.sarvamLanguage === 'en-IN' || this.sarvamLanguage === 'en') {
+      return /[A-Za-z]/.test(t)
+    }
+    // For other Indian languages, allow if contains any Indic script
+    const anyIndic = /[\u0900-\u097F\u0A80-\u0AFF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0980-\u09FF]/.test(t)
+    return anyIndic || /[A-Za-z]/.test(t)
   }
 
   async _processPhraseQueue() {
