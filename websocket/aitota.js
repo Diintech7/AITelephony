@@ -1184,7 +1184,7 @@ const processWithOpenAIStreaming = async (
             const data = line.slice(6)
             if (data === '[DONE]') {
               // Send any remaining text
-              if (sentenceBuffer.trim()) {
+              if (sentenceBuffer.trim() && sentenceBuffer.trim().length > 0 && !/^[.!?।\s]*$/.test(sentenceBuffer.trim())) {
                 if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
                   const textMessage = {
                     type: "text",
@@ -1212,7 +1212,7 @@ const processWithOpenAIStreaming = async (
                 if (sentences.length > 1) {
                   // Send all complete sentences except the last incomplete one
                   const completeSentences = sentences.slice(0, -1).join('')
-                  if (completeSentences.trim()) {
+                  if (completeSentences.trim() && completeSentences.trim().length > 0 && !/^[.!?।\s]*$/.test(completeSentences.trim())) {
                     if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
                       const textMessage = {
                         type: "text",
