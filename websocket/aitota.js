@@ -1129,10 +1129,10 @@ const processWithOpenAIStreaming = async (
     const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
     const firstMessage = (agentConfig.firstMessage || "").trim()
     
-    // Concise system prompt to reduce token count
+    // Ultra-concise system prompt to reduce token count and latency
     const systemPrompt = firstMessage 
-      ? `${basePrompt}\n\nFirstGreeting: "${firstMessage}"\n\nKeep responses under 50 tokens. Always end with a question.`
-      : `${basePrompt}\n\nKeep responses under 50 tokens. Always end with a question.`
+      ? `${basePrompt}\n\nFirstGreeting: "${firstMessage}"\n\nKeep responses under 20 tokens. Always end with a question.`
+      : `${basePrompt}\n\nKeep responses under 20 tokens. Always end with a question.`
 
     // Add user name if available
     const personalization = userName && userName.trim() 
@@ -1141,7 +1141,7 @@ const processWithOpenAIStreaming = async (
 
     const messages = [
       { role: "system", content: `${personalization}${systemPrompt}` },
-      ...conversationHistory.slice(-3), // Reduced from 6 to 3 for faster processing
+      ...conversationHistory.slice(-2), // Further reduced from 3 to 2 for faster processing
       { role: "user", content: userMessage },
     ]
 
@@ -1155,15 +1155,18 @@ const processWithOpenAIStreaming = async (
         "Content-Type": "application/json",
         Authorization: `Bearer ${API_KEYS.openai}`,
         "Connection": "keep-alive", // Keep connection alive for faster subsequent requests
+        "User-Agent": "AITelephony/1.0", // Add user agent for better routing
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 40, // Reduced from 60 to 40 for faster generation
-        temperature: 0.1, // Reduced from 0.3 to 0.1 for more deterministic, faster responses
+        max_tokens: 25, // Further reduced from 40 to 25 for ultra-fast generation
+        temperature: 0.05, // Reduced from 0.1 to 0.05 for even faster, more deterministic responses
         stream: true, // Enable streaming
         presence_penalty: 0, // Disable for speed
         frequency_penalty: 0, // Disable for speed
+        top_p: 0.8, // Add top_p for faster generation
+        stop: ["\n\n", "User:", "Assistant:"], // Add stop sequences to prevent long responses
       }),
       signal: controller.signal,
     })
@@ -1548,21 +1551,23 @@ class SimplifiedSarvamTTSProcessor {
           this.isInterrupted = false // Reset interrupted flag when connection opens
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected`)
 
-          // Send initial config message
+          // Send initial config message with ultra-low latency settings
           const configMessage = {
             type: "config",
             data: {
               target_language_code: this.sarvamLanguage,
               speaker: "manisha",
               pitch: 0,
-              pace: 1, // Match sanpbx settings for faster synthesis
+              pace: 2.0, // Increased from 1 to 2.0 for faster synthesis
               loudness: 1.0,
               enable_preprocessing: true,
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
-              min_buffer_size: 50, // As per HTML example
-              max_chunk_length: 150, // As per HTML example
+              min_buffer_size: 10, // Reduced from 50 to 10 for faster streaming
+              max_chunk_length: 80, // Reduced from 150 to 80 for faster chunks
+              streaming_mode: true, // Enable streaming mode
+              low_latency: true, // Enable low latency mode
             },
           }
           this.sarvamWs.send(JSON.stringify(configMessage))
@@ -1725,7 +1730,7 @@ class SimplifiedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2 // linear16 is 16-bit, so 2 bytes
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // 40ms chunks for SIP
+    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS) // Reduced from 40ms to 20ms for faster streaming
 
     while (!this.isInterrupted) {
       if (this.audioQueue.length > 0) {
@@ -1761,7 +1766,7 @@ class SimplifiedSarvamTTSProcessor {
 
           if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
             const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-            const delayMs = Math.max(chunkDurationMs - 2, 10) // Small delay to prevent buffer underrun
+            const delayMs = Math.max(chunkDurationMs - 5, 5) // Reduced delay for faster streaming
             await new Promise((resolve) => setTimeout(resolve, delayMs))
           }
 
@@ -1769,7 +1774,7 @@ class SimplifiedSarvamTTSProcessor {
         }
       } else {
         // No audio in queue, wait for a short period or until new audio arrives
-        await new Promise((resolve) => setTimeout(resolve, 50)) // Wait 50ms
+        await new Promise((resolve) => setTimeout(resolve, 20)) // Reduced from 50ms to 20ms for faster response
       }
     }
     this.isStreamingToSIP = false
@@ -1885,6 +1890,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let userName = null
     let lastProcessTime = 0
     let processDebounceTimer = null
+    let sarvamConnectionPool = null // Pre-established Sarvam connection for faster reuse
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -2081,6 +2087,9 @@ const setupUnifiedVoiceServer = (wss) => {
           // Reset the existing processor for new synthesis
           currentTTS.reset(detectedLanguage)
         }
+        
+        // Pre-connect to Sarvam while processing LLM (parallel optimization)
+        const preConnectPromise = currentTTS.connectSarvamWs(currentRequestId)
         
         // Start streaming synthesis
         const streamingStarted = await currentTTS.startStreamingSynthesis(currentRequestId)
