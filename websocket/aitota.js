@@ -1123,16 +1123,16 @@ const processWithOpenAIStreaming = async (
   ttsProcessor = null,
 ) => {
   const timer = createTimer("LLM_STREAMING")
-  
+
   try {
     // Simplified system prompt for faster processing
     const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
     const firstMessage = (agentConfig.firstMessage || "").trim()
     
-    // Ultra-concise system prompt to reduce token count and latency
+    // Concise system prompt to reduce token count
     const systemPrompt = firstMessage 
-      ? `${basePrompt}\n\nFirstGreeting: "${firstMessage}"\n\nKeep responses under 20 tokens. Always end with a question.`
-      : `${basePrompt}\n\nKeep responses under 20 tokens. Always end with a question.`
+      ? `${basePrompt}\n\nFirstGreeting: "${firstMessage}"\n\nKeep responses under 50 tokens. Always end with a question.`
+      : `${basePrompt}\n\nKeep responses under 50 tokens. Always end with a question.`
 
     // Add user name if available
     const personalization = userName && userName.trim() 
@@ -1141,7 +1141,7 @@ const processWithOpenAIStreaming = async (
 
     const messages = [
       { role: "system", content: `${personalization}${systemPrompt}` },
-      ...conversationHistory.slice(-2), // Further reduced from 3 to 2 for faster processing
+      ...conversationHistory.slice(-3), // Reduced from 6 to 3 for faster processing
       { role: "user", content: userMessage },
     ]
 
@@ -1155,18 +1155,15 @@ const processWithOpenAIStreaming = async (
         "Content-Type": "application/json",
         Authorization: `Bearer ${API_KEYS.openai}`,
         "Connection": "keep-alive", // Keep connection alive for faster subsequent requests
-        "User-Agent": "AITelephony/1.0", // Add user agent for better routing
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 25, // Further reduced from 40 to 25 for ultra-fast generation
-        temperature: 0.05, // Reduced from 0.1 to 0.05 for even faster, more deterministic responses
+        max_tokens: 30, // Further reduced for faster first tokens
+        temperature: 0.0, // Set to 0.0 for fastest, most deterministic responses
         stream: true, // Enable streaming
         presence_penalty: 0, // Disable for speed
         frequency_penalty: 0, // Disable for speed
-        top_p: 0.8, // Add top_p for faster generation
-        stop: ["\n\n", "User:", "Assistant:"], // Add stop sequences to prevent long responses
       }),
       signal: controller.signal,
     })
@@ -1183,6 +1180,8 @@ const processWithOpenAIStreaming = async (
     let fullResponse = ""
     let buffer = ""
     let sentenceBuffer = ""
+    let tokenBuffer = ""
+    let tokenCount = 0
     let isFirstChunk = true
 
     const reader = response.body.getReader()
@@ -1229,8 +1228,40 @@ const processWithOpenAIStreaming = async (
               if (content) {
                 fullResponse += content
                 sentenceBuffer += content
+                tokenBuffer += content
+                tokenCount += content.split(' ').length
 
-                // Send complete sentences to Sarvam immediately
+                // Stream partial phrases immediately (5-10 tokens) for <1.5s latency
+                if (tokenCount >= 5) {
+                  const words = tokenBuffer.split(' ')
+                  if (words.length >= 5) {
+                    // Send first 5-8 words as a chunk
+                    const chunkWords = words.slice(0, Math.min(8, words.length))
+                    const chunkText = chunkWords.join(' ').trim()
+                    
+                    if (isValidTextChunk(chunkText)) {
+                      if (ttsProcessor && ttsProcessor.sarvamWs && ttsProcessor.sarvamWsConnected) {
+                        const textMessage = {
+                          type: "text",
+                          data: { text: chunkText },
+                        }
+                        ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
+                        console.log(`📝 [LLM→SARVAM] Sent partial chunk (${chunkWords.length} words): "${chunkText}"`)
+                        
+                        // Send flush signal after short phrase for immediate audio
+                        const flushMessage = { type: "flush" }
+                        ttsProcessor.sarvamWs.send(JSON.stringify(flushMessage))
+                        console.log(`📝 [LLM→SARVAM] Sent flush after partial chunk`)
+                      }
+                    }
+                    
+                    // Remove sent words from buffer
+                    tokenBuffer = words.slice(Math.min(8, words.length)).join(' ')
+                    tokenCount = tokenBuffer.split(' ').length
+                  }
+                }
+
+                // Also handle complete sentences for longer phrases
                 const sentences = sentenceBuffer.split(/([.!?।]+)/)
                 if (sentences.length > 1) {
                   // Send all complete sentences except the last incomplete one
@@ -1243,10 +1274,10 @@ const processWithOpenAIStreaming = async (
                         data: { text: cleanText },
                       }
                       ttsProcessor.sarvamWs.send(JSON.stringify(textMessage))
-                      console.log(`📝 [LLM→SARVAM] Sent chunk: "${cleanText}"`)
+                      console.log(`📝 [LLM→SARVAM] Sent sentence chunk: "${cleanText}"`)
                     }
                   } else {
-                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid chunk: "${cleanText}"`)
+                    console.log(`⚠️ [LLM→SARVAM] Skipping invalid sentence chunk: "${cleanText}"`)
                   }
                   // Keep the last incomplete sentence in buffer
                   sentenceBuffer = sentences[sentences.length - 1]
@@ -1551,21 +1582,21 @@ class SimplifiedSarvamTTSProcessor {
           this.isInterrupted = false // Reset interrupted flag when connection opens
           console.log(`🕒 [SARVAM-WS-CONNECT] ${timer.end()}ms - Sarvam TTS WebSocket connected`)
 
-          // Send initial config message with valid Sarvam parameters
+          // Send initial config message
           const configMessage = {
             type: "config",
             data: {
-              target_language_code: this.sarvamLanguage,
+          target_language_code: this.sarvamLanguage,
               speaker: "manisha",
-              pitch: 0,
-              pace: 1.8, // Optimized for faster synthesis while staying within valid range
-              loudness: 1.0,
-              enable_preprocessing: true,
+          pitch: 0,
+              pace: 1, // Match sanpbx settings for faster synthesis
+          loudness: 1.0,
+          enable_preprocessing: true,
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
               output_audio_bitrate: "128k", // For 8000 Hz linear16
               speech_sample_rate: 8000, // Crucial for SIP/Twilio
-              min_buffer_size: 20, // Valid range for faster streaming
-              max_chunk_length: 100, // Valid range for faster chunks
+              min_buffer_size: 15, // Reduced for faster audio return
+              max_chunk_length: 100, // Reduced for faster chunks
             },
           }
           this.sarvamWs.send(JSON.stringify(configMessage))
@@ -1728,7 +1759,7 @@ class SimplifiedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2 // linear16 is 16-bit, so 2 bytes
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS) // Reduced from 40ms to 20ms for faster streaming
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS) // 40ms chunks for SIP
 
     while (!this.isInterrupted) {
       if (this.audioQueue.length > 0) {
@@ -1736,43 +1767,43 @@ class SimplifiedSarvamTTSProcessor {
 
         let position = 0
         while (position < audioBuffer.length && !this.isInterrupted) {
-          const remaining = audioBuffer.length - position
-          const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-          const chunk = audioBuffer.slice(position, position + chunkSize)
+      const remaining = audioBuffer.length - position
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+      const chunk = audioBuffer.slice(position, position + chunkSize)
 
-          const mediaMessage = {
-            event: "media",
-            streamSid: this.streamSid,
-            media: {
-              payload: chunk.toString("base64"),
-            },
-          }
+      const mediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: {
+          payload: chunk.toString("base64"),
+        },
+      }
 
-          if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-            try {
-              this.ws.send(JSON.stringify(mediaMessage))
-            } catch (error) {
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        try {
+          this.ws.send(JSON.stringify(mediaMessage))
+        } catch (error) {
               console.error("❌ [SARVAM→SIP] Error sending media to SIP WS:", error.message)
               this.isInterrupted = true // Stop streaming on error
-              break
-            }
-          } else {
+          break
+        }
+      } else {
             console.log("🛑 [SARVAM→SIP] SIP WS not open or interrupted, stopping streaming")
             this.isInterrupted = true
-            break
-          }
+        break
+      }
 
-          if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-            const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-            const delayMs = Math.max(chunkDurationMs - 5, 5) // Reduced delay for faster streaming
-            await new Promise((resolve) => setTimeout(resolve, delayMs))
-          }
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
+            const delayMs = Math.max(chunkDurationMs - 2, 10) // Small delay to prevent buffer underrun
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      }
 
-          position += chunkSize
+      position += chunkSize
         }
       } else {
         // No audio in queue, wait for a short period or until new audio arrives
-        await new Promise((resolve) => setTimeout(resolve, 20)) // Reduced from 50ms to 20ms for faster response
+        await new Promise((resolve) => setTimeout(resolve, 50)) // Wait 50ms
       }
     }
     this.isStreamingToSIP = false
@@ -1888,7 +1919,6 @@ const setupUnifiedVoiceServer = (wss) => {
     let userName = null
     let lastProcessTime = 0
     let processDebounceTimer = null
-    let sarvamConnectionPool = null // Pre-established Sarvam connection for faster reuse
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -1918,7 +1948,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Reverted to original working parameters - latency optimizations will come from other areas
 
         console.log("🔗 [DEEPGRAM] Connecting to:", deepgramUrl.toString())
-        
+
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         })
@@ -2086,8 +2116,9 @@ const setupUnifiedVoiceServer = (wss) => {
           currentTTS.reset(detectedLanguage)
         }
         
-        // Pre-connect to Sarvam while processing LLM (parallel optimization)
-        const preConnectPromise = currentTTS.connectSarvamWs(currentRequestId)
+        // PARALLELIZE: Start TTS connection before LLM output (hot WebSocket)
+        console.log("🔥 [PARALLEL-TTS] Pre-connecting TTS WebSocket for hot connection...")
+        const ttsConnectionPromise = currentTTS.connectSarvamWs(currentRequestId)
         
         // Start streaming synthesis
         const streamingStarted = await currentTTS.startStreamingSynthesis(currentRequestId)
@@ -2098,6 +2129,10 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         console.log("🎤 [USER-UTTERANCE] Starting streaming TTS...")
+
+        // Wait for TTS connection to be ready (parallel optimization)
+        await ttsConnectionPromise
+        console.log("🔥 [PARALLEL-TTS] TTS WebSocket is hot and ready!")
 
         // Use streaming OpenAI with direct Sarvam connection
         const aiResponse = await processWithOpenAIStreaming(
