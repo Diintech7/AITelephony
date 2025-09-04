@@ -1448,7 +1448,7 @@ class SimplifiedSarvamTTSProcessor {
               target_language_code: this.sarvamLanguage,
               speaker: "manisha",
               pitch: 0,
-              pace: 1.55, // Match sanpbx settings for faster synthesis
+              pace: 1, // Match sanpbx settings for faster synthesis
               loudness: 1.0,
               enable_preprocessing: true,
               output_audio_codec: "linear16", // Crucial for SIP/Twilio
