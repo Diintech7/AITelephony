@@ -1126,7 +1126,7 @@ const processWithOpenAIStreaming = async (
   const timer = createTimer("LLM_STREAMING")
   
   // Token-based chunking configuration for lower latency
-  const MIN_CHUNK_TOKENS = 5  // Minimum tokens before sending a chunk
+  const MIN_CHUNK_TOKENS = 2  // Minimum tokens before sending a chunk
   const MAX_CHUNK_TOKENS = 8  // Maximum tokens per chunk
   
   try {
