@@ -682,7 +682,6 @@ const setupSanPbxWebSocketServer = (ws) => {
     try {
       // Normalize to string and parse JSON; PBX must send JSON base64 media
       const messageStr = Buffer.isBuffer(message) ? message.toString() : String(message)
-      console.log(`[SANPBX-IN] length=${messageStr.length}`)
       const data = JSON.parse(messageStr)
 
       switch (data.event) {
@@ -744,7 +743,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             inputChannels = 1
           }
 
-          // Resolve agent using DID/CallerID priority (like aitota.js style)
+          // Resolve agent using DID→Agent.callerId priority (like aitota.js style)
           try {
             const fromNumber = startInfo.from || data.from || callerIdValue
             const toNumber = startInfo.to || data.to || didValue
@@ -780,6 +779,8 @@ const setupSanPbxWebSocketServer = (ws) => {
 
             if (agent) {
               console.log(`[SANPBX] Agent matched: ${agent.agentName} (reason=${matchReason})`)
+              // Bind into session for downstream use (TTS, prompts, etc.)
+              ws.sessionAgentConfig = agent
             } else {
               console.log(`[SANPBX] No agent matched via DID/CallerID/last10. Proceeding without agent binding.`)
             }
