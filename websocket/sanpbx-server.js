@@ -1,6 +1,7 @@
 const WebSocket = require("ws")
 require("dotenv").config()
 const Agent = require("../models/Agent")
+const CallLog = require("../models/CallLog")
 
 // API Keys from environment
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY
@@ -118,6 +119,16 @@ const setupSanPbxWebSocketServer = (ws) => {
   let lastProcessedTranscript = ""
   let lastProcessedTime = 0
   let activeResponseId = null
+  // Additional session state for logging and DB
+  let sessionCustomParams = {}
+  let sessionUserName = null
+  let sessionUniqueId = null
+  let callLogId = null
+  let callStartTime = new Date()
+  let userTranscripts = []
+  let aiResponses = []
+  let whatsappRequested = false
+  let whatsappSent = false
 
   /**
    * Track response to prevent multiple responses to same input
@@ -476,6 +487,14 @@ const setupSanPbxWebSocketServer = (ws) => {
               clearTimeout(silenceTimer)
               silenceTimer = null
             }
+            try {
+              userTranscripts.push({
+                type: 'user',
+                text: transcript.trim(),
+                language: 'en',
+                timestamp: new Date(),
+              })
+            } catch (_) {}
             await processUserInput(transcript.trim())
           }
         }
@@ -645,7 +664,14 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (quickResponse && isResponseActive(responseId)) {
         console.log(`[PROCESS] Quick response found: "${quickResponse}"`)
         conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: quickResponse })
-
+        try {
+          aiResponses.push({
+            type: 'ai',
+            text: quickResponse,
+            language: (ws.sessionAgentConfig?.language || 'en').toLowerCase(),
+            timestamp: new Date(),
+          })
+        } catch (_) {}
         await synthesizeAndStreamAudio(quickResponse)
         console.log(`[PROCESS] TTS finished for quick response.`)
       } else if (isResponseActive(responseId)) {
@@ -661,7 +687,14 @@ const setupSanPbxWebSocketServer = (ws) => {
           if (conversationHistory.length > 6) {
             conversationHistory = conversationHistory.slice(-6)
           }
-
+          try {
+            aiResponses.push({
+              type: 'ai',
+              text: aiResponse,
+              language: (ws.sessionAgentConfig?.language || 'en').toLowerCase(),
+              timestamp: new Date(),
+            })
+          } catch (_) {}
           await synthesizeAndStreamAudio(aiResponse)
           console.log(`[PROCESS] TTS finished for AI response.`)
         }
@@ -717,6 +750,22 @@ const setupSanPbxWebSocketServer = (ws) => {
           callerIdValue = data.callerId || callerIdValue
           callDirectionValue = data.callDirection || callDirectionValue
           didValue = data.did || didValue
+
+          // Capture SanPBX-style extraParams for persistence
+          try {
+            if (data.extraParams && typeof data.extraParams === 'object') {
+              sessionCustomParams = { ...sessionCustomParams, ...data.extraParams }
+              if (data.extraParams.name && !sessionCustomParams.contact_name) {
+                sessionCustomParams.contact_name = data.extraParams.contact_name || data.extraParams.name
+              }
+              if (!sessionUserName && (data.extraParams.name || data.extraParams.contact_name)) {
+                sessionUserName = data.extraParams.name || data.extraParams.contact_name
+              }
+              if (!sessionUniqueId && (data.extraParams.uniqueid || data.extraParams.uniqueId)) {
+                sessionUniqueId = data.extraParams.uniqueid || data.extraParams.uniqueId
+              }
+            }
+          } catch (_) {}
           break
 
         case "start":
@@ -752,6 +801,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           streamId = data.streamId
           callId = data.callId
           channelId = data.channelId
+          callStartTime = new Date()
+          userTranscripts = []
+          aiResponses = []
+          whatsappRequested = false
+          whatsappSent = false
 
           // Cache identifiers if provided (prefer start values if present)
           callerIdValue = data.callerId || callerIdValue
@@ -830,6 +884,43 @@ const setupSanPbxWebSocketServer = (ws) => {
             console.log(`[SANPBX] Agent matching error: ${e.message}`)
           }
 
+          // Create initial CallLog entry with customParams from extraParams
+          try {
+            const callDirection = (callDirectionValue || '').toLowerCase() === 'outgoing' ? 'outbound' : 'inbound'
+            const initialCallLogData = {
+              clientId: ws.sessionAgentConfig?.clientId || 'unknown',
+              agentId: ws.sessionAgentConfig?._id || undefined,
+              mobile: data.from || data.start?.from || callerIdValue || undefined,
+              time: callStartTime,
+              transcript: "",
+              duration: 0,
+              leadStatus: 'not_connected',
+              streamSid: streamId || callId || undefined,
+              callSid: callId || undefined,
+              metadata: {
+                userTranscriptCount: 0,
+                aiResponseCount: 0,
+                languages: [],
+                callDirection: callDirection,
+                isActive: true,
+                lastUpdated: callStartTime,
+                sttProvider: 'deepgram',
+                ttsProvider: 'sarvam',
+                llmProvider: 'openai',
+                customParams: sessionCustomParams || {},
+                callerId: callerIdValue || undefined,
+                whatsappRequested: false,
+                whatsappMessageSent: false,
+              },
+            }
+            const callLog = new CallLog(initialCallLogData)
+            const saved = await callLog.save()
+            callLogId = saved._id
+            console.log(`[SANPBX] Initial CallLog created: ${callLogId}`)
+          } catch (err) {
+            console.log(`[SANPBX] Initial CallLog creation failed: ${err.message}`)
+          }
+
           // Connect to Deepgram for speech recognition
           connectToDeepgram(0)
 
@@ -890,6 +981,39 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           if (silenceTimer) {
             clearTimeout(silenceTimer)
+          }
+          // Update CallLog at end of call
+          try {
+            if (callLogId) {
+              const durationSeconds = Math.round((new Date() - callStartTime) / 1000)
+              const allEntries = [...userTranscripts, ...aiResponses].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+              const fullTranscript = allEntries.map((e) => {
+                const speaker = e.type === 'user' ? 'User' : 'AI'
+                const time = e.timestamp instanceof Date ? e.timestamp.toISOString() : new Date(e.timestamp).toISOString()
+                return `[${time}] ${speaker} (${e.language}): ${e.text}`
+              }).join("\n")
+              const languages = Array.from(new Set(allEntries.map((e) => e.language).filter(Boolean)))
+              await CallLog.findByIdAndUpdate(callLogId, {
+                transcript: fullTranscript,
+                duration: durationSeconds,
+                leadStatus: 'maybe',
+                streamSid: streamId || callId || undefined,
+                callSid: callId || undefined,
+                'metadata.userTranscriptCount': userTranscripts.length,
+                'metadata.aiResponseCount': aiResponses.length,
+                'metadata.languages': languages,
+                'metadata.customParams': sessionCustomParams || {},
+                'metadata.isActive': false,
+                'metadata.callEndTime': new Date(),
+                'metadata.lastUpdated': new Date(),
+                'metadata.callerId': callerIdValue || undefined,
+                'metadata.whatsappRequested': !!whatsappRequested,
+                'metadata.whatsappMessageSent': !!whatsappSent,
+              }).catch(() => {})
+              console.log(`[SANPBX] CallLog updated at end: ${callLogId}`)
+            }
+          } catch (e) {
+            console.log(`[SANPBX] CallLog end update failed: ${e.message}`)
           }
           break
 
