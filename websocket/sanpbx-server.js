@@ -687,12 +687,32 @@ const setupSanPbxWebSocketServer = (ws) => {
       switch (data.event) {
         case "connected":
           console.log("[SANPBX] Connected")
-          console.log("ChannelID:", data.channelId)
-          console.log("CallID:", data.callId) 
-          console.log("StreamID:", data.streamId)
-          console.log("CallerID:", data.callerId)
-          console.log("Call Direction:", data.callDirection)
-          console.log("DID:", data.did)
+          
+          // Log ALL data received from SIP team during connection
+          console.log("=".repeat(80))
+          console.log("[SANPBX-CONNECTED] COMPLETE DATA RECEIVED FROM SIP TEAM:")
+          console.log("=".repeat(80))
+          console.log("[SANPBX-CONNECTED] Raw data object:", JSON.stringify(data, null, 2))
+          console.log("[SANPBX-CONNECTED] Event type:", data.event)
+          console.log("[SANPBX-CONNECTED] ChannelID:", data.channelId)
+          console.log("[SANPBX-CONNECTED] CallID:", data.callId) 
+          console.log("[SANPBX-CONNECTED] StreamID:", data.streamId)
+          console.log("[SANPBX-CONNECTED] CallerID:", data.callerId)
+          console.log("[SANPBX-CONNECTED] Call Direction:", data.callDirection)
+          console.log("[SANPBX-CONNECTED] DID:", data.did)
+          console.log("[SANPBX-CONNECTED] From Number:", data.from)
+          console.log("[SANPBX-CONNECTED] To Number:", data.to)
+          console.log("[SANPBX-CONNECTED] Additional Properties:")
+          
+          // Log any additional properties not explicitly handled
+          const connectedKnownProps = ['event', 'channelId', 'callId', 'streamId', 'callerId', 'callDirection', 'did', 'from', 'to']
+          Object.keys(data).forEach(key => {
+            if (!connectedKnownProps.includes(key)) {
+              console.log(`[SANPBX-CONNECTED] ${key}:`, data[key])
+            }
+          })
+          console.log("=".repeat(80))
+          
           // Cache identifiers if provided
           callerIdValue = data.callerId || callerIdValue
           callDirectionValue = data.callDirection || callDirectionValue
@@ -702,14 +722,36 @@ const setupSanPbxWebSocketServer = (ws) => {
         case "start":
           console.log("[SANPBX] Call started")
           
+          // Log ALL data received from SIP team at start
+          console.log("=".repeat(80))
+          console.log("[SANPBX-START] COMPLETE DATA RECEIVED FROM SIP TEAM:")
+          console.log("=".repeat(80))
+          console.log("[SANPBX-START] Raw data object:", JSON.stringify(data, null, 2))
+          console.log("[SANPBX-START] Event type:", data.event)
+          console.log("[SANPBX-START] StreamID:", data.streamId)
+          console.log("[SANPBX-START] CallID:", data.callId)
+          console.log("[SANPBX-START] ChannelID:", data.channelId)
+          console.log("[SANPBX-START] CallerID:", data.callerId)
+          console.log("[SANPBX-START] Call Direction:", data.callDirection)
+          console.log("[SANPBX-START] DID:", data.did)
+          console.log("[SANPBX-START] From Number:", data.from)
+          console.log("[SANPBX-START] To Number:", data.to)
+          console.log("[SANPBX-START] Media Format:", JSON.stringify(data.mediaFormat, null, 2))
+          console.log("[SANPBX-START] Start Object:", JSON.stringify(data.start, null, 2))
+          console.log("[SANPBX-START] Additional Properties:")
+          
+          // Log any additional properties not explicitly handled
+          const knownProps = ['event', 'streamId', 'callId', 'channelId', 'callerId', 'callDirection', 'did', 'from', 'to', 'mediaFormat', 'start']
+          Object.keys(data).forEach(key => {
+            if (!knownProps.includes(key)) {
+              console.log(`[SANPBX-START] ${key}:`, data[key])
+            }
+          })
+          console.log("=".repeat(80))
+          
           streamId = data.streamId
           callId = data.callId
           channelId = data.channelId
-
-          console.log("[SANPBX] StreamID:", streamId)
-          console.log("[SANPBX] CallID:", callId)
-          console.log("[SANPBX] ChannelID:", channelId)
-          console.log("[SANPBX] Media Format:", JSON.stringify(data.mediaFormat))
 
           // Cache identifiers if provided (prefer start values if present)
           callerIdValue = data.callerId || callerIdValue
@@ -806,6 +848,23 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         case "answer":
           console.log("[SANPBX] Call answered - ready for media streaming")
+          
+          // Log ALL data received from SIP team during answer
+          console.log("=".repeat(80))
+          console.log("[SANPBX-ANSWER] COMPLETE DATA RECEIVED FROM SIP TEAM:")
+          console.log("=".repeat(80))
+          console.log("[SANPBX-ANSWER] Raw data object:", JSON.stringify(data, null, 2))
+          console.log("[SANPBX-ANSWER] Event type:", data.event)
+          console.log("[SANPBX-ANSWER] Additional Properties:")
+          
+          // Log any additional properties not explicitly handled
+          const answerKnownProps = ['event']
+          Object.keys(data).forEach(key => {
+            if (!answerKnownProps.includes(key)) {
+              console.log(`[SANPBX-ANSWER] ${key}:`, data[key])
+            }
+          })
+          console.log("=".repeat(80))
           break
 
         case "media":
@@ -836,19 +895,87 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         case "dtmf":
           console.log("[SANPBX] DTMF received:", data.digit)
+          
+          // Log ALL data received from SIP team during DTMF
+          console.log("=".repeat(60))
+          console.log("[SANPBX-DTMF] COMPLETE DATA RECEIVED FROM SIP TEAM:")
+          console.log("=".repeat(60))
+          console.log("[SANPBX-DTMF] Raw data object:", JSON.stringify(data, null, 2))
+          console.log("[SANPBX-DTMF] Event type:", data.event)
+          console.log("[SANPBX-DTMF] DTMF Digit:", data.digit)
+          console.log("[SANPBX-DTMF] Additional Properties:")
+          
+          // Log any additional properties not explicitly handled
+          const dtmfKnownProps = ['event', 'digit']
+          Object.keys(data).forEach(key => {
+            if (!dtmfKnownProps.includes(key)) {
+              console.log(`[SANPBX-DTMF] ${key}:`, data[key])
+            }
+          })
+          console.log("=".repeat(60))
           // Handle DTMF input if needed
           break
 
         case "transfer-call-response":
           console.log("[SANPBX] Transfer response:", data.message)
+          
+          // Log ALL data received from SIP team during transfer response
+          console.log("=".repeat(60))
+          console.log("[SANPBX-TRANSFER] COMPLETE DATA RECEIVED FROM SIP TEAM:")
+          console.log("=".repeat(60))
+          console.log("[SANPBX-TRANSFER] Raw data object:", JSON.stringify(data, null, 2))
+          console.log("[SANPBX-TRANSFER] Event type:", data.event)
+          console.log("[SANPBX-TRANSFER] Message:", data.message)
+          console.log("[SANPBX-TRANSFER] Additional Properties:")
+          
+          // Log any additional properties not explicitly handled
+          const transferKnownProps = ['event', 'message']
+          Object.keys(data).forEach(key => {
+            if (!transferKnownProps.includes(key)) {
+              console.log(`[SANPBX-TRANSFER] ${key}:`, data[key])
+            }
+          })
+          console.log("=".repeat(60))
           break
 
         case "hangup-call-response":
           console.log("[SANPBX] Hangup response:", data.message)
+          
+          // Log ALL data received from SIP team during hangup response
+          console.log("=".repeat(60))
+          console.log("[SANPBX-HANGUP] COMPLETE DATA RECEIVED FROM SIP TEAM:")
+          console.log("=".repeat(60))
+          console.log("[SANPBX-HANGUP] Raw data object:", JSON.stringify(data, null, 2))
+          console.log("[SANPBX-HANGUP] Event type:", data.event)
+          console.log("[SANPBX-HANGUP] Message:", data.message)
+          console.log("[SANPBX-HANGUP] Additional Properties:")
+          
+          // Log any additional properties not explicitly handled
+          const hangupKnownProps = ['event', 'message']
+          Object.keys(data).forEach(key => {
+            if (!hangupKnownProps.includes(key)) {
+              console.log(`[SANPBX-HANGUP] ${key}:`, data[key])
+            }
+          })
+          console.log("=".repeat(60))
           break
 
         default:
           console.log(`[SANPBX] Unknown event: ${data.event}`)
+          
+          // Log ALL data received from SIP team for unknown events
+          console.log("=".repeat(60))
+          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] COMPLETE DATA RECEIVED FROM SIP TEAM:`)
+          console.log("=".repeat(60))
+          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] Raw data object:`, JSON.stringify(data, null, 2))
+          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] Event type:`, data.event)
+          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] All Properties:`)
+          
+          // Log all properties for unknown events
+          Object.keys(data).forEach(key => {
+            console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] ${key}:`, data[key])
+          })
+          console.log("=".repeat(60))
           break
       }
     } catch (error) {
