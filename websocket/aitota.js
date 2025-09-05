@@ -980,6 +980,8 @@ class EnhancedCallLogger {
           'metadata.lastUpdated': callEndTime,
           'metadata.customParams': this.customParams || {},
           'metadata.callerId': this.callerId || undefined,
+          'metadata.whatsappRequested': !!this.whatsappRequested,
+          'metadata.whatsappMessageSent': !!this.whatsappSent,
         }
 
         const updatedLog = await CallLog.findByIdAndUpdate(
@@ -1010,6 +1012,8 @@ class EnhancedCallLogger {
             isActive: false,
             customParams: this.customParams || {},
             callerId: this.callerId || undefined,
+            whatsappRequested: !!this.whatsappRequested,
+            whatsappMessageSent: !!this.whatsappSent,
           },
         }
 
