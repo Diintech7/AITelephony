@@ -968,6 +968,15 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("[SANPBX] Sending greeting:", greeting)
 
           setTimeout(async () => {
+            try {
+              aiResponses.push({
+                type: 'ai',
+                text: greeting,
+                language: (ws.sessionAgentConfig?.language || 'en').toLowerCase(),
+                timestamp: new Date(),
+              })
+              await updateLiveCallLog()
+            } catch (_) {}
             await synthesizeAndStreamAudio(greeting, ws.sessionAgentConfig?.language || "en")
           }, 1500) // Wait for call to be fully established
           break
