@@ -130,6 +130,35 @@ const setupSanPbxWebSocketServer = (ws) => {
   let whatsappRequested = false
   let whatsappSent = false
 
+  const buildFullTranscript = () => {
+    try {
+      const all = [...userTranscripts, ...aiResponses].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+      return all.map((e) => {
+        const speaker = e.type === 'user' ? 'User' : 'AI'
+        const time = e.timestamp instanceof Date ? e.timestamp.toISOString() : new Date(e.timestamp).toISOString()
+        return `[${time}] ${speaker} (${e.language}): ${e.text}`
+      }).join("\n")
+    } catch (_) {
+      return ''
+    }
+  }
+
+  const updateLiveCallLog = async () => {
+    try {
+      if (!callLogId) return
+      const transcript = buildFullTranscript()
+      const languages = Array.from(new Set([...userTranscripts, ...aiResponses].map(e => e.language).filter(Boolean)))
+      await CallLog.findByIdAndUpdate(callLogId, {
+        transcript,
+        duration: Math.round((new Date() - callStartTime) / 1000),
+        'metadata.userTranscriptCount': userTranscripts.length,
+        'metadata.aiResponseCount': aiResponses.length,
+        'metadata.languages': languages,
+        'metadata.lastUpdated': new Date(),
+      }).catch(() => {})
+    } catch (_) {}
+  }
+
   /**
    * Track response to prevent multiple responses to same input
    */
@@ -495,6 +524,8 @@ const setupSanPbxWebSocketServer = (ws) => {
                 timestamp: new Date(),
               })
             } catch (_) {}
+            // Live update after user final transcript
+            await updateLiveCallLog()
             await processUserInput(transcript.trim())
           }
         }
@@ -672,6 +703,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             timestamp: new Date(),
           })
         } catch (_) {}
+        // Live update after AI response
+        await updateLiveCallLog()
         await synthesizeAndStreamAudio(quickResponse)
         console.log(`[PROCESS] TTS finished for quick response.`)
       } else if (isResponseActive(responseId)) {
@@ -695,6 +728,8 @@ const setupSanPbxWebSocketServer = (ws) => {
               timestamp: new Date(),
             })
           } catch (_) {}
+          // Live update after AI response
+          await updateLiveCallLog()
           await synthesizeAndStreamAudio(aiResponse)
           console.log(`[PROCESS] TTS finished for AI response.`)
         }
