@@ -1126,6 +1126,7 @@ const processWithOpenAI = async (
       "If the information is not present, reply briefly that you don't have that information.",
       "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
       "Keep the entire reply under 100 tokens.",
+      "Do not give any bold or italic and these kind of styles in the reply."
     ].join(" ")
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
