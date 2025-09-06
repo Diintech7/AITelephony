@@ -24,6 +24,13 @@ const API_KEYS = {
   whatsapp: process.env.WHATSAPP_TOKEN,
 }
 
+// SanPBX API configuration
+const SANPBX_API_CONFIG = {
+  baseUrl: "https://dialer.sansoftwares.com/pbxadmin/sanpbxapi",
+  apiToken: process.env.SANPBX_API_TOKEN || "abcdefgf123456789", // Use environment variable for security
+  disconnectEndpoint: "/calldisconnect"
+}
+
 // Validate API keys
 if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables")
@@ -1073,6 +1080,68 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
     console.log(`💰 [WHATSAPP-BILLING] Deducted 1.00 credit for WhatsApp message to ${mobile}`)
   } catch (e) {
     console.log("❌ [WHATSAPP-BILLING] Error deducting credit:", e.message)
+  }
+}
+
+// Helper to disconnect call via SanPBX API
+const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect') => {
+  try {
+    if (!callId) {
+      console.log("❌ [SANPBX-DISCONNECT] No callId provided for disconnect")
+      return { success: false, error: "No callId provided" }
+    }
+
+    const disconnectUrl = `${SANPBX_API_CONFIG.baseUrl}${SANPBX_API_CONFIG.disconnectEndpoint}`
+    const requestBody = {
+      callid: callId
+    }
+
+    console.log(`🛑 [SANPBX-DISCONNECT] Attempting to disconnect call: ${callId}`)
+    console.log(`🛑 [SANPBX-DISCONNECT] API URL: ${disconnectUrl}`)
+    console.log(`🛑 [SANPBX-DISCONNECT] Request Body:`, JSON.stringify(requestBody))
+
+    const response = await fetch(disconnectUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Apitoken": SANPBX_API_CONFIG.apiToken,
+      },
+      body: JSON.stringify(requestBody),
+    })
+
+    const responseText = await response.text()
+    const isOk = response.ok
+
+    console.log(`🛑 [SANPBX-DISCONNECT] Response Status: ${response.status} ${response.statusText}`)
+    console.log(`🛑 [SANPBX-DISCONNECT] Response Body: ${responseText}`)
+
+    if (isOk) {
+      console.log(`✅ [SANPBX-DISCONNECT] Successfully disconnected call: ${callId}`)
+      return { 
+        success: true, 
+        callId, 
+        reason,
+        status: response.status,
+        response: responseText 
+      }
+    } else {
+      console.log(`❌ [SANPBX-DISCONNECT] Failed to disconnect call: ${callId} - Status: ${response.status}`)
+      return { 
+        success: false, 
+        callId, 
+        reason,
+        status: response.status,
+        error: responseText 
+      }
+    }
+  } catch (error) {
+    console.log(`❌ [SANPBX-DISCONNECT] Error disconnecting call ${callId}:`, error.message)
+    return { 
+      success: false, 
+      callId, 
+      reason,
+      error: error.message 
+    }
   }
 }
 
@@ -2599,14 +2668,30 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
     
     // Check if we have an active call logger for this streamSid
     const callLogger = activeCallLoggers.get(streamSid)
+    let callId = null
     
     if (callLogger) {
       console.log(`🛑 [MANUAL-TERMINATION] Found active call logger, terminating gracefully...`)
-      console.log(`🛑 [MANUAL-TERMINATION] Call Logger Info:`, callLogger.getCallInfo())
+      console.log(`🛑 [MANUAL-TERMINATION] Call Logger Info:`, callLogger.getStats())
+      
+      // Get callId from call logger
+      callId = callLogger.callSid
       
       // Check WebSocket state
       if (callLogger.ws) {
         console.log(`🛑 [MANUAL-TERMINATION] WebSocket State: ${callLogger.ws.readyState} (0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)`)
+      }
+      
+      // Try to disconnect via SanPBX API first if we have callId
+      if (callId) {
+        console.log(`🛑 [MANUAL-TERMINATION] Attempting to disconnect call via SanPBX API: ${callId}`)
+        const disconnectResult = await disconnectCallViaAPI(callId, reason)
+        
+        if (disconnectResult.success) {
+          console.log(`✅ [MANUAL-TERMINATION] Successfully disconnected call via API: ${callId}`)
+        } else {
+          console.log(`⚠️ [MANUAL-TERMINATION] API disconnect failed, continuing with graceful termination: ${disconnectResult.error}`)
+        }
       }
       
       await callLogger.saveToDatabase(callLogger.currentLeadStatus || "maybe")
@@ -2614,13 +2699,37 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
         success: true,
         message: 'Call terminated successfully',
         streamSid,
+        callId,
         reason,
-        method: 'graceful_termination'
+        method: 'graceful_termination_with_api',
+        apiDisconnectResult: callId ? await disconnectCallViaAPI(callId, reason) : null
       }
     } else {
-      console.log(`🛑 [MANUAL-TERMINATION] No active call logger found, updating database directly...`)
+      console.log(`🛑 [MANUAL-TERMINATION] No active call logger found, trying to find callId from database...`)
       
-      // Fallback: Update the call log directly in the database
+      // Try to find callId from database first
+      try {
+        const CallLog = require("../models/CallLog")
+        const activeCall = await CallLog.findOne({ streamSid, 'metadata.isActive': true })
+        
+        if (activeCall && activeCall.callSid) {
+          callId = activeCall.callSid
+          console.log(`🛑 [MANUAL-TERMINATION] Found callId from database: ${callId}`)
+          
+          // Try to disconnect via SanPBX API
+          const disconnectResult = await disconnectCallViaAPI(callId, reason)
+          
+          if (disconnectResult.success) {
+            console.log(`✅ [MANUAL-TERMINATION] Successfully disconnected call via API: ${callId}`)
+          } else {
+            console.log(`⚠️ [MANUAL-TERMINATION] API disconnect failed: ${disconnectResult.error}`)
+          }
+        }
+      } catch (dbError) {
+        console.log(`⚠️ [MANUAL-TERMINATION] Could not find callId from database: ${dbError.message}`)
+      }
+      
+      // Update the call log directly in the database
       try {
         const CallLog = require("../models/CallLog")
         const result = await CallLog.updateMany(
@@ -2639,17 +2748,21 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
             success: true,
             message: 'Call marked as terminated in database',
             streamSid,
+            callId,
             reason,
-            method: 'database_update',
-            modifiedCount: result.modifiedCount
+            method: 'database_update_with_api',
+            modifiedCount: result.modifiedCount,
+            apiDisconnectResult: callId ? await disconnectCallViaAPI(callId, reason) : null
           }
         } else {
           return {
             success: false,
             message: 'No active calls found with this streamSid',
             streamSid,
+            callId,
             reason,
-            method: 'database_update'
+            method: 'database_update',
+            apiDisconnectResult: callId ? await disconnectCallViaAPI(callId, reason) : null
           }
         }
       } catch (dbError) {
@@ -2658,9 +2771,11 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
           success: false,
           message: 'Failed to update database',
           streamSid,
+          callId,
           reason,
           method: 'database_update',
-          error: dbError.message
+          error: dbError.message,
+          apiDisconnectResult: callId ? await disconnectCallViaAPI(callId, reason) : null
         }
       }
     }
@@ -2677,9 +2792,41 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
   }
 }
 
+/**
+ * Disconnect a call by callId using SanPBX API
+ * @param {string} callId - The call ID to disconnect
+ * @param {string} reason - Reason for disconnection
+ * @returns {Object} Result of disconnection attempt
+ */
+const disconnectCallByCallId = async (callId, reason = 'manual_disconnect') => {
+  try {
+    console.log(`🛑 [CALL-DISCONNECT] Attempting to disconnect call: ${callId}`)
+    
+    const result = await disconnectCallViaAPI(callId, reason)
+    
+    if (result.success) {
+      console.log(`✅ [CALL-DISCONNECT] Successfully disconnected call: ${callId}`)
+    } else {
+      console.log(`❌ [CALL-DISCONNECT] Failed to disconnect call: ${callId} - ${result.error}`)
+    }
+    
+    return result
+  } catch (error) {
+    console.error(`❌ [CALL-DISCONNECT] Error disconnecting call ${callId}:`, error.message)
+    return {
+      success: false,
+      callId,
+      reason,
+      error: error.message
+    }
+  }
+}
+
 module.exports = { 
   setupSanPbxWebSocketServer, 
   terminateCallByStreamSid,
+  disconnectCallByCallId,
+  disconnectCallViaAPI,
   // Export termination methods for external use
   terminationMethods: {
     graceful: (callLogger, message, language) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe"),
