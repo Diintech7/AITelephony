@@ -1,20 +1,113 @@
 const WebSocket = require("ws")
 require("dotenv").config()
+const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
+const Credit = require("../models/Credit")
 
-// API Keys from environment
-const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY
-const SARVAM_API_KEY = process.env.SARVAM_API_KEY
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+// Import franc with fallback for different versions
+let franc;
+try {
+  franc = require("franc").franc;
+  if (!franc) {
+    franc = require("franc");
+  }
+} catch (error) {
+  franc = () => 'und';
+}
+
+// Load API keys from environment variables
+const API_KEYS = {
+  deepgram: process.env.DEEPGRAM_API_KEY,
+  sarvam: process.env.SARVAM_API_KEY,
+  openai: process.env.OPENAI_API_KEY,
+  whatsapp: process.env.WHATSAPP_TOKEN,
+}
 
 // Validate API keys
-if (!DEEPGRAM_API_KEY || !SARVAM_API_KEY || !OPENAI_API_KEY) {
-  console.error("Missing required API keys in environment variables")
+if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+  console.error("❌ Missing required API keys in environment variables")
   process.exit(1)
 }
 
 const fetch = globalThis.fetch || require("node-fetch")
+
+// WhatsApp send-info API config (will be retrieved from agent config)
+let WHATSAPP_API_URL = null
+
+// Normalize Indian mobile to 91XXXXXXXXXX format (no +)
+const normalizeIndianMobile = (raw) => {
+  try {
+    if (!raw) return null
+    const digits = String(raw).replace(/\D+/g, "")
+    if (!digits) return null
+    // Remove leading country/long trunk prefixes; keep last 10 digits for India
+    const last10 = digits.slice(-10)
+    if (last10.length !== 10) return null
+    return `91${last10}`
+  } catch (_) {
+    return null
+  }
+}
+
+// Send WhatsApp info via external endpoint (fire-and-forget safe)
+const sendWhatsAppTemplateMessage = async (toNumber, link = null, whatsappUrl = null) => {
+  const body = link ? { to: toNumber, link } : { to: toNumber }
+  const apiUrl = whatsappUrl || WHATSAPP_API_URL
+
+  if (!apiUrl) {
+    console.log("❌ [WHATSAPP] No WhatsApp API URL configured")
+    return { ok: false, error: "No WhatsApp API URL configured" }
+  }
+
+  try {
+    console.log("📨 [WHATSAPP] POST", apiUrl)
+    console.log("📨 [WHATSAPP] Payload:", JSON.stringify(body))
+    const res = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(API_KEYS.whatsapp ? { Authorization: `Bearer ${API_KEYS.whatsapp}` } : {}),
+      },
+      body: JSON.stringify(body),
+    })
+    const text = await res.text()
+    const isOk = res.ok
+    console.log(`📨 [WHATSAPP] Status: ${res.status} ${res.statusText}`)
+    console.log("📨 [WHATSAPP] Response:", text)
+    return { ok: isOk, status: res.status, body: text }
+  } catch (err) {
+    console.log("❌ [WHATSAPP] Error:", err.message)
+    return { ok: false, error: err.message }
+  }
+}
+
+// Resolve WhatsApp link from agent config
+const getAgentWhatsappLink = (agent) => {
+  try {
+    if (!agent) return null
+    if (agent.whatsapplink && typeof agent.whatsapplink === "string" && agent.whatsapplink.trim()) {
+      return agent.whatsapplink.trim()
+    }
+    if (Array.isArray(agent.whatsapp) && agent.whatsapp.length > 0) {
+      const first = agent.whatsapp.find((w) => w && typeof w.link === "string" && w.link.trim())
+      if (first) return first.link.trim()
+    }
+    return null
+  } catch (_) {
+    return null
+  }
+}
+
+// Performance timing helper
+const createTimer = (label) => {
+  const start = Date.now()
+  return {
+    start,
+    end: () => Date.now() - start,
+    checkpoint: (checkpointName) => Date.now() - start,
+  }
+}
 
 // Precompiled responses for common queries (instant responses)
 const QUICK_RESPONSES = {
@@ -47,7 +140,7 @@ function last10Digits(value) {
   return digits.slice(-10)
 }
 
-// Map simple lang codes to Sarvam codes (align with aitota.js)
+// Enhanced language mappings with Marathi support
 const LANGUAGE_MAPPING = {
   hi: "hi-IN",
   en: "en-IN",
@@ -64,10 +157,219 @@ const LANGUAGE_MAPPING = {
   ur: "ur-IN",
 }
 
-const getSarvamLanguage = (detectedLang, defaultLang = "en") => {
-  const lang = (detectedLang || defaultLang || "en").toLowerCase()
-  return LANGUAGE_MAPPING[lang] || LANGUAGE_MAPPING.en
+// Enhanced Franc language code mapping to our supported languages
+const FRANC_TO_SUPPORTED = {
+  'hin': 'hi',
+  'eng': 'en',
+  'ben': 'bn',
+  'tel': 'te',
+  'tam': 'ta',
+  'mar': 'mr',
+  'guj': 'gu',
+  'kan': 'kn',
+  'mal': 'ml',
+  'pan': 'pa',
+  'ori': 'or',
+  'asm': 'as',
+  'urd': 'ur',
+  'src': 'en',
+  'und': 'en',
+  'lat': 'en',
+  'sco': 'en',
+  'fra': 'en',
+  'deu': 'en',
+  'nld': 'en',
+  'spa': 'en',
+  'ita': 'en',
+  'por': 'en',
 }
+
+const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  return LANGUAGE_MAPPING[lang] || "hi-IN"
+}
+
+const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  if (lang === "hi") return "hi"
+  if (lang === "en") return "en-IN"
+  if (lang === "mr") return "mr"
+  return lang
+}
+
+// Enhanced language detection with better fallback logic
+const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
+  try {
+    const cleanText = text.trim()
+    
+    if (cleanText.length < 10) {
+      const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
+      const hindiPatterns = /[\u0900-\u097F]/
+      const englishWords = /^[a-zA-Z\s\?\!\.\,\'\"]+$/
+      
+      if (hindiPatterns.test(cleanText)) {
+        return "hi"
+      } else if (englishPatterns.test(cleanText) || englishWords.test(cleanText)) {
+        return "en"
+      } else {
+        return fallbackLanguage
+      }
+    }
+
+    if (typeof franc !== 'function') {
+      return fallbackLanguage
+    }
+
+    const detected = franc(cleanText)
+
+    if (detected === 'und' || !detected) {
+      const hindiPatterns = /[\u0900-\u097F]/
+      if (hindiPatterns.test(cleanText)) {
+        return "hi"
+      }
+      
+      const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
+      if (latinScript.test(cleanText)) {
+        return "en"
+      }
+      
+      return fallbackLanguage
+    }
+
+    const mappedLang = FRANC_TO_SUPPORTED[detected]
+    
+    if (mappedLang) {
+      return mappedLang
+    } else {
+      const hindiPatterns = /[\u0900-\u097F]/
+      if (hindiPatterns.test(cleanText)) {
+        return "hi"
+      }
+      
+      const tamilScript = /[\u0B80-\u0BFF]/
+      const teluguScript = /[\u0C00-\u0C7F]/
+      const kannadaScript = /[\u0C80-\u0CFF]/
+      const malayalamScript = /[\u0D00-\u0D7F]/
+      const gujaratiScript = /[\u0A80-\u0AFF]/
+      const bengaliScript = /[\u0980-\u09FF]/
+      
+      if (tamilScript.test(cleanText)) return "ta"
+      if (teluguScript.test(cleanText)) return "te"
+      if (kannadaScript.test(cleanText)) return "kn"
+      if (malayalamScript.test(cleanText)) return "ml"
+      if (gujaratiScript.test(cleanText)) return "gu"
+      if (bengaliScript.test(cleanText)) return "bn"
+      
+      const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
+      if (latinScript.test(cleanText)) {
+        return "en"
+      }
+      
+      return fallbackLanguage
+    }
+    
+  } catch (error) {
+    return fallbackLanguage
+  }
+}
+
+// Fallback to OpenAI for uncertain cases
+const detectLanguageWithOpenAI = async (text) => {
+  const timer = createTimer("LLM_LANGUAGE_DETECTION")
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code (hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur). 
+
+Examples:
+- "Hello, how are you?" → en
+- "What's our name?" → en
+- "नमस्ते, आप कैसे हैं?" → hi
+- "আপনি কেমন আছেন?" → bn
+- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
+- "तुम्ही कसे आहात?" → mr
+- "તમે કેમ છો?" → gu
+
+Return only the language code, nothing else.`,
+          },
+          {
+            role: "user",
+            content: text,
+          },
+        ],
+        max_tokens: 10,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error(`Language detection failed: ${response.status}`)
+    }
+
+    const data = await response.json()
+    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
+
+    const validLanguages = Object.keys(LANGUAGE_MAPPING)
+    if (validLanguages.includes(detectedLang)) {
+      console.log(`🕒 [LLM-LANG-DETECT] ${timer.end()}ms - Detected: ${detectedLang}`)
+      return detectedLang
+    }
+
+    return "en"
+  } catch (error) {
+    console.log(`❌ [LLM-LANG-DETECT] ${timer.end()}ms - Error: ${error.message}`)
+    return "en"
+  }
+}
+
+// Enhanced hybrid language detection
+const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
+  const francResult = detectLanguageWithFranc(text)
+  
+  if (text.trim().length < 20) {
+    const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
+    const hindiPatterns = /[\u0900-\u097F]/
+    
+    if (hindiPatterns.test(text)) {
+      return "hi"
+    } else if (englishPatterns.test(text)) {
+      return "en"
+    }
+  }
+  
+  if (francResult === 'hi' || francResult === 'en') {
+    return francResult
+  }
+  
+  if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
+    return await detectLanguageWithOpenAI(text)
+  }
+  
+  return francResult
+}
+
+// Allowed lead statuses based on CallLog model
+const ALLOWED_LEAD_STATUSES = new Set([
+  'vvi', 'maybe', 'enrolled',
+  'junk_lead', 'not_required', 'enrolled_other', 'decline', 'not_eligible', 'wrong_number',
+  'hot_followup', 'cold_followup', 'schedule',
+  'not_connected'
+]);
+
+const normalizeLeadStatus = (value, fallback = 'maybe') => {
+  if (!value || typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  return ALLOWED_LEAD_STATUSES.has(normalized) ? normalized : fallback;
+};
 
 const VALID_SARVAM_VOICES = new Set([
   "abhilash","anushka","meera","pavithra","maitreyi","arvind","amol","amartya","diya","neel","misha","vian","arjun","maya","manisha","vidya","arya","karun","hitesh"
@@ -89,12 +391,697 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return voiceMapping[normalized] || "pavithra"
 }
 
+// Intelligent lead status detection using OpenAI
+const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("LEAD_STATUS_DETECTION")
+  try {
+    const leadStatusPrompt = `Analyze the user's interest level and conversation context to determine the appropriate lead status.
+
+Available statuses:
+- 'vvi' (very very interested): User shows high enthusiasm, asks detailed questions, wants to proceed immediately
+- 'maybe': User shows some interest but is hesitant or needs more information
+- 'enrolled': User has agreed to enroll, sign up, or take action
+- 'junk_lead': User is clearly not interested, rude, or spam
+- 'not_required': User says they don't need the service
+- 'enrolled_other': User mentions they're already enrolled elsewhere
+- 'decline': User explicitly declines the offer
+- 'not_eligible': User doesn't meet requirements
+- 'wrong_number': Wrong number or person
+- 'hot_followup': User wants to be called back later with high interest
+- 'cold_followup': User wants to be called back later with low interest
+- 'schedule': User wants to schedule something
+- 'not_connected': Call didn't connect or was very short
+
+User message: "${userMessage}"
+Conversation context: ${conversationHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join(' | ')}
+
+Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on the user's current interest level and intent.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: leadStatusPrompt },
+        ],
+        max_tokens: 15,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "maybe" // Default to maybe on error
+    }
+
+    const data = await response.json()
+    const detectedStatus = data.choices[0]?.message?.content?.trim().toLowerCase()
+
+    // Validate the detected status
+    const validStatuses = ['vvi', 'maybe', 'enrolled', 'junk_lead', 'not_required', 'enrolled_other', 'decline', 'not_eligible', 'wrong_number', 'hot_followup', 'cold_followup', 'schedule', 'not_connected']
+    
+    if (validStatuses.includes(detectedStatus)) {
+      console.log(`🕒 [LEAD-STATUS-DETECTION] ${timer.end()}ms - Detected: ${detectedStatus}`)
+      return detectedStatus
+    } else {
+      console.log(`⚠️ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Invalid status detected: ${detectedStatus}, defaulting to maybe`)
+      return "maybe"
+    }
+  } catch (error) {
+    console.log(`❌ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "maybe" // Default to maybe on error
+  }
+}
+
+// Intelligent call disconnection detection using OpenAI
+const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("DISCONNECTION_DETECTION")
+  try {
+    const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
+- "thank you", "thanks", "bye", "goodbye", "end call", "hang up"
+- "hold on", "wait", "not available", "busy", "call back later"
+- "not interested", "no thanks", "stop calling"
+- Any indication they want to end the conversation
+
+User message: "${userMessage}"
+
+Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they want to continue.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: disconnectionPrompt },
+        ],
+        max_tokens: 10,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "CONTINUE" // Default to continue on error
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
+
+    if (result === "DISCONNECT") {
+      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
+      return "DISCONNECT"
+    } else {
+      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
+      return "CONTINUE"
+    }
+  } catch (error) {
+    console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "CONTINUE" // Default to continue on error
+  }
+}
+
+// Intelligent WhatsApp request detection using OpenAI
+const detectWhatsAppRequest = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("WHATSAPP_REQUEST_DETECTION")
+  try {
+    const whatsappPrompt = `Analyze if the user is asking for WhatsApp information, link, or contact details. Look for:
+- "WhatsApp", "whatsapp", "WA", "wa"
+- "send me", "share", "link", "contact", "number"
+- "message me", "text me", "connect on WhatsApp"
+- "send details", "share information"
+- Any request for digital communication or messaging
+
+User message: "${userMessage}"
+
+Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if not.`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: whatsappPrompt },
+        ],
+        max_tokens: 15,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return "NO_REQUEST" // Default to no request on error
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
+
+    if (result === "WHATSAPP_REQUEST") {
+      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - User wants WhatsApp info`)
+      return "WHATSAPP_REQUEST"
+    } else {
+      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - No WhatsApp request`)
+      return "NO_REQUEST"
+    }
+  } catch (error) {
+    console.log(`❌ [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return "NO_REQUEST" // Default to no request on error
+  }
+}
+
+// Simplified OpenAI processing
+const processWithOpenAI = async (
+  userMessage,
+  conversationHistory,
+  detectedLanguage,
+  callLogger,
+  agentConfig,
+  userName = null,
+) => {
+  const timer = createTimer("LLM_PROCESSING")
+
+  try {
+    // Build a stricter system prompt that embeds firstMessage and sets answering policy
+    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    const firstMessage = (agentConfig.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage
+      ? `FirstGreeting: "${firstMessage}"\n`
+      : ""
+
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
+      "If the information is not present, reply briefly that you don't have that information.",
+      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
+      "Keep the entire reply under 100 tokens.",
+    ].join(" ")
+
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
+      : null
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
+      ...conversationHistory.slice(-6),
+      { role: "user", content: userMessage },
+    ]
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        max_tokens: 120,
+        temperature: 0.3,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
+      return null
+    }
+
+    const data = await response.json()
+    let fullResponse = data.choices[0]?.message?.content?.trim()
+
+    console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
+
+    // Ensure a follow-up question is present at the end
+    if (fullResponse) {
+      const needsFollowUp = !/[?]\s*$/.test(fullResponse)
+      if (needsFollowUp) {
+        const followUps = {
+          hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?",
+          en: "Is there anything else I can help you with?",
+          bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?",
+          ta: "வேறு எதற்காவது உதவி வேண்டுமா?",
+          te: "ఇంకేమైనా సహాయం కావాలా?",
+          mr: "आणखी काही मदत हवी आहे का?",
+          gu: "શું બીજી કોઈ મદદ કરી શકું?",
+        }
+        const fu = followUps[detectedLanguage] || followUps.en
+        fullResponse = `${fullResponse} ${fu}`.trim()
+      }
+    }
+
+    if (callLogger && fullResponse) {
+      callLogger.logAIResponse(fullResponse, detectedLanguage)
+    }
+
+    return fullResponse
+  } catch (error) {
+    console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+    return null
+  }
+}
+
+// Enhanced Call logging utility class with live transcript saving
+class EnhancedCallLogger {
+  constructor(clientId, mobile = null, callDirection = "inbound") {
+    this.clientId = clientId
+    this.mobile = mobile
+    this.callDirection = callDirection
+    this.callStartTime = new Date()
+    this.transcripts = []
+    this.responses = []
+    this.totalDuration = 0
+    this.callLogId = null
+    this.isCallLogCreated = false
+    this.pendingTranscripts = []
+    this.batchTimer = null
+    this.batchSize = 5 // Save every 5 transcript entries
+    this.batchTimeout = 3000 // Or save every 3 seconds
+    this.customParams = {}
+    this.callerId = null
+    this.streamSid = null
+    this.callSid = null
+    this.accountSid = null
+    this.ws = null // Store WebSocket reference for disconnection
+    this.uniqueid = null // Store uniqueid for outbound calls
+    this.currentLeadStatus = 'not_connected' // Track current lead status
+    this.whatsappSent = false // Track if WhatsApp was already sent
+    this.whatsappRequested = false // Track if user requested WhatsApp
+  }
+
+  // Create initial call log entry immediately when call starts
+  async createInitialCallLog(agentId = null, leadStatusInput = 'not_connected') {
+    const timer = createTimer("INITIAL_CALL_LOG_CREATE")
+    try {
+      const initialCallLogData = {
+        clientId: this.clientId,
+        agentId: agentId,
+        mobile: this.mobile,
+        time: this.callStartTime,
+        transcript: "",
+        duration: 0,
+        leadStatus: normalizeLeadStatus(leadStatusInput, 'not_connected'),
+        streamSid: this.streamSid,
+        callSid: this.callSid,
+        metadata: {
+          userTranscriptCount: 0,
+          aiResponseCount: 0,
+          languages: [],
+          callDirection: this.callDirection,
+          isActive: true,
+          lastUpdated: new Date(),
+          sttProvider: 'deepgram',
+          ttsProvider: 'sarvam',
+          llmProvider: 'openai',
+          customParams: this.customParams || {},
+          callerId: this.callerId || undefined,
+          whatsappRequested: false,
+          whatsappMessageSent: false,
+        },
+      }
+
+      const callLog = new CallLog(initialCallLogData)
+      const savedLog = await callLog.save()
+      this.callLogId = savedLog._id
+      this.isCallLogCreated = true
+
+      // Add to active call loggers map for manual termination
+      if (this.streamSid) {
+        activeCallLoggers.set(this.streamSid, this)
+        console.log(`📋 [ACTIVE-CALL-LOGGERS] Added call logger for streamSid: ${this.streamSid}`)
+      }
+
+      console.log(`🕒 [INITIAL-CALL-LOG] ${timer.end()}ms - Created: ${savedLog._id}`)
+      return savedLog
+    } catch (error) {
+      console.log(`❌ [INITIAL-CALL-LOG] ${timer.end()}ms - Error: ${error.message}`)
+      throw error
+    }
+  }
+
+  // Add transcript with batched live saving
+  logUserTranscript(transcript, language, timestamp = new Date()) {
+    const entry = {
+      type: "user",
+      text: transcript,
+      language: language,
+      timestamp: timestamp,
+      source: "deepgram",
+    }
+
+    this.transcripts.push(entry)
+    this.pendingTranscripts.push(entry)
+    
+    // Trigger batch save
+    this.scheduleBatchSave()
+  }
+
+  // Add AI response with batched live saving
+  logAIResponse(response, language, timestamp = new Date()) {
+    const entry = {
+      type: "ai",
+      text: response,
+      language: language,
+      timestamp: timestamp,
+      source: "sarvam",
+    }
+
+    this.responses.push(entry)
+    this.pendingTranscripts.push(entry)
+    
+    // Trigger batch save
+    this.scheduleBatchSave()
+  }
+
+  // Schedule batched saving to reduce DB calls
+  scheduleBatchSave() {
+    // Clear existing timer
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer)
+    }
+
+    // Save immediately if batch size reached
+    if (this.pendingTranscripts.length >= this.batchSize) {
+      this.savePendingTranscripts()
+      return
+    }
+
+    // Otherwise schedule save after timeout
+    this.batchTimer = setTimeout(() => {
+      this.savePendingTranscripts()
+    }, this.batchTimeout)
+  }
+
+  // Save pending transcripts in background (non-blocking)
+  async savePendingTranscripts() {
+    if (!this.isCallLogCreated || this.pendingTranscripts.length === 0) {
+      return
+    }
+
+    // Create a copy and clear pending immediately to avoid blocking
+    const transcriptsToSave = [...this.pendingTranscripts]
+    this.pendingTranscripts = []
+    
+    // Clear timer
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer)
+      this.batchTimer = null
+    }
+
+    // Save asynchronously without awaiting (fire and forget)
+    setImmediate(async () => {
+      const timer = createTimer("LIVE_TRANSCRIPT_BATCH_SAVE")
+      try {
+        const currentTranscript = this.generateFullTranscript()
+        const currentDuration = Math.round((new Date() - this.callStartTime) / 1000)
+        
+        const updateData = {
+          transcript: currentTranscript,
+          duration: currentDuration,
+          'metadata.userTranscriptCount': this.transcripts.length,
+          'metadata.aiResponseCount': this.responses.length,
+          'metadata.languages': [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
+          'metadata.lastUpdated': new Date(),
+          'metadata.whatsappRequested': this.whatsappRequested,
+          'metadata.whatsappMessageSent': this.whatsappSent,
+        }
+
+        await CallLog.findByIdAndUpdate(this.callLogId, updateData, { 
+          new: false, // Don't return updated doc to save bandwidth
+          runValidators: false // Skip validation for performance
+        })
+
+        console.log(`🕒 [LIVE-TRANSCRIPT-SAVE] ${timer.end()}ms - Saved ${transcriptsToSave.length} entries`)
+      } catch (error) {
+        console.log(`❌ [LIVE-TRANSCRIPT-SAVE] ${timer.end()}ms - Error: ${error.message}`)
+        // On error, add back to pending for retry
+        this.pendingTranscripts.unshift(...transcriptsToSave)
+      }
+    })
+  }
+
+  // Generate full transcript
+  generateFullTranscript() {
+    const allEntries = [...this.transcripts, ...this.responses].sort(
+      (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+    )
+
+    return allEntries
+      .map((entry) => {
+        const speaker = entry.type === "user" ? "User" : "AI"
+        const time = entry.timestamp.toISOString()
+        return `[${time}] ${speaker} (${entry.language}): ${entry.text}`
+      })
+      .join("\n")
+  }
+
+  // Final save with complete call data
+  async saveToDatabase(leadStatusInput = 'maybe') {
+    const timer = createTimer("FINAL_CALL_LOG_SAVE")
+    try {
+      const callEndTime = new Date()
+      this.totalDuration = Math.round((callEndTime - this.callStartTime) / 1000)
+
+      // Save any remaining pending transcripts first
+      if (this.pendingTranscripts.length > 0) {
+        await this.savePendingTranscripts()
+        // Small delay to ensure batch save completes
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+
+      const leadStatus = normalizeLeadStatus(leadStatusInput, 'maybe')
+
+      if (this.isCallLogCreated && this.callLogId) {
+        // Update existing call log with final data
+        const finalUpdateData = {
+          transcript: this.generateFullTranscript(),
+          duration: this.totalDuration,
+          leadStatus: leadStatus,
+          streamSid: this.streamSid,
+          callSid: this.callSid,
+          'metadata.userTranscriptCount': this.transcripts.length,
+          'metadata.aiResponseCount': this.responses.length,
+          'metadata.languages': [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
+          'metadata.callEndTime': callEndTime,
+          'metadata.isActive': false,
+          'metadata.lastUpdated': callEndTime,
+          'metadata.customParams': this.customParams || {},
+          'metadata.callerId': this.callerId || undefined,
+          'metadata.whatsappRequested': this.whatsappRequested,
+          'metadata.whatsappMessageSent': this.whatsappSent,
+        }
+
+        const updatedLog = await CallLog.findByIdAndUpdate(
+          this.callLogId, 
+          finalUpdateData, 
+          { new: true }
+        )
+
+        console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Updated: ${updatedLog._id}`)
+        return updatedLog
+      } else {
+        // Fallback: create new call log if initial creation failed
+        const callLogData = {
+          clientId: this.clientId,
+          mobile: this.mobile,
+          time: this.callStartTime,
+          transcript: this.generateFullTranscript(),
+          duration: this.totalDuration,
+          leadStatus: leadStatus,
+          streamSid: this.streamSid,
+          callSid: this.callSid,
+          metadata: {
+            userTranscriptCount: this.transcripts.length,
+            aiResponseCount: this.responses.length,
+            languages: [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
+            callEndTime: callEndTime,
+            callDirection: this.callDirection,
+            isActive: false,
+            customParams: this.customParams || {},
+            callerId: this.callerId || undefined,
+            whatsappRequested: this.whatsappRequested,
+            whatsappMessageSent: this.whatsappSent,
+          },
+        }
+
+        const callLog = new CallLog(callLogData)
+        const savedLog = await callLog.save()
+        console.log(`🕒 [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Created: ${savedLog._id}`)
+        return savedLog
+      }
+    } catch (error) {
+      console.log(`❌ [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Error: ${error.message}`)
+      throw error
+    }
+  }
+
+  // Cleanup method
+  cleanup() {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer)
+      this.batchTimer = null
+    }
+    
+    // Remove from active call loggers map
+    if (this.streamSid) {
+      activeCallLoggers.delete(this.streamSid)
+      console.log(`📋 [ACTIVE-CALL-LOGGERS] Removed call logger for streamSid: ${this.streamSid}`)
+    }
+  }
+
+  // Update lead status
+  updateLeadStatus(newStatus) {
+    this.currentLeadStatus = newStatus
+    console.log(`📊 [LEAD-STATUS] Updated to: ${newStatus}`)
+  }
+
+  // Mark WhatsApp as sent
+  markWhatsAppSent() {
+    this.whatsappSent = true
+    console.log(`📨 [WHATSAPP-TRACKING] Marked as sent`)
+  }
+
+  // Mark WhatsApp as requested
+  markWhatsAppRequested() {
+    this.whatsappRequested = true
+    console.log(`📨 [WHATSAPP-TRACKING] Marked as requested by user`)
+  }
+
+  // Check if WhatsApp should be sent based on lead status and user request
+  shouldSendWhatsApp() {
+    // Don't send if already sent
+    if (this.whatsappSent) {
+      console.log(`📨 [WHATSAPP-LOGIC] Skipping - already sent`)
+      return false
+    }
+
+    // Send if user is VVI (very very interested)
+    if (this.currentLeadStatus === 'vvi') {
+      console.log(`📨 [WHATSAPP-LOGIC] Sending - user is VVI`)
+      return true
+    }
+
+    // Send if user explicitly requested WhatsApp
+    if (this.whatsappRequested) {
+      console.log(`📨 [WHATSAPP-LOGIC] Sending - user requested WhatsApp`)
+      return true
+    }
+
+    console.log(`📨 [WHATSAPP-LOGIC] Skipping - not VVI and no request`)
+    return false
+  }
+
+  getStats() {
+    return {
+      duration: this.totalDuration,
+      userMessages: this.transcripts.length,
+      aiResponses: this.responses.length,
+      languages: [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
+      startTime: this.callStartTime,
+      callDirection: this.callDirection,
+      callLogId: this.callLogId,
+      pendingTranscripts: this.pendingTranscripts.length,
+      currentLeadStatus: this.currentLeadStatus,
+      whatsappSent: this.whatsappSent,
+      whatsappRequested: this.whatsappRequested
+    }
+  }
+}
+
+// Global map to store active call loggers by streamSid
+const activeCallLoggers = new Map()
+
+// Track billed streams to avoid double-charging on both stop and close
+const billedStreamSids = new Set()
+
+// Helper to bill call credits with decimal precision (1/30 credit per second)
+const billCallCredits = async ({ clientId, durationSeconds, callDirection, mobile, callLogId, streamSid, uniqueid }) => {
+  try {
+    if (!clientId || !streamSid) return
+    if (billedStreamSids.has(streamSid)) return
+
+    const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
+    const currentSeconds = Math.max(0, Number(durationSeconds) || 0)
+    const balanceBefore = Number(creditRecord.currentBalance || 0)
+
+    // Use new decimal billing method
+    const billingResult = creditRecord.billCallCredits(
+      currentSeconds, 
+      mobile || 'unknown', 
+      callDirection || 'inbound', 
+      callLogId, 
+      streamSid,
+      uniqueid
+    )
+
+    // Save the updated credit record
+    await creditRecord.save()
+
+    if (callLogId) {
+      await CallLog.findByIdAndUpdate(callLogId, {
+        'metadata.billing': {
+          creditsUsed: billingResult.creditsUsed,
+          durationFormatted: billingResult.durationFormatted,
+          durationSeconds: currentSeconds,
+          balanceBefore: balanceBefore,
+          balanceAfter: billingResult.balanceAfter,
+          billingMethod: 'decimal_precision',
+          creditsPerSecond: 1/30,
+          uniqueid: uniqueid || null,
+          billedAt: new Date(),
+        },
+        'metadata.lastUpdated': new Date(),
+      }).catch(() => {})
+    }
+
+    billedStreamSids.add(streamSid)
+    console.log(`💰 [CALL-BILLING] Call: ${billingResult.durationFormatted} (${currentSeconds}s). Charged: ${billingResult.creditsUsed} credits. Balance: ${balanceBefore} → ${billingResult.balanceAfter}`)
+  } catch (e) {
+    console.log(`❌ [CALL-BILLING] Error: ${e.message}`)
+    // Swallow billing errors to not affect call flow
+  }
+}
+
+// Helper to deduct 1 credit for successful WhatsApp sends
+const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid }) => {
+  try {
+    if (!clientId) return
+    const creditRecord = await Credit.getOrCreateCreditRecord(clientId)
+    const balanceBefore = Number(creditRecord?.currentBalance || 0)
+    if (balanceBefore < 1) {
+      console.log("⚠️ [WHATSAPP-BILLING] Insufficient credits to deduct for WhatsApp message")
+      return
+    }
+    await creditRecord.useCredits(1, 'whatsapp', `WhatsApp message sent to ${mobile || 'unknown'} with link: ${link || 'none'}`, {
+      mobile: mobile || null,
+      link: link || null,
+      callLogId: callLogId || null,
+      streamSid: streamSid || null,
+    })
+    console.log(`💰 [WHATSAPP-BILLING] Deducted 1.00 credit for WhatsApp message to ${mobile}`)
+  } catch (e) {
+    console.log("❌ [WHATSAPP-BILLING] Error deducting credit:", e.message)
+  }
+}
+
 /**
  * Setup unified voice server for SanIPPBX integration
  * @param {WebSocket} ws - The WebSocket connection from SanIPPBX
  */
 const setupSanPbxWebSocketServer = (ws) => {
-  console.log("Setting up SanIPPBX voice server connection")
+  console.log("🔗 [SANPBX] Setting up SanIPPBX voice server connection")
 
   // Session state for this connection
   let streamId = null
@@ -129,6 +1116,18 @@ const setupSanPbxWebSocketServer = (ws) => {
   let aiResponses = []
   let whatsappRequested = false
   let whatsappSent = false
+  
+  // Enhanced session state
+  let currentLanguage = undefined
+  let processingRequestId = 0
+  let callLogger = null
+  let callDirection = "inbound"
+  let agentConfig = null
+  let userName = null
+  let currentTTS = null
+  let deepgramReady = false
+  let deepgramAudioQueue = []
+  let sttTimer = null
 
   const buildFullTranscript = () => {
     try {
@@ -446,130 +1445,347 @@ const setupSanPbxWebSocketServer = (ws) => {
   }
 
   /**
-   * Connect to Deepgram with optimized settings for 8kHz audio
+   * Connect to Deepgram with enhanced language detection and processing
    */
-  const connectToDeepgram = (attemptCount = 0) => {
-    console.log(`[STT] Connecting to Deepgram (attempt ${attemptCount + 1})`)
+  const connectToDeepgram = async () => {
+    try {
+      const deepgramLanguage = getDeepgramLanguage(currentLanguage)
 
-    // FIXED: Updated for SanIPPBX audio format
-    let params = {
-      encoding: inputEncoding,
-      sample_rate: String(inputSampleRateHz),
-      channels: String(inputChannels),
-    }
+      const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
+      deepgramUrl.searchParams.append("sample_rate", "8000")
+      deepgramUrl.searchParams.append("channels", "1")
+      deepgramUrl.searchParams.append("encoding", "linear16")
+      deepgramUrl.searchParams.append("model", "nova-2")
+      deepgramUrl.searchParams.append("language", deepgramLanguage)
+      deepgramUrl.searchParams.append("interim_results", "true")
+      deepgramUrl.searchParams.append("smart_format", "true")
+      deepgramUrl.searchParams.append("endpointing", "300")
 
-    if (attemptCount === 0) {
-      params = {
-        ...params,
-        model: "nova-2",
-        language: "en",
-        interim_results: "true",
-        smart_format: "true",
-        endpointing: "120",
-        punctuate: "true",
-        diarize: "false",
-        multichannel: "false",
+      deepgramWs = new WebSocket(deepgramUrl.toString(), {
+        headers: { Authorization: `Token ${API_KEYS.deepgram}` },
+      })
+
+      deepgramWs.onopen = () => {
+        console.log("🎤 [DEEPGRAM] Connection established")
+        deepgramReady = true
+        console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
+        deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
+        deepgramAudioQueue = []
       }
-    } else if (attemptCount === 1) {
-      params = {
-        ...params,
-        model: "base",
-        language: "en",
-        interim_results: "true",
-        endpointing: "100",
+
+      deepgramWs.onmessage = async (event) => {
+        const data = JSON.parse(event.data)
+        await handleDeepgramResponse(data)
       }
+
+      deepgramWs.onerror = (error) => {
+        console.log("❌ [DEEPGRAM] Connection error:", error.message)
+        deepgramReady = false
+      }
+
+      deepgramWs.onclose = () => {
+        console.log("🔌 [DEEPGRAM] Connection closed")
+        deepgramReady = false
+      }
+    } catch (error) {
+      // Silent error handling
     }
+  }
 
-    const deepgramUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(params).toString()}`
+  const handleDeepgramResponse = async (data) => {
+    if (data.type === "Results") {
+      if (!sttTimer) {
+        sttTimer = createTimer("STT_TRANSCRIPTION")
+      }
 
-    console.log(`[STT] Deepgram params -> encoding=${params.encoding}, sample_rate=${params.sample_rate}, channels=${params.channels}`)
-    console.log(`[STT] Connecting to URL: ${deepgramUrl}`)
+      const transcript = data.channel?.alternatives?.[0]?.transcript
+      const is_final = data.is_final
 
-    deepgramWs = new WebSocket(deepgramUrl, {
-      headers: {
-        Authorization: `Token ${DEEPGRAM_API_KEY}`,
-      },
-    })
-
-    deepgramWs.on("open", () => {
-      console.log("[STT] Connected to Deepgram successfully")
-    })
-
-    deepgramWs.on("message", async (data) => {
-      const response = JSON.parse(data)
-
-      if (response.type === "Results") {
-        const transcript = response.channel?.alternatives?.[0]?.transcript
-        const isFinal = response.is_final
-        const confidence = response.channel?.alternatives?.[0]?.confidence
-
-        if (transcript?.trim()) {
-          // Explicit readable logs for interim/final text from Deepgram
-          if (isFinal) {
-            console.log(`[STT:FINAL] ${transcript.trim()} (conf=${typeof confidence === 'number' ? confidence.toFixed(2) : confidence})`)
-          } else {
-            console.log(`[STT:INTERIM] ${transcript.trim()} (conf=${typeof confidence === 'number' ? confidence.toFixed(2) : confidence})`)
-          }
-
-          if (isFinal) {
-            if (silenceTimer) {
-              clearTimeout(silenceTimer)
-              silenceTimer = null
-            }
-            try {
-              userTranscripts.push({
-                type: 'user',
-                text: transcript.trim(),
-                language: 'en',
-                timestamp: new Date(),
-              })
-            } catch (_) {}
-            // Live update after user final transcript
-            await updateLiveCallLog()
-            await processUserInput(transcript.trim())
-          }
+      if (transcript?.trim()) {
+        if (currentTTS && isProcessing) {
+          currentTTS.interrupt()
+          isProcessing = false
+          processingRequestId++
         }
-      } else if (response.type === "UtteranceEnd") {
-        if (userUtteranceBuffer.trim() && userUtteranceBuffer !== lastProcessedTranscript) {
-          console.log(`[STT] Utterance end: "${userUtteranceBuffer}"`)
-          await processUserInput(userUtteranceBuffer)
+
+        if (is_final) {
+          console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+          sttTimer = null
+
+          userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
+
+          if (callLogger && transcript.trim()) {
+            const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
+            callLogger.logUserTranscript(transcript.trim(), detectedLang)
+          }
+
+          await processUserUtterance(userUtteranceBuffer)
           userUtteranceBuffer = ""
         }
-      } else {
-        // Log any other Deepgram message types for full visibility
-        try {
-          console.log(`[STT:DG-RAW] ${JSON.stringify(response)}`)
-        } catch (_) {
-          console.log('[STT:DG-RAW] <unserializable message>')
+      }
+    } else if (data.type === "UtteranceEnd") {
+      if (sttTimer) {
+        console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${userUtteranceBuffer.trim()}"`)
+        sttTimer = null
+      }
+
+      if (userUtteranceBuffer.trim()) {
+        if (callLogger && userUtteranceBuffer.trim()) {
+          const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
+          callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
+        }
+
+        await processUserUtterance(userUtteranceBuffer)
+        userUtteranceBuffer = ""
+      }
+    }
+  }
+
+  const processUserUtterance = async (text) => {
+    if (!text.trim() || text === lastProcessedTranscript) return
+
+    console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
+    console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
+    console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
+
+    if (currentTTS) {
+      console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
+      currentTTS.interrupt()
+    }
+
+    isProcessing = true
+    lastProcessedTranscript = text
+    const currentRequestId = ++processingRequestId
+
+    try {
+      const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
+      console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
+
+      if (detectedLanguage !== currentLanguage) {
+        console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
+        currentLanguage = detectedLanguage
+      }
+
+      // Run all AI detections in parallel for efficiency
+      console.log("🔍 [USER-UTTERANCE] Running AI detections...")
+      
+      const [
+        disconnectionIntent, 
+        leadStatus, 
+        whatsappRequest, 
+        aiResponse
+      ] = await Promise.all([
+        detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
+        detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
+        detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
+        processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig, userName)
+      ])
+
+      // Update call logger with detected information
+      if (callLogger) {
+        callLogger.updateLeadStatus(leadStatus)
+        if (whatsappRequest === "WHATSAPP_REQUEST") {
+          callLogger.markWhatsAppRequested()
         }
       }
-    })
-
-    deepgramWs.on("error", (error) => {
-      console.error(`[STT] Deepgram error (attempt ${attemptCount + 1}):`, error.message)
-
-      if (attemptCount < 2) {
-        console.log(`[STT] Retrying with different parameters...`)
-        setTimeout(
-          () => {
-            connectToDeepgram(attemptCount + 1)
-          },
-          1000 * (attemptCount + 1),
-        )
-      } else {
-        console.error("[STT] All Deepgram connection attempts failed. Check API key and permissions.")
-        sttFailed = true
-
-        const fallbackMessage = "I'm having trouble with speech recognition right now, but I can still help you. Please use the keypad to navigate options."
-        synthesizeAndStreamAudio(fallbackMessage).catch((err) =>
-          console.error("[STT] Fallback message error:", err.message),
-        )
+      
+      if (disconnectionIntent === "DISCONNECT") {
+        console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
+        
+        // Wait 2 seconds to ensure last message is processed, then terminate
+        setTimeout(async () => {
+          if (callLogger) {
+            try {
+              await callLogger.saveToDatabase(callLogger.currentLeadStatus || "maybe")
+              console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
+            } catch (err) {
+              console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
+            }
+          }
+        }, 2000)
+        
+        return
       }
-    })
 
-    deepgramWs.on("close", (code, reason) => {
-      console.log(`[STT] Deepgram connection closed: ${code} - ${reason}`)
-    })
+      if (processingRequestId === currentRequestId && aiResponse) {
+        console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
+        console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+        
+        currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamId, callLogger)
+        await currentTTS.synthesizeAndStream(aiResponse)
+
+        conversationHistory.push(
+          { role: "user", content: text },
+          { role: "assistant", content: aiResponse }
+        )
+
+        if (conversationHistory.length > 10) {
+          conversationHistory = conversationHistory.slice(-10)
+        }
+        
+        console.log("✅ [USER-UTTERANCE] Processing completed")
+      } else {
+        console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
+      }
+    } catch (error) {
+      console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
+    } finally {
+      if (processingRequestId === currentRequestId) {
+        isProcessing = false
+      }
+      console.log("🗣️ [USER-UTTERANCE] ======================================")
+    }
+  }
+
+  // Simplified TTS processor
+  class SimplifiedSarvamTTSProcessor {
+    constructor(language, ws, streamSid, callLogger = null) {
+      this.language = language
+      this.ws = ws
+      this.streamSid = streamSid
+      this.callLogger = callLogger
+      this.sarvamLanguage = getSarvamLanguage(language)
+      this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
+      this.isInterrupted = false
+      this.currentAudioStreaming = null
+      this.totalAudioBytes = 0
+    }
+
+    interrupt() {
+      this.isInterrupted = true
+      if (this.currentAudioStreaming) {
+        this.currentAudioStreaming.interrupt = true
+      }
+    }
+
+    reset(newLanguage) {
+      this.interrupt()
+      if (newLanguage) {
+        this.language = newLanguage
+        this.sarvamLanguage = getSarvamLanguage(newLanguage)
+      }
+      this.isInterrupted = false
+      this.totalAudioBytes = 0
+    }
+
+    async synthesizeAndStream(text) {
+      if (this.isInterrupted) return
+
+      const timer = createTimer("TTS_SYNTHESIS")
+
+      try {
+        const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "API-Subscription-Key": API_KEYS.sarvam,
+          },
+          body: JSON.stringify({
+            inputs: [text],
+            target_language_code: this.sarvamLanguage,
+            speaker: this.voice,
+            pitch: 0,
+            pace: 1.0,
+            loudness: 1.0,
+            speech_sample_rate: 8000,
+            enable_preprocessing: false,
+            enable_preprocessing: true,
+            model: "bulbul:v1",
+          }),
+        })
+
+        if (!response.ok || this.isInterrupted) {
+          if (!this.isInterrupted) {
+            console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+            throw new Error(`Sarvam API error: ${response.status}`)
+          }
+          return
+        }
+
+        const responseData = await response.json()
+        const audioBase64 = responseData.audios?.[0]
+
+        if (!audioBase64 || this.isInterrupted) {
+          if (!this.isInterrupted) {
+            console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
+            throw new Error("No audio data received from Sarvam API")
+          }
+          return
+        }
+
+        console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
+
+        if (!this.isInterrupted) {
+          await this.streamAudioOptimizedForSIP(audioBase64)
+          const audioBuffer = Buffer.from(audioBase64, "base64")
+          this.totalAudioBytes += audioBuffer.length
+        }
+      } catch (error) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+          throw error
+        }
+      }
+    }
+
+    async streamAudioOptimizedForSIP(audioBase64) {
+      if (this.isInterrupted) return
+
+      const audioBuffer = Buffer.from(audioBase64, "base64")
+      const streamingSession = { interrupt: false }
+      this.currentAudioStreaming = streamingSession
+
+      const SAMPLE_RATE = 8000
+      const BYTES_PER_SAMPLE = 2
+      const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+      const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+
+      let position = 0
+      let chunkIndex = 0
+      let successfulChunks = 0
+
+      while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+        const remaining = audioBuffer.length - position
+        const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+        const chunk = audioBuffer.slice(position, position + chunkSize)
+
+        const mediaMessage = {
+          event: "reverse-media",
+          payload: chunk.toString("base64"),
+          streamId: this.streamSid,
+          channelId: channelId,
+          callId: callId,
+        }
+
+        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+          try {
+            this.ws.send(JSON.stringify(mediaMessage))
+            successfulChunks++
+          } catch (error) {
+            break
+          }
+        } else {
+          break
+        }
+
+        if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+          const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
+          const delayMs = Math.max(chunkDurationMs - 2, 10)
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+
+        position += chunkSize
+        chunkIndex++
+      }
+
+      this.currentAudioStreaming = null
+    }
+
+    getStats() {
+      return {
+        totalAudioBytes: this.totalAudioBytes,
+      }
+    }
   }
 
   /**
@@ -754,7 +1970,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       switch (data.event) {
         case "connected":
-          console.log("[SANPBX] Connected")
+          console.log("🔗 [SANPBX] Connected")
           
           // Log ALL data received from SIP team during connection
           console.log("=".repeat(80))
@@ -803,8 +2019,8 @@ const setupSanPbxWebSocketServer = (ws) => {
           } catch (_) {}
           break
 
-        case "start":
-          console.log("[SANPBX] Call started")
+        case "start": {
+          console.log("📞 [SANPBX] Call started")
           
           // Log ALL data received from SIP team at start
           console.log("=".repeat(80))
@@ -847,6 +2063,9 @@ const setupSanPbxWebSocketServer = (ws) => {
           callDirectionValue = data.callDirection || callDirectionValue
           didValue = data.did || didValue
 
+          // Determine call direction
+          callDirection = (callDirectionValue || '').toLowerCase() === 'outgoing' ? 'outbound' : 'inbound'
+
           // Apply media format to Deepgram params when available
           try {
             const mf = data.mediaFormat || {}
@@ -874,8 +2093,13 @@ const setupSanPbxWebSocketServer = (ws) => {
             inputChannels = 1
           }
 
-          // Resolve agent using DID→Agent.callerId priority (like aitota.js style)
+          // Enhanced agent lookup with SanPBX-specific matching
           try {
+            console.log("🔍 [SANPBX-AGENT-LOOKUP] ========== AGENT LOOKUP ==========")
+            console.log("🔍 [SANPBX-AGENT-LOOKUP] Call Direction:", callDirection)
+            console.log("🔍 [SANPBX-AGENT-LOOKUP] DID:", didValue)
+            console.log("🔍 [SANPBX-AGENT-LOOKUP] CallerID:", callerIdValue)
+            
             const fromNumber = (data.start && data.start.from) || data.from || callerIdValue
             const toNumber = (data.start && data.start.to) || data.to || didValue
             const fromLast = last10Digits(fromNumber)
@@ -884,24 +2108,27 @@ const setupSanPbxWebSocketServer = (ws) => {
             let agent = null
             let matchReason = "none"
 
+            // Priority 1: Match by DID (for inbound calls)
             if (!agent && didValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(didValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink")
                 .lean()
               if (agent) matchReason = "callerId==DID"
             }
 
+            // Priority 2: Match by CallerID (for outbound calls)
             if (!agent && callerIdValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(callerIdValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink")
                 .lean()
               if (agent) matchReason = "callerId==CallerID"
             }
 
+            // Priority 3: Match by calling number (last 10 digits)
             if (!agent) {
               try {
                 const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
-                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId")
+                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink")
                   .lean()
                 agent = candidates.find((a) => last10Digits(a.callingNumber) === toLast || last10Digits(a.callingNumber) === fromLast) || null
                 if (agent) matchReason = "callingNumber(last10)==to/from"
@@ -909,77 +2136,129 @@ const setupSanPbxWebSocketServer = (ws) => {
             }
 
             if (agent) {
-              console.log(`[SANPBX] Agent matched: ${agent.agentName} (reason=${matchReason})`)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] Agent found successfully")
+              console.log("✅ [SANPBX-AGENT-LOOKUP] Agent Name:", agent.agentName)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] Client ID:", agent.clientId)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] Language:", agent.language)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] Voice Selection:", agent.voiceSelection)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] First Message:", agent.firstMessage)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] WhatsApp Enabled:", agent.whatsappEnabled)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] WhatsApp API URL:", agent.whatsapplink)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] Match Reason:", matchReason)
+              console.log("✅ [SANPBX-AGENT-LOOKUP] ======================================")
+              
               // Bind into session for downstream use (TTS, prompts, etc.)
               ws.sessionAgentConfig = agent
+              agentConfig = agent
+              currentLanguage = agent.language || "en"
             } else {
-              console.log(`[SANPBX] No agent matched via DID/CallerID/last10. Proceeding without agent binding.`)
+              console.log("❌ [SANPBX-AGENT-LOOKUP] No agent found for call")
+              ws.send(
+                JSON.stringify({
+                  event: "error",
+                  message: `No agent found for ${callDirection} call`,
+                }),
+              )
+              ws.close()
+              return
             }
-          } catch (e) {
-            console.log(`[SANPBX] Agent matching error: ${e.message}`)
+          } catch (err) {
+            console.log("❌ [SANPBX-AGENT-LOOKUP] Error finding agent:", err.message)
+            ws.send(
+              JSON.stringify({
+                event: "error",
+                message: err.message,
+              }),
+            )
+            ws.close()
+            return
           }
 
-          // Create initial CallLog entry with customParams from extraParams
+          // Block call if the client has no credits
           try {
-            const callDirection = (callDirectionValue || '').toLowerCase() === 'outgoing' ? 'outbound' : 'inbound'
-            const initialCallLogData = {
-              clientId: ws.sessionAgentConfig?.clientId || 'unknown',
-              agentId: ws.sessionAgentConfig?._id || undefined,
-              mobile: data.from || data.start?.from || callerIdValue || undefined,
-              time: callStartTime,
-              transcript: "",
-              duration: 0,
-              leadStatus: 'not_connected',
-              streamSid: streamId || callId || undefined,
-              callSid: callId || undefined,
-              metadata: {
-                userTranscriptCount: 0,
-                aiResponseCount: 0,
-                languages: [],
-                callDirection: callDirection,
-                isActive: true,
-                lastUpdated: callStartTime,
-                sttProvider: 'deepgram',
-                ttsProvider: 'sarvam',
-                llmProvider: 'openai',
-                customParams: sessionCustomParams || {},
-                callerId: callerIdValue || undefined,
-                whatsappRequested: false,
-                whatsappMessageSent: false,
-              },
+            const creditRecord = await Credit.getOrCreateCreditRecord(agentConfig.clientId)
+            const currentBalance = Number(creditRecord?.currentBalance || 0)
+            if (currentBalance <= 0) {
+              console.log("🛑 [SANPBX-CREDIT-CHECK] Insufficient credits. Blocking call connection.")
+              ws.send(
+                JSON.stringify({
+                  event: "error",
+                  code: "insufficient_credits",
+                  message: "Call blocked: insufficient credits. Please recharge to place or receive calls.",
+                }),
+              )
+              try { ws.close() } catch (_) {}
+              return
             }
-            const callLog = new CallLog(initialCallLogData)
-            const saved = await callLog.save()
-            callLogId = saved._id
-            console.log(`[SANPBX] Initial CallLog created: ${callLogId}`)
-          } catch (err) {
-            console.log(`[SANPBX] Initial CallLog creation failed: ${err.message}`)
+          } catch (creditErr) {
+            console.log("⚠️ [SANPBX-CREDIT-CHECK] Credit check failed:", creditErr.message)
+            // Fail safe: if we cannot verify credits, prevent connection to avoid free calls
+            ws.send(
+              JSON.stringify({
+                event: "error",
+                code: "credit_check_failed",
+                message: "Unable to verify credits. Call cannot be connected at this time.",
+              }),
+            )
+            try { ws.close() } catch (_) {}
+            return
           }
+
+          // Create enhanced call logger with live transcript capability
+          callLogger = new EnhancedCallLogger(
+            agentConfig.clientId,
+            data.from || data.start?.from || callerIdValue || undefined,
+            callDirection
+          );
+          callLogger.customParams = sessionCustomParams;
+          callLogger.callerId = callerIdValue || undefined;
+          callLogger.streamSid = streamId;
+          callLogger.callSid = callId;
+          callLogger.accountSid = agentConfig.clientId;
+          callLogger.ws = ws; // Store WebSocket reference
+          callLogger.uniqueid = sessionUniqueId; // Store uniqueid for outbound calls
+
+          // Create initial call log entry immediately
+          try {
+            await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
+            console.log("✅ [SANPBX-CALL-SETUP] Initial call log created successfully")
+            console.log("✅ [SANPBX-CALL-SETUP] Call Log ID:", callLogger.callLogId)
+          } catch (error) {
+            console.log("❌ [SANPBX-CALL-SETUP] Failed to create initial call log:", error.message)
+            // Continue anyway - fallback will create log at end
+          }
+
+          console.log("🎯 [SANPBX-CALL-SETUP] ========== CALL SETUP ==========")
+          console.log("🎯 [SANPBX-CALL-SETUP] Current Language:", currentLanguage)
+          console.log("🎯 [SANPBX-CALL-SETUP] Mobile Number:", data.from || data.start?.from || callerIdValue)
+          console.log("🎯 [SANPBX-CALL-SETUP] Call Direction:", callDirection)
+          console.log("🎯 [SANPBX-CALL-SETUP] Client ID:", agentConfig.clientId)
+          console.log("🎯 [SANPBX-CALL-SETUP] StreamSID:", streamId)
+          console.log("🎯 [SANPBX-CALL-SETUP] CallSID:", callId)
 
           // Connect to Deepgram for speech recognition
-          connectToDeepgram(0)
+          await connectToDeepgram()
 
           // Send greeting after call is established
-          // Use agent-configured greeting (mirror aitota.js)
-          let greeting = ws.sessionAgentConfig?.firstMessage || "Hello! How can I help you today?"
-          if (callerIdValue && typeof callerIdValue === 'string') {
-            // optional personalization can be added if you later parse name
+          let greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
+          if (sessionUserName && sessionUserName.trim()) {
+            const base = agentConfig.firstMessage || "How can I help you today?"
+            greeting = `Hello ${sessionUserName.trim()}! ${base}`
           }
-          console.log("[SANPBX] Sending greeting:", greeting)
 
-          setTimeout(async () => {
-            try {
-              aiResponses.push({
-                type: 'ai',
-                text: greeting,
-                language: (ws.sessionAgentConfig?.language || 'en').toLowerCase(),
-                timestamp: new Date(),
-              })
-              await updateLiveCallLog()
-            } catch (_) {}
-            await synthesizeAndStreamAudio(greeting, ws.sessionAgentConfig?.language || "en")
-          }, 1500) // Wait for call to be fully established
+          console.log("🎯 [SANPBX-CALL-SETUP] Greeting Message:", greeting)
+          console.log("🎯 [SANPBX-CALL-SETUP] ======================================")
+
+          if (callLogger) {
+            callLogger.logAIResponse(greeting, currentLanguage)
+          }
+
+          console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
+          currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamId, callLogger)
+          await currentTTS.synthesizeAndStream(greeting)
+          console.log("✅ [SANPBX-TTS] Greeting TTS completed")
           break
+        }
 
         case "answer":
           console.log("[SANPBX] Call answered - ready for media streaming")
@@ -1004,12 +2283,24 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         case "media":
           // Expect base64 payload; forward decoded PCM to Deepgram
-          if (data.payload && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+          if (data.payload) {
             const audioBuffer = Buffer.from(data.payload, "base64")
-            deepgramWs.send(audioBuffer)
-            chunkCounter++
-            if (chunkCounter % 25 === 0) {
-              console.log(`[SANPBX-MEDIA-IN] chunks=${chunkCounter}, last_bytes=${audioBuffer.length}`)
+            
+            // Log media stats periodically (every 1000 packets to avoid spam)
+            if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
+            ws.mediaPacketCount++
+            
+            if (ws.mediaPacketCount % 1000 === 0) {
+              console.log("🎵 [SANPBX-MEDIA] Audio packets received:", ws.mediaPacketCount)
+            }
+
+            if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+              deepgramWs.send(audioBuffer)
+            } else {
+              deepgramAudioQueue.push(audioBuffer)
+              if (deepgramAudioQueue.length % 100 === 0) {
+                console.log("⏳ [SANPBX-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+              }
             }
           } else if (sttFailed) {
             console.log("[STT] Audio received but STT unavailable - consider implementing DTMF fallback")
@@ -1017,7 +2308,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           break
 
         case "stop":
-          console.log("[SANPBX] Call ended")
+          console.log("🛑 [SANPBX] Call ended")
 
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             deepgramWs.close()
@@ -1026,38 +2317,73 @@ const setupSanPbxWebSocketServer = (ws) => {
           if (silenceTimer) {
             clearTimeout(silenceTimer)
           }
-          // Update CallLog at end of call
+
+          // Intelligent WhatsApp send based on lead status and user requests
           try {
-            if (callLogId) {
-              const durationSeconds = Math.round((new Date() - callStartTime) / 1000)
-              const allEntries = [...userTranscripts, ...aiResponses].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-              const fullTranscript = allEntries.map((e) => {
-                const speaker = e.type === 'user' ? 'User' : 'AI'
-                const time = e.timestamp instanceof Date ? e.timestamp.toISOString() : new Date(e.timestamp).toISOString()
-                return `[${time}] ${speaker} (${e.language}): ${e.text}`
-              }).join("\n")
-              const languages = Array.from(new Set(allEntries.map((e) => e.language).filter(Boolean)))
-              await CallLog.findByIdAndUpdate(callLogId, {
-                transcript: fullTranscript,
-                duration: durationSeconds,
-                leadStatus: 'maybe',
-                streamSid: streamId || callId || undefined,
-                callSid: callId || undefined,
-                'metadata.userTranscriptCount': userTranscripts.length,
-                'metadata.aiResponseCount': aiResponses.length,
-                'metadata.languages': languages,
-                'metadata.customParams': sessionCustomParams || {},
-                'metadata.isActive': false,
-                'metadata.callEndTime': new Date(),
-                'metadata.lastUpdated': new Date(),
-                'metadata.callerId': callerIdValue || undefined,
-                'metadata.whatsappRequested': !!whatsappRequested,
-                'metadata.whatsappMessageSent': !!whatsappSent,
-              }).catch(() => {})
-              console.log(`[SANPBX] CallLog updated at end: ${callLogId}`)
+            if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+              const waLink = getAgentWhatsappLink(agentConfig)
+              const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+              const waApiUrl = agentConfig?.whatsapplink
+              console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+              if (waLink && waNumber && waApiUrl) {
+                sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+                  .then(async (r) => {
+                    console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+                    if (r?.ok) {
+                      await billWhatsAppCredit({
+                        clientId: agentConfig.clientId,
+                        mobile: callLogger?.mobile || null,
+                        link: waLink,
+                        callLogId: callLogger?.callLogId,
+                        streamSid,
+                      })
+                      callLogger.markWhatsAppSent()
+                    }
+                  })
+                  .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
+              } else {
+                console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
+              }
+            } else {
+              console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
+                hasCallLogger: !!callLogger,
+                whatsappEnabled: agentConfig?.whatsappEnabled,
+                shouldSend: callLogger?.shouldSendWhatsApp(),
+                leadStatus: callLogger?.currentLeadStatus,
+                alreadySent: callLogger?.whatsappSent,
+                requested: callLogger?.whatsappRequested
+              })
             }
-          } catch (e) {
-            console.log(`[SANPBX] CallLog end update failed: ${e.message}`)
+          } catch (waErr) {
+            console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
+          }
+          
+          if (callLogger) {
+            const stats = callLogger.getStats()
+            console.log("🛑 [SANPBX-STOP] Call Stats:", JSON.stringify(stats, null, 2))
+            // Bill credits at end of call (decimal precision)
+            const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
+            await billCallCredits({
+              clientId: callLogger.clientId,
+              durationSeconds,
+              callDirection,
+              mobile: callLogger.mobile,
+              callLogId: callLogger.callLogId,
+              streamSid,
+              uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
+            })
+            
+            try {
+              console.log("💾 [SANPBX-STOP] Saving final call log to database...")
+              const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
+              console.log("📊 [SANPBX-STOP] Final lead status:", finalLeadStatus)
+              const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
+              console.log("✅ [SANPBX-STOP] Final call log saved with ID:", savedLog._id)
+            } catch (error) {
+              console.log("❌ [SANPBX-STOP] Error saving final call log:", error.message)
+            } finally {
+              callLogger.cleanup()
+            }
           }
           break
 
@@ -1152,8 +2478,76 @@ const setupSanPbxWebSocketServer = (ws) => {
   })
 
   // Handle connection close
-  ws.on("close", () => {
-    console.log("[SANPBX] WebSocket connection closed")
+  ws.on("close", async () => {
+    console.log("🔌 [SANPBX] WebSocket connection closed")
+
+    // Safety: Intelligent WhatsApp send on close if conditions are met
+    try {
+      if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+        const waLink = getAgentWhatsappLink(agentConfig)
+        const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+        const waApiUrl = agentConfig?.whatsapplink
+        console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+        if (waLink && waNumber && waApiUrl) {
+          sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+            .then(async (r) => {
+              console.log("📨 [WHATSAPP] close-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+              if (r?.ok) {
+                await billWhatsAppCredit({
+                  clientId: agentConfig.clientId || callLogger?.clientId,
+                  mobile: callLogger?.mobile || null,
+                  link: waLink,
+                  callLogId: callLogger?.callLogId,
+                  streamSid,
+                })
+                callLogger.markWhatsAppSent()
+              }
+            })
+            .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
+        } else {
+          console.log("📨 [WHATSAPP] close-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
+        }
+      } else {
+        console.log("📨 [WHATSAPP] close-event skipped → conditions not met:", {
+          hasCallLogger: !!callLogger,
+          whatsappEnabled: agentConfig?.whatsappEnabled,
+          shouldSend: callLogger?.shouldSendWhatsApp(),
+          leadStatus: callLogger?.currentLeadStatus,
+          alreadySent: callLogger?.whatsappSent,
+          requested: callLogger?.whatsappRequested
+        })
+      }
+    } catch (waErr) {
+      console.log("❌ [WHATSAPP] close-event unexpected:", waErr.message)
+    }
+    
+    if (callLogger) {
+      const stats = callLogger.getStats()
+      console.log("🔌 [SANPBX-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
+      // Bill credits on close as safety (guarded by billedStreamSids)
+      const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
+      await billCallCredits({
+        clientId: callLogger.clientId,
+        durationSeconds,
+        callDirection,
+        mobile: callLogger.mobile,
+        callLogId: callLogger.callLogId,
+        streamSid,
+        uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
+      })
+      
+      try {
+        console.log("💾 [SANPBX-CLOSE] Saving call log due to connection close...")
+        const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
+        console.log("📊 [SANPBX-CLOSE] Final lead status:", finalLeadStatus)
+        const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
+        console.log("✅ [SANPBX-CLOSE] Call log saved with ID:", savedLog._id)
+      } catch (error) {
+        console.log("❌ [SANPBX-CLOSE] Error saving call log:", error.message)
+      } finally {
+        callLogger.cleanup()
+      }
+    }
 
     // Cleanup
     if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
@@ -1176,6 +2570,15 @@ const setupSanPbxWebSocketServer = (ws) => {
     lastProcessedTranscript = ""
     lastProcessedTime = 0
     activeResponseId = null
+    deepgramReady = false
+    deepgramAudioQueue = []
+    currentTTS = null
+    currentLanguage = undefined
+    processingRequestId = 0
+    callLogger = null
+    callDirection = "inbound"
+    agentConfig = null
+    sttTimer = null
   })
 
   // Handle errors
@@ -1184,6 +2587,103 @@ const setupSanPbxWebSocketServer = (ws) => {
   })
 }
 
-module.exports = {
-  setupSanPbxWebSocketServer,
+/**
+ * Terminate a call by streamSid
+ * @param {string} streamSid - The stream SID to terminate
+ * @param {string} reason - Reason for termination
+ * @returns {Object} Result of termination attempt
+ */
+const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination') => {
+  try {
+    console.log(`🛑 [MANUAL-TERMINATION] Attempting to terminate call with streamSid: ${streamSid}`)
+    
+    // Check if we have an active call logger for this streamSid
+    const callLogger = activeCallLoggers.get(streamSid)
+    
+    if (callLogger) {
+      console.log(`🛑 [MANUAL-TERMINATION] Found active call logger, terminating gracefully...`)
+      console.log(`🛑 [MANUAL-TERMINATION] Call Logger Info:`, callLogger.getCallInfo())
+      
+      // Check WebSocket state
+      if (callLogger.ws) {
+        console.log(`🛑 [MANUAL-TERMINATION] WebSocket State: ${callLogger.ws.readyState} (0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED)`)
+      }
+      
+      await callLogger.saveToDatabase(callLogger.currentLeadStatus || "maybe")
+      return {
+        success: true,
+        message: 'Call terminated successfully',
+        streamSid,
+        reason,
+        method: 'graceful_termination'
+      }
+    } else {
+      console.log(`🛑 [MANUAL-TERMINATION] No active call logger found, updating database directly...`)
+      
+      // Fallback: Update the call log directly in the database
+      try {
+        const CallLog = require("../models/CallLog")
+        const result = await CallLog.updateMany(
+          { streamSid, 'metadata.isActive': true },
+          { 
+            'metadata.isActive': false,
+            'metadata.terminationReason': reason,
+            'metadata.terminatedAt': new Date(),
+            'metadata.terminationMethod': 'api_manual',
+            leadStatus: 'disconnected_api'
+          }
+        )
+        
+        if (result.modifiedCount > 0) {
+          return {
+            success: true,
+            message: 'Call marked as terminated in database',
+            streamSid,
+            reason,
+            method: 'database_update',
+            modifiedCount: result.modifiedCount
+          }
+        } else {
+          return {
+            success: false,
+            message: 'No active calls found with this streamSid',
+            streamSid,
+            reason,
+            method: 'database_update'
+          }
+        }
+      } catch (dbError) {
+        console.error(`❌ [MANUAL-TERMINATION] Database update error:`, dbError.message)
+        return {
+          success: false,
+          message: 'Failed to update database',
+          streamSid,
+          reason,
+          method: 'database_update',
+          error: dbError.message
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`❌ [MANUAL-TERMINATION] Error terminating call:`, error.message)
+    return {
+      success: false,
+      message: 'Failed to terminate call',
+      streamSid,
+      reason,
+      method: 'error',
+      error: error.message
+    }
+  }
+}
+
+module.exports = { 
+  setupSanPbxWebSocketServer, 
+  terminateCallByStreamSid,
+  // Export termination methods for external use
+  terminationMethods: {
+    graceful: (callLogger, message, language) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe"),
+    fast: (callLogger, reason) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe"),
+    ultraFast: (callLogger, message, language, reason) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe")
+  }
 }

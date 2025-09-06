@@ -97,6 +97,11 @@ const agentSchema = new mongoose.Schema({
   accessToken: { type: String },
   accessKey: { type: String },
 
+  // UI customization
+  uiImage: { type: String }, // base64 image for agent avatar/logo
+  backgroundImage: { type: String }, // base64 image for background
+  backgroundColor: { type: String }, // hex color string
+
   // Audio storage - Store as base64 string instead of Buffer
   audioFile: { type: String }, // File path (legacy support)
   audioBytes: {
