@@ -916,7 +916,9 @@ class EnhancedCallLogger {
           'metadata.userTranscriptCount': this.transcripts.length,
           'metadata.aiResponseCount': this.responses.length,
           'metadata.languages': [...new Set([...this.transcripts, ...this.responses].map(e => e.language))],
-          'metadata.lastUpdated': new Date()
+          'metadata.lastUpdated': new Date(),
+          'metadata.whatsappRequested': !!this.whatsappRequested,
+          'metadata.whatsappMessageSent': !!this.whatsappSent
         }
 
         await CallLog.findByIdAndUpdate(this.callLogId, updateData, { 
@@ -2138,6 +2140,13 @@ const setupUnifiedVoiceServer = (wss) => {
                           streamSid,
                         })
                         callLogger.markWhatsAppSent()
+                        if (callLogger?.callLogId) {
+                          CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                            'metadata.whatsappMessageSent': true,
+                            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                            'metadata.lastUpdated': new Date(),
+                          }).catch(() => {})
+                        }
                       }
                     })
                     .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
@@ -2232,6 +2241,13 @@ const setupUnifiedVoiceServer = (wss) => {
                     streamSid,
                   })
                   callLogger.markWhatsAppSent()
+                  if (callLogger?.callLogId) {
+                    CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                      'metadata.whatsappMessageSent': true,
+                      'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                      'metadata.lastUpdated': new Date(),
+                    }).catch(() => {})
+                  }
                 }
               })
               .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))

@@ -1223,6 +1223,8 @@ const setupSanPbxWebSocketServer = (ws) => {
         'metadata.aiResponseCount': aiResponses.length,
         'metadata.languages': languages,
         'metadata.lastUpdated': new Date(),
+        'metadata.whatsappRequested': !!whatsappRequested,
+        'metadata.whatsappMessageSent': !!whatsappSent,
       }).catch(() => {})
     } catch (_) {}
   }
@@ -2404,9 +2406,18 @@ const setupSanPbxWebSocketServer = (ws) => {
                         mobile: callLogger?.mobile || null,
                         link: waLink,
                         callLogId: callLogger?.callLogId,
-                        streamSid,
+                        streamSid: streamId,
                       })
                       callLogger.markWhatsAppSent()
+                      try {
+                        if (callLogger?.callLogId) {
+                          await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                            'metadata.whatsappMessageSent': true,
+                            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                            'metadata.lastUpdated': new Date(),
+                          })
+                        }
+                      } catch (_) {}
                     }
                   })
                   .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
@@ -2438,7 +2449,7 @@ const setupSanPbxWebSocketServer = (ws) => {
               callDirection,
               mobile: callLogger.mobile,
               callLogId: callLogger.callLogId,
-              streamSid,
+              streamSid: streamId,
               uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
             })
             
@@ -2567,9 +2578,18 @@ const setupSanPbxWebSocketServer = (ws) => {
                   mobile: callLogger?.mobile || null,
                   link: waLink,
                   callLogId: callLogger?.callLogId,
-                  streamSid,
+                  streamSid: streamId,
                 })
                 callLogger.markWhatsAppSent()
+                try {
+                  if (callLogger?.callLogId) {
+                    await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                      'metadata.whatsappMessageSent': true,
+                      'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                      'metadata.lastUpdated': new Date(),
+                    })
+                  }
+                } catch (_) {}
               }
             })
             .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
@@ -2601,7 +2621,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         callDirection,
         mobile: callLogger.mobile,
         callLogId: callLogger.callLogId,
-        streamSid,
+        streamSid: streamId,
         uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
       })
       
