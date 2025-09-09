@@ -218,11 +218,10 @@ const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
 }
 
 const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
+  const lang = (detectedLang || defaultLang || "hi").toLowerCase()
+  // Use only languages confirmed supported in realtime to avoid 400s
   if (lang === "hi") return "hi"
-  if (lang === "en") return "en-IN"
-  if (lang === "mr") return "mr"
-  return lang
+  return "en"
 }
 
 // Valid Sarvam voice options
@@ -1988,10 +1987,12 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
+        // keep formatting minimal to avoid incompatibilities
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "10")
+        // conservative endpointing to avoid 400s
+        deepgramUrl.searchParams.append("endpointing", "25")
         deepgramUrl.searchParams.append("vad_events", "true")
-        deepgramUrl.searchParams.append("utterance_end_ms", "500")
+        // remove utterance_end_ms to avoid server-side validation issues
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
