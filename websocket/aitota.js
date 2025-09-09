@@ -1224,6 +1224,7 @@ const processWithOpenAIStreaming = async (
       { role: "user", content: userMessage },
     ]
 
+    const llmStart = Date.now()
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -1243,6 +1244,7 @@ const processWithOpenAIStreaming = async (
       return null
     }
 
+    const firstTokenTimer = createTimer("LLM_FIRST_TOKEN")
     const reader = resp.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ""
@@ -1261,6 +1263,7 @@ const processWithOpenAIStreaming = async (
       }
     }
 
+    let sawFirstDelta = false
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -1279,6 +1282,7 @@ const processWithOpenAIStreaming = async (
           const obj = JSON.parse(dataStr)
           const delta = obj?.choices?.[0]?.delta?.content || ""
           if (delta) {
+            if (!sawFirstDelta) { sawFirstDelta = true; console.log(`⚡ [LLM-FIRST-TOKEN] ${firstTokenTimer.end()}ms`) }
             buffer += delta
             // Flush on punctuation for immediate TTS
             if (/[\.!?]\s$/.test(buffer)) {
@@ -1297,7 +1301,7 @@ const processWithOpenAIStreaming = async (
       if (ws?.__enqueueSpeak) await ws.__enqueueSpeak(text, detectedLanguage)
     }
 
-    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Completed`)
+    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Completed (total=${Date.now()-llmStart}ms)`) 
     return fullText || null
   } catch (error) {
     console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${error.message}`)
@@ -1572,7 +1576,7 @@ class SimplifiedSarvamTTSProcessor {
           const msg = JSON.parse(event.data)
           if (msg.type === 'config_ack') {
             this.configAcked = true
-            console.log('🎙️ [SARVAM-WS] Config acknowledged')
+            console.log(`🎙️ [SARVAM-WS] Config acknowledged in ${timer.end()}ms`)
           }
           if (msg.type === 'audio' && msg.data?.audio) {
             const audioBuffer = Buffer.from(msg.data.audio, 'base64')
@@ -1636,7 +1640,7 @@ class SimplifiedSarvamTTSProcessor {
           }
         } catch (_) {}
       }
-    }, 1000)
+    }, 700)
 
     if (this.callLogger && text) {
       this.callLogger.logAIResponse(text, this.language)
@@ -1814,7 +1818,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "200")
+        deepgramUrl.searchParams.append("endpointing", "100")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1876,7 +1880,7 @@ const setupUnifiedVoiceServer = (wss) => {
             const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
             const longPhrase = text.length >= 40
             const nowTs = Date.now()
-            if ((endsWithPunct || longPhrase) && nowTs - lastInterimProcessAt > 600) {
+            if ((endsWithPunct || longPhrase) && nowTs - lastInterimProcessAt > 300) {
               lastInterimProcessAt = nowTs
               try { await processUserUtterance(text) } catch (_) {}
             }
@@ -2237,7 +2241,8 @@ const setupUnifiedVoiceServer = (wss) => {
             if (!ws.__ttsQueue) ws.__ttsQueue = []
             ws.__ttsRunning = ws.__ttsRunning || false
             const enqueueSpeak = async (text, language) => {
-              ws.__ttsQueue.push({ text, language })
+              if (!text || !text.trim()) return
+              ws.__ttsQueue.push({ text: text.trim(), language })
               if (ws.__ttsRunning) return
               ws.__ttsRunning = true
               while (ws.__ttsQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
