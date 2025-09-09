@@ -1353,7 +1353,7 @@ const processWithOpenAIStreaming = async (
             buffer += delta
             charsSinceLastFlush += delta.length
             // Flush on punctuation for immediate TTS
-            if (/[\.!?]\s$/.test(buffer) || charsSinceLastFlush >= 40) {
+            if (/[\.!?]\s$/.test(buffer) || charsSinceLastFlush >= 25) {
               await flushSentences()
               charsSinceLastFlush = 0
             }
@@ -1750,7 +1750,7 @@ class SimplifiedSarvamTTSProcessor {
 
     // Slightly longer wait for config ack to avoid reconnect penalty
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 200) {
+    while (!this.configAcked && Date.now() - configWaitStart < 300) {
       await new Promise(r => setTimeout(r, 10))
     }
     const configWaitTime = Date.now() - configWaitStart
@@ -1761,14 +1761,18 @@ class SimplifiedSarvamTTSProcessor {
       this.firstAudioPending = true
       this.firstAudioSentAt = Date.now()
       logWithTimestamp("📤 [SARVAM-SEND]", `Sending text to Sarvam: "${cleanText}"`, this.firstAudioSentAt)
-      this.sarvamWs.send(JSON.stringify(textMessage)) 
+      if (cleanText && cleanText.trim().length > 0) {
+        this.sarvamWs.send(JSON.stringify(textMessage)) 
+      }
       sarvamTracker.checkpoint('SARVAM_TEXT_SENT', { textLength: cleanText.length })
     } catch (error) {
       sarvamTracker.checkpoint('SARVAM_SEND_ERROR', { error: error.message })
     }
     
     try { 
-      this.sarvamWs.send(JSON.stringify({ type: 'flush' })) 
+      if (cleanText && cleanText.trim().length > 0) {
+        this.sarvamWs.send(JSON.stringify({ type: 'flush' })) 
+      }
       sarvamTracker.checkpoint('SARVAM_FLUSH_SENT')
     } catch (error) {
       sarvamTracker.checkpoint('SARVAM_FLUSH_ERROR', { error: error.message })
@@ -1793,11 +1797,17 @@ class SimplifiedSarvamTTSProcessor {
               await new Promise(r => setTimeout(r, 10))
             }
             try { 
-              this.firstAudioPending = true
-              this.firstAudioSentAt = Date.now()
-              this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text: cleanText } })) 
+              if (cleanText && cleanText.trim().length > 0) {
+                this.firstAudioPending = true
+                this.firstAudioSentAt = Date.now()
+                this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text: cleanText } })) 
+              }
             } catch (_) {}
-            try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
+            try { 
+              if (cleanText && cleanText.trim().length > 0) {
+                this.sarvamWs.send(JSON.stringify({ type: 'flush' })) 
+              }
+            } catch (_) {}
             sarvamTracker.checkpoint('SARVAM_RECONNECT_RESEND', { textLength: cleanText.length })
             console.log('🔁 [SARVAM-WS] Resent text after reconnect')
           }
