@@ -1097,7 +1097,7 @@ class EnhancedCallLogger {
   }
 }
 
-// Simplified OpenAI processing
+// Simplified OpenAI processing (non-streaming; kept for fallback)
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
@@ -1186,6 +1186,121 @@ const processWithOpenAI = async (
     return fullResponse
   } catch (error) {
     console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+    return null
+  }
+}
+
+// OpenAI streaming with sentence-by-sentence enqueue to TTS
+const processWithOpenAIStreaming = async (
+  userMessage,
+  conversationHistory,
+  detectedLanguage,
+  callLogger,
+  agentConfig,
+  ws,
+  streamSid,
+  userName = null,
+) => {
+  const timer = createTimer("LLM_STREAMING")
+  try {
+    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    const firstMessage = (agentConfig.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If specifics are missing, say you don't have that info.",
+      "Keep replies concise.",
+    ].join(" ")
+
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}.` }
+      : null
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
+      ...conversationHistory.slice(-6),
+      { role: "user", content: userMessage },
+    ]
+
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        temperature: 0.3,
+        stream: true,
+      }),
+    })
+
+    if (!resp.ok || !resp.body) {
+      console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${resp.status}`)
+      return null
+    }
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+    let fullText = ""
+
+    const flushSentences = async () => {
+      const parts = buffer.split(/(?<=[\.!?])\s+/)
+      // Keep last partial in buffer
+      buffer = parts.pop() || ""
+      for (const part of parts) {
+        const text = part.trim()
+        if (!text) continue
+        fullText += (fullText ? " " : "") + text
+        if (callLogger) callLogger.logAIResponse(text, detectedLanguage)
+        if (ws?.__enqueueSpeak) await ws.__enqueueSpeak(text, detectedLanguage)
+      }
+    }
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = decoder.decode(value, { stream: true })
+      // SSE-style: lines starting with data:
+      const lines = chunk.split(/\n/)
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed.startsWith("data:")) continue
+        const dataStr = trimmed.slice(5).trim()
+        if (dataStr === "[DONE]") {
+          await flushSentences()
+          break
+        }
+        try {
+          const obj = JSON.parse(dataStr)
+          const delta = obj?.choices?.[0]?.delta?.content || ""
+          if (delta) {
+            buffer += delta
+            // Flush on punctuation for immediate TTS
+            if (/[\.!?]\s$/.test(buffer)) {
+              await flushSentences()
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Flush any remaining content
+    if (buffer.trim()) {
+      const text = buffer.trim()
+      fullText += (fullText ? " " : "") + text
+      if (callLogger) callLogger.logAIResponse(text, detectedLanguage)
+      if (ws?.__enqueueSpeak) await ws.__enqueueSpeak(text, detectedLanguage)
+    }
+
+    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Completed`)
+    return fullText || null
+  } catch (error) {
+    console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${error.message}`)
     return null
   }
 }
@@ -1753,11 +1868,7 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          if (currentTTS && isProcessing) {
-            currentTTS.interrupt()
-            isProcessing = false
-            processingRequestId++
-          }
+          // Removed mid-utterance interruption to avoid audio disturbances
 
           // Opportunistic early processing on strong interim hypotheses
           if (!is_final) {
@@ -1778,8 +1889,8 @@ const setupUnifiedVoiceServer = (wss) => {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
             if (callLogger && transcript.trim()) {
-              const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
-              callLogger.logUserTranscript(transcript.trim(), detectedLang)
+              const fixedLang = currentLanguage || "en"
+              callLogger.logUserTranscript(transcript.trim(), fixedLang)
             }
 
             await processUserUtterance(userUtteranceBuffer)
@@ -1794,8 +1905,8 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (userUtteranceBuffer.trim()) {
           if (callLogger && userUtteranceBuffer.trim()) {
-            const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
+            const fixedLang = currentLanguage || "en"
+            callLogger.logUserTranscript(userUtteranceBuffer.trim(), fixedLang)
           }
 
           await processUserUtterance(userUtteranceBuffer)
@@ -1811,87 +1922,30 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
       console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
 
-      if (currentTTS) {
-        console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
-        currentTTS.interrupt()
-      }
+      // Do not interrupt TTS; enforce ordered playback via queue
 
       isProcessing = true
       lastProcessedText = text
       const currentRequestId = ++processingRequestId
 
       try {
-        const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
-        console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
-
-        if (detectedLanguage !== currentLanguage) {
-          console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
-          currentLanguage = detectedLanguage
-        }
+        // Language detection disabled; stick to agent-configured language
+        const detectedLanguage = currentLanguage || "en"
+        console.log("🌐 [USER-UTTERANCE] Language (fixed):", detectedLanguage)
 
         // Run all AI detections in parallel for efficiency
         console.log("🔍 [USER-UTTERANCE] Running AI detections...")
         
-        const [
-          disconnectionIntent, 
-          leadStatus, 
-          whatsappRequest, 
-          aiResponse
-        ] = await Promise.all([
-          detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
-          detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
-          detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
-          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig)
-        ])
+        // Disable high-latency detections; only stream OpenAI response
+        // const disconnectionIntent = await detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
+        // const leadStatus = await detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage)
+        // const whatsappRequest = await detectWhatsAppRequest(text, conversationHistory, detectedLanguage)
+        const aiResponse = await processWithOpenAIStreaming(text, conversationHistory, detectedLanguage, callLogger, agentConfig, ws, streamSid)
 
-        // Update call logger with detected information
-        if (callLogger) {
-          callLogger.updateLeadStatus(leadStatus)
-          if (whatsappRequest === "WHATSAPP_REQUEST") {
-            callLogger.markWhatsAppRequested()
-          }
-        }
-        
-        if (disconnectionIntent === "DISCONNECT") {
-          console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
-          
-          // Wait 2 seconds to ensure last message is processed, then terminate
-          setTimeout(async () => {
-            if (callLogger) {
-              try {
-                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
-                console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
-              } catch (err) {
-                console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
-              }
-            }
-          }, 2000)
-          
-          return
-        }
+        // Lead/disconnect/WhatsApp intent detection disabled to reduce latency
 
-        if (processingRequestId === currentRequestId && aiResponse) {
-          console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
-          
-          // Reuse persistent Sarvam TTS if available; re-init if language changed
-          if (!ws.__sarvamTts) {
-            ws.__sarvamTts = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
-          } else if (ws.__sarvamTts.language !== detectedLanguage) {
-            ws.__sarvamTts.reset(detectedLanguage)
-          }
-          currentTTS = ws.__sarvamTts
-          await ws.__sarvamTts.synthesizeAndStream(aiResponse)
-
-          conversationHistory.push(
-            { role: "user", content: text },
-            { role: "assistant", content: aiResponse }
-          )
-
-          if (conversationHistory.length > 10) {
-            conversationHistory = conversationHistory.slice(-10)
-          }
-          
+        if (processingRequestId === currentRequestId) {
+          console.log("🤖 [USER-UTTERANCE] OpenAI streaming initiated; responses will be enqueued to TTS")
           console.log("✅ [USER-UTTERANCE] Processing completed")
         } else {
           console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
@@ -2177,11 +2231,28 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            // Initialize persistent Sarvam WS-based TTS processor for the entire call
+            // Initialize persistent Sarvam WS-based TTS processor and FIFO queue
             const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             ws.__sarvamTts = tts
-            await tts.synthesizeAndStream(greeting)
-            console.log("✅ [SIP-TTS] Greeting TTS completed")
+            if (!ws.__ttsQueue) ws.__ttsQueue = []
+            ws.__ttsRunning = ws.__ttsRunning || false
+            const enqueueSpeak = async (text, language) => {
+              ws.__ttsQueue.push({ text, language })
+              if (ws.__ttsRunning) return
+              ws.__ttsRunning = true
+              while (ws.__ttsQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
+                const next = ws.__ttsQueue.shift()
+                if (!ws.__sarvamTts) ws.__sarvamTts = new SimplifiedSarvamTTSProcessor(language || currentLanguage || "en", ws, streamSid, callLogger)
+                if (ws.__sarvamTts.language !== (language || currentLanguage || "en")) {
+                  ws.__sarvamTts.reset(language || currentLanguage || "en")
+                }
+                try { await ws.__sarvamTts.synthesizeAndStream(next.text) } catch (_) { /* continue */ }
+              }
+              ws.__ttsRunning = false
+            }
+            ws.__enqueueSpeak = enqueueSpeak
+            await enqueueSpeak(greeting, currentLanguage)
+            console.log("✅ [SIP-TTS] Greeting TTS enqueued")
             break
           }
 
