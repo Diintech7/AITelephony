@@ -1512,7 +1512,6 @@ class SimplifiedSarvamTTSProcessor {
     this.firstAudioPending = false
     this.firstAudioSentAt = 0
     this.hasPendingText = false
-    this.primerSent = false
     // Prewarm connection to reduce first-audio latency
     setImmediate(() => {
       if (!this.isInterrupted) {
@@ -1645,15 +1644,6 @@ class SimplifiedSarvamTTSProcessor {
     while (!this.configAcked && Date.now() - startWait < 300) {
       await new Promise(r => setTimeout(r, 20))
     }
-    // Send a language-valid primer once to nudge first audio (no reconnects)
-    if (!this.primerSent) {
-      try {
-        const primer = (this.sarvamLanguage || '').toLowerCase().startsWith('hi') ? 'हाँ' : 'ok'
-        this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text: primer } }))
-        this.sarvamWs.send(JSON.stringify({ type: 'flush' }))
-        this.primerSent = true
-      } catch (_) {}
-    }
     const textMessage = { type: 'text', data: { text } }
     try { 
       this.firstAudioPending = true
@@ -1662,9 +1652,6 @@ class SimplifiedSarvamTTSProcessor {
       this.sarvamWs.send(JSON.stringify(textMessage)) 
     } catch (_) {}
     try { if (this.hasPendingText) { this.sarvamWs.send(JSON.stringify({ type: 'flush' })); this.hasPendingText = false } } catch (_) {}
-    // Optional primer to encourage fast first audio without reconnect
-    try { this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text: '.' } })) } catch (_) {}
-    try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
     console.log(`📝 [SARVAM-WS] Sent text (${text.length} chars) and flush`)
 
     // Warn if no audio arrives shortly
@@ -1858,7 +1845,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "70")
+        deepgramUrl.searchParams.append("endpointing", "100")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1931,9 +1918,9 @@ const setupUnifiedVoiceServer = (wss) => {
           if (!is_final) {
             const text = transcript.trim()
             const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
-            const longPhrase = text.length >= 8
+            const longPhrase = text.length >= 10
             const nowTs = Date.now()
-            if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 350) && nowTs - lastInterimProcessAt > 200) {
+            if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 500) && nowTs - lastInterimProcessAt > 250) {
               lastInterimProcessAt = nowTs
               try { await processUserUtterance(text) } catch (_) {}
             }
