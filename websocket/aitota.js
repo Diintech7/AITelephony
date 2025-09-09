@@ -1652,6 +1652,9 @@ class SimplifiedSarvamTTSProcessor {
       this.sarvamWs.send(JSON.stringify(textMessage)) 
     } catch (_) {}
     try { if (this.hasPendingText) { this.sarvamWs.send(JSON.stringify({ type: 'flush' })); this.hasPendingText = false } } catch (_) {}
+    // Optional primer to encourage fast first audio without reconnect
+    try { this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text: '.' } })) } catch (_) {}
+    try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
     console.log(`📝 [SARVAM-WS] Sent text (${text.length} chars) and flush`)
 
     // Warn if no audio arrives shortly
@@ -1845,7 +1848,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "100")
+        deepgramUrl.searchParams.append("endpointing", "70")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1918,9 +1921,9 @@ const setupUnifiedVoiceServer = (wss) => {
           if (!is_final) {
             const text = transcript.trim()
             const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
-            const longPhrase = text.length >= 10
+            const longPhrase = text.length >= 8
             const nowTs = Date.now()
-            if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 500) && nowTs - lastInterimProcessAt > 250) {
+            if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 350) && nowTs - lastInterimProcessAt > 200) {
               lastInterimProcessAt = nowTs
               try { await processUserUtterance(text) } catch (_) {}
             }
