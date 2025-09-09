@@ -2019,6 +2019,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("encoding", "linear16")
         deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
+        deepgramUrl.searchParams.append("interim_results", "true")
         // Optimized endpointing for best accuracy and low latency
         deepgramUrl.searchParams.append("endpointing", "300")
         deepgramUrl.searchParams.append("vad_events", "true")
