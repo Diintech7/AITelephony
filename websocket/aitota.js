@@ -1842,6 +1842,9 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramAudioQueue = []
     let sttTimer = null
     let lastInterimProcessAt = 0
+    let speechStartTime = null
+    let firstInterimTime = null
+    let firstFinalTime = null
 
     const connectToDeepgram = async () => {
       try {
@@ -1856,7 +1859,9 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "100")
+        deepgramUrl.searchParams.append("endpointing", "50") // Reduced from 100ms to 50ms for faster response
+        deepgramUrl.searchParams.append("vad_events", "true") // Enable voice activity detection events
+        deepgramUrl.searchParams.append("utterance_end_ms", "1000") // Max 1 second for utterance end
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1902,6 +1907,20 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const handleDeepgramResponse = async (data) => {
+      // Handle VAD (Voice Activity Detection) events for faster processing
+      if (data.type === "SpeechStarted") {
+        speechStartTime = Date.now()
+        console.log("🎤 [VAD] Speech started - user is speaking")
+      } else if (data.type === "SpeechEnded") {
+        console.log("🎤 [VAD] Speech ended - processing any pending audio")
+        // Force process any pending utterance buffer
+        if (userUtteranceBuffer.trim()) {
+          console.log(`⚡ [VAD-TRIGGERED] Processing pending utterance: "${userUtteranceBuffer.trim()}"`)
+          try { await processUserUtterance(userUtteranceBuffer.trim()) } catch (_) {}
+          userUtteranceBuffer = ""
+        }
+      }
+      
       if (data.type === "Results") {
         if (!sttTimer) sttTimer = createTimer("STT_TRANSCRIPTION")
 
@@ -1911,20 +1930,39 @@ const setupUnifiedVoiceServer = (wss) => {
         if (transcript?.trim()) {
           // Removed mid-utterance interruption to avoid audio disturbances
 
-          // Opportunistic early processing on strong interim hypotheses
+          // Aggressive early processing for faster response
           if (!is_final) {
             const text = transcript.trim()
             const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
             const longPhrase = text.length >= 10
+            const shortCompletePhrase = text.length >= 3 && (endsWithPunct || /[।।]$/.test(text)) // Hindi punctuation
             const nowTs = Date.now()
-            if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 500) && nowTs - lastInterimProcessAt > 250) {
+            
+            // More aggressive processing for short utterances and common greetings
+            const isGreeting = /^(नमस्ते|hello|hi|hey|namaste|namaskar)/i.test(text)
+            const shouldProcessEarly = (
+              endsWithPunct || 
+              longPhrase || 
+              shortCompletePhrase ||
+              isGreeting ||
+              nowTs - lastInterimProcessAt > 300 // Reduced from 500ms to 300ms
+            ) && nowTs - lastInterimProcessAt > 150 // Reduced from 250ms to 150ms
+            
+            if (shouldProcessEarly) {
               lastInterimProcessAt = nowTs
+              if (!firstInterimTime) firstInterimTime = nowTs
+              const timeFromSpeechStart = speechStartTime ? nowTs - speechStartTime : 'unknown'
+              console.log(`⚡ [EARLY-PROCESSING] Processing interim: "${text}" (${text.length} chars) - ${timeFromSpeechStart}ms from speech start`)
               try { await processUserUtterance(text) } catch (_) {}
             }
           }
 
           if (is_final) {
+            if (!firstFinalTime) firstFinalTime = Date.now()
+            const timeFromSpeechStart = speechStartTime ? Date.now() - speechStartTime : 'unknown'
+            const timeFromFirstInterim = firstInterimTime ? Date.now() - firstInterimTime : 'unknown'
             console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+            console.log(`📊 [PERFORMANCE] Final result: ${timeFromSpeechStart}ms from speech start, ${timeFromFirstInterim}ms from first interim`)
             sttTimer = null
 
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
@@ -2538,6 +2576,10 @@ const setupUnifiedVoiceServer = (wss) => {
       callDirection = "inbound"
       agentConfig = null
       sttTimer = null
+      speechStartTime = null
+      firstInterimTime = null
+      firstFinalTime = null
+      lastInterimProcessAt = 0
       
       console.log("🔌 [SIP-CLOSE] ======================================")
     })
