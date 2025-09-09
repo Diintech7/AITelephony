@@ -1567,8 +1567,8 @@ class SimplifiedSarvamTTSProcessor {
             output_audio_codec: 'linear16',
             output_audio_bitrate: '128k',
             speech_sample_rate: 8000,
-            min_buffer_size: 20,
-            max_chunk_length: 90,
+            min_buffer_size: 50,
+            max_chunk_length: 150,
             enable_preprocessing: false,
           }
         }
