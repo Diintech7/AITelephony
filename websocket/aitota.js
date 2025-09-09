@@ -1631,6 +1631,7 @@ class SimplifiedSarvamTTSProcessor {
 
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
+    if (!text || !text.trim()) { console.log('⚠️ [SARVAM-WS] Skipping empty text'); return }
     const requestId = ++this.currentSarvamRequestId
     this.audioQueue = []
     this.isStreamingToSIP = false
@@ -1914,9 +1915,9 @@ const setupUnifiedVoiceServer = (wss) => {
           if (!is_final) {
             const text = transcript.trim()
             const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
-            const longPhrase = text.length >= 40
+            const longPhrase = text.length >= 10
             const nowTs = Date.now()
-            if ((endsWithPunct || longPhrase) && nowTs - lastInterimProcessAt > 300) {
+            if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 500) && nowTs - lastInterimProcessAt > 250) {
               lastInterimProcessAt = nowTs
               try { await processUserUtterance(text) } catch (_) {}
             }
