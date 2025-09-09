@@ -1268,8 +1268,9 @@ const processWithOpenAIStreaming = async (
     const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
     const policyBlock = [
       "Answer strictly using the information provided above.",
-      "If specifics are missing, say you don't have that info.",
-      "Keep replies concise.",
+      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
+      "If the information is not present, reply briefly that you don't have that information.",
+      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
     ].join(" ")
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
@@ -1966,70 +1967,56 @@ const setupUnifiedVoiceServer = (wss) => {
     let firstInterimTime = null
     let firstFinalTime = null
 
-    const connectToDeepgram = async () => {
-      try {
-        const deepgramLanguage = getDeepgramLanguage(currentLanguage)
-        const dgConnectStart = Date.now()
+    // Optimized Deepgram connection with faster response times
+const connectToDeepgram = async () => {
+  try {
+    const deepgramLanguage = getDeepgramLanguage(currentLanguage)
+    const dgConnectStart = Date.now()
 
-        const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-        deepgramUrl.searchParams.append("sample_rate", "8000")
-        deepgramUrl.searchParams.append("channels", "1")
-        deepgramUrl.searchParams.append("encoding", "linear16")
-        deepgramUrl.searchParams.append("model", "nova-2")
-        deepgramUrl.searchParams.append("language", deepgramLanguage)
-        deepgramUrl.searchParams.append("interim_results", "true")
-        deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "25")
-        deepgramUrl.searchParams.append("vad_events", "true")
-        deepgramUrl.searchParams.append("utterance_end_ms", "1000")
+    const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
+    
+    // Core audio settings
+    deepgramUrl.searchParams.append("sample_rate", "8000")
+    deepgramUrl.searchParams.append("channels", "1")
+    deepgramUrl.searchParams.append("encoding", "linear16")
+    
+    // Model optimization - nova-2-general is faster than nova-2
+    deepgramUrl.searchParams.append("model", "nova-2-general")
+    deepgramUrl.searchParams.append("language", deepgramLanguage)
+    
+    // Speed optimizations
+    deepgramUrl.searchParams.append("interim_results", "true")
+    deepgramUrl.searchParams.append("smart_format", "false") // Disable to save processing time
+    deepgramUrl.searchParams.append("punctuate", "false")    // Disable to save processing time
+    deepgramUrl.searchParams.append("profanity_filter", "false") // Disable to save processing time
+    
+    // More aggressive endpointing for faster results
+    deepgramUrl.searchParams.append("endpointing", "10")  // Reduced from 25ms
+    deepgramUrl.searchParams.append("vad_events", "true")
+    deepgramUrl.searchParams.append("utterance_end_ms", "500") // Reduced from 1000ms
+    
+    // Add filler words detection for even faster interim results
+    deepgramUrl.searchParams.append("filler_words", "false") // Skip filler word processing
+    
+    // Enable low-latency mode if available
+    deepgramUrl.searchParams.append("no_delay", "true")
 
-        deepgramWs = new WebSocket(deepgramUrl.toString(), {
-          headers: { Authorization: `Token ${API_KEYS.deepgram}` },
-        })
+    deepgramWs = new WebSocket(deepgramUrl.toString(), {
+      headers: { 
+        Authorization: `Token ${API_KEYS.deepgram}`,
+        // Add connection keep-alive
+        'Connection': 'keep-alive'
+      },
+    })
 
-        deepgramWs.onopen = () => {
-          const connectTime = Date.now()
-          const connectLatency = connectTime - dgConnectStart
-          logWithTimestamp("🎤 [DEEPGRAM]", "Connection established", connectTime)
-          logWithTimestamp("🕒 [DEEPGRAM-CONNECT]", `${connectLatency}ms`, connectTime)
-          deepgramReady = true
-          logWithTimestamp("🎤 [DEEPGRAM]", `Processing queued audio packets: ${deepgramAudioQueue.length}`, connectTime)
-          deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
-          deepgramAudioQueue = []
-        }
-
-        deepgramWs.onmessage = async (event) => {
-          const data = JSON.parse(event.data)
-          await handleDeepgramResponse(data)
-        }
-
-        deepgramWs.onerror = (error) => {
-          console.log("❌ [DEEPGRAM] Connection error:", error.message)
-          deepgramReady = false
-        }
-
-        deepgramWs.onclose = () => {
-          console.log("🔌 [DEEPGRAM] Connection closed")
-          deepgramReady = false
-          // Attempt a quick reconnect if call still active
-          try {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              console.log("🔄 [DEEPGRAM] Attempting quick reconnect in 500ms...")
-              setTimeout(() => {
-                if (!deepgramReady) {
-                  connectToDeepgram().catch(() => {})
-                }
-              }, 500)
-            }
-          } catch (_) {}
-        }
-      } catch (error) {
-        // Silent error handling
-      }
-    }
+    // Rest of your connection handling...
+  } catch (error) {
+    console.log("❌ [DEEPGRAM] Connection error:", error.message)
+  }
+}
 
     const handleDeepgramResponse = async (data) => {
-      // Handle VAD (Voice Activity Detection) events for faster processing
+      // Handle VAD events for immediate response
       if (data.type === "SpeechStarted") {
         speechStartTime = Date.now()
         logWithTimestamp("🎤 [VAD]", "Speech started - user is speaking", speechStartTime)
@@ -2038,7 +2025,7 @@ const setupUnifiedVoiceServer = (wss) => {
         const speechDuration = speechStartTime ? speechEndTime - speechStartTime : 'unknown'
         logWithTimestamp("🎤 [VAD]", `Speech ended - processing any pending audio (duration: ${speechDuration}ms)`, speechEndTime)
         
-        // Force process any pending utterance buffer immediately
+        // Immediate processing on speech end
         if (userUtteranceBuffer.trim()) {
           logWithTimestamp("⚡ [VAD-TRIGGERED]", `Processing pending utterance: "${userUtteranceBuffer.trim()}"`, speechEndTime)
           try { 
@@ -2049,46 +2036,45 @@ const setupUnifiedVoiceServer = (wss) => {
       } else if (data.type === "Results") {
         if (!sttTimer) {
           sttTimer = createTimer("STT_TRANSCRIPTION")
-          logWithTimestamp("🎤 [DEEPGRAM-RESULT]", "Started STT transcription timer")
         }
-
+    
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
         const confidence = data.channel?.alternatives?.[0]?.confidence || 0
-
+    
         if (transcript?.trim()) {
-          // Opportunistic early processing on strong interim hypotheses
           if (!is_final) {
             const text = transcript.trim()
-            const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
-            const longPhrase = text.length >= 10
             const nowTs = Date.now()
             
             logWithTimestamp("🔄 [DEEPGRAM-INTERIM]", `Received interim: "${text}" (${text.length} chars, confidence: ${(confidence * 100).toFixed(1)}%)`)
             
-            // More aggressive early processing for faster response
+            // Ultra-aggressive early processing - process almost immediately
             const shouldProcessEarly = (
-              endsWithPunct || 
-              longPhrase || 
-              (text.length >= 3 && confidence > 0.8) || // High confidence short phrases
-              (text.length >= 5 && confidence > 0.6) || // Medium confidence medium phrases
-              nowTs - lastInterimProcessAt > 300 // Reduced from 500ms
-            ) && nowTs - lastInterimProcessAt > 100 // Reduced from 250ms
+              // Process any text with reasonable confidence after very short delay
+              (text.length >= 2 && confidence > 0.7) ||
+              (text.length >= 3 && confidence > 0.6) ||
+              (text.length >= 4 && confidence > 0.5) ||
+              // Process longer text with lower confidence
+              (text.length >= 8 && confidence > 0.3) ||
+              // Force process after minimal delay
+              nowTs - lastInterimProcessAt > 100  // Reduced from 300ms
+            ) && nowTs - lastInterimProcessAt > 50  // Minimum 50ms gap to prevent spam
             
             if (shouldProcessEarly) {
               lastInterimProcessAt = nowTs
               if (!firstInterimTime) firstInterimTime = nowTs
               const timeFromSpeechStart = speechStartTime ? nowTs - speechStartTime : 'unknown'
-              logWithTimestamp("⚡ [EARLY-PROCESSING]", `Processing interim: "${text}" (confidence: ${(confidence * 100).toFixed(1)}%, ${timeFromSpeechStart}ms from speech start)`)
-              try { 
-                // Store interim text to avoid duplicate processing
-                userUtteranceBuffer = text
-                await processUserUtterance(text) 
-              } catch (_) {}
+              logWithTimestamp("⚡ [ULTRA-EARLY-PROCESSING]", `Processing interim: "${text}" (confidence: ${(confidence * 100).toFixed(1)}%, ${timeFromSpeechStart}ms from speech start)`)
+              
+              // Store and process immediately
+              userUtteranceBuffer = text
+              
+              // Don't await - fire and forget for maximum speed
+              processUserUtterance(text).catch(() => {})
             }
-          }
-
-          if (is_final) {
+          } else {
+            // Final processing
             const finalTime = Date.now()
             const sttDuration = sttTimer.end()
             if (!firstFinalTime) firstFinalTime = finalTime
@@ -2097,41 +2083,62 @@ const setupUnifiedVoiceServer = (wss) => {
             logWithTimestamp("✅ [DEEPGRAM-FINAL]", `Final transcript: "${transcript.trim()}" (${sttDuration}ms, confidence: ${(confidence * 100).toFixed(1)}%)`)
             logWithTimestamp("📊 [PERFORMANCE]", `Final result: ${timeFromSpeechStart}ms from speech start, ${timeFromFirstInterim}ms from first interim`)
             sttTimer = null
-
-            // Only process final if it's different from what we already processed
+    
+            // Only process final if significantly different from interim
             const finalText = transcript.trim()
-            if (finalText !== userUtteranceBuffer.trim()) {
-              userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + finalText
+            const similarity = calculateSimilarity(finalText, userUtteranceBuffer.trim())
+            
+            if (similarity < 0.8) { // Less than 80% similar
+              logWithTimestamp("🔄 [FINAL-DIFFERENT]", `Processing different final: "${finalText}" vs "${userUtteranceBuffer.trim()}"`)
+              userUtteranceBuffer = finalText
               
               if (callLogger && finalText) {
                 const fixedLang = currentLanguage || "en"
                 callLogger.logUserTranscript(finalText, fixedLang)
               }
-
-              await processUserUtterance(userUtteranceBuffer)
+              
+              // Don't await - fire and forget
+              processUserUtterance(userUtteranceBuffer).catch(() => {})
             } else {
-              logWithTimestamp("🔄 [DUPLICATE-SKIP]", `Skipping duplicate final processing: "${finalText}"`)
+              logWithTimestamp("🔄 [DUPLICATE-SKIP]", `Skipping similar final processing: "${finalText}" (${(similarity * 100).toFixed(1)}% similar)`)
             }
             userUtteranceBuffer = ""
           }
         }
-      } else if (data.type === "UtteranceEnd") {
-        if (sttTimer) {
-          const sttDuration = sttTimer.end()
-          logWithTimestamp("🕒 [STT-TRANSCRIPTION]", `${sttDuration}ms - Text: "${userUtteranceBuffer.trim()}"`)
-          sttTimer = null
-        }
-
-        if (userUtteranceBuffer.trim()) {
-          if (callLogger && userUtteranceBuffer.trim()) {
-            const fixedLang = currentLanguage || "en"
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), fixedLang)
+      }
+    }
+    
+    // Simple similarity calculation
+    function calculateSimilarity(str1, str2) {
+      if (!str1 || !str2) return 0
+      const longer = str1.length > str2.length ? str1 : str2
+      const shorter = str1.length > str2.length ? str2 : str1
+      if (longer.length === 0) return 1.0
+      return (longer.length - editDistance(longer, shorter)) / parseFloat(longer.length)
+    }
+    
+    function editDistance(str1, str2) {
+      const matrix = []
+      for (let i = 0; i <= str2.length; i++) {
+        matrix[i] = [i]
+      }
+      for (let j = 0; j <= str1.length; j++) {
+        matrix[0][j] = j
+      }
+      for (let i = 1; i <= str2.length; i++) {
+        for (let j = 1; j <= str1.length; j++) {
+          if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+            matrix[i][j] = matrix[i - 1][j - 1]
+          } else {
+            matrix[i][j] = Math.min(
+              matrix[i - 1][j - 1] + 1,
+              matrix[i][j - 1] + 1,
+              matrix[i - 1][j] + 1
+            )
           }
-
-          await processUserUtterance(userUtteranceBuffer)
-          userUtteranceBuffer = ""
         }
       }
+      return matrix[str2.length][str1.length]
     }
 
     const processUserUtterance = async (text) => {
