@@ -1676,6 +1676,11 @@ class SimplifiedSarvamTTSProcessor {
           if (msg.type === 'config_ack') {
             this.configAcked = true
             console.log(`🎙️ [SARVAM-WS] Config acknowledged in ${timer.end()}ms`)
+          } else if (msg.type === 'ping') {
+            // Respond to ping with pong
+            try {
+              this.sarvamWs.send(JSON.stringify({ type: 'pong' }))
+            } catch (_) {}
           }
           if (msg.type === 'audio' && msg.data?.audio) {
             const audioBuffer = Buffer.from(msg.data.audio, 'base64')
@@ -1748,10 +1753,15 @@ class SimplifiedSarvamTTSProcessor {
     }
     sarvamTracker.checkpoint('SARVAM_CONNECTED', { requestId })
 
-    // Minimal wait for config ack to reduce latency
+    // Wait for config ack with timeout
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 150) {
-      await new Promise(r => setTimeout(r, 5))
+    while (!this.configAcked && Date.now() - configWaitStart < 200) {
+      await new Promise(r => setTimeout(r, 10))
+    }
+    
+    // If no config ack, proceed anyway to avoid blocking
+    if (!this.configAcked) {
+      console.log('⚠️ [SARVAM-WS] No config ACK received, proceeding anyway')
     }
     const configWaitTime = Date.now() - configWaitStart
     sarvamTracker.checkpoint('SARVAM_CONFIG_ACK', { waitTime: configWaitTime, acked: this.configAcked })
@@ -1783,8 +1793,8 @@ class SimplifiedSarvamTTSProcessor {
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 200 })
-        console.log('⚠️ [SARVAM-WS] No audio within 0.2s after text; reconnect+resend')
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 500 })
+        console.log('⚠️ [SARVAM-WS] No audio within 0.5s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1815,7 +1825,7 @@ class SimplifiedSarvamTTSProcessor {
           sarvamTracker.checkpoint('SARVAM_RECONNECT_ERROR', { error: error.message })
       }
       }
-    }, 200)
+    }, 500)
 
     if (this.callLogger && cleanText) {
       this.callLogger.logAIResponse(cleanText, this.language)
