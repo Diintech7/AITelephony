@@ -1353,7 +1353,7 @@ const processWithOpenAIStreaming = async (
             buffer += delta
             charsSinceLastFlush += delta.length
             // Flush on punctuation for immediate TTS
-            if (/[\.!?]\s$/.test(buffer) || charsSinceLastFlush >= 25) {
+            if (/[\.!?]\s$/.test(buffer) || charsSinceLastFlush >= 20) {
               await flushSentences()
               charsSinceLastFlush = 0
             }
@@ -1748,10 +1748,10 @@ class SimplifiedSarvamTTSProcessor {
     }
     sarvamTracker.checkpoint('SARVAM_CONNECTED', { requestId })
 
-    // Slightly longer wait for config ack to avoid reconnect penalty
+    // Minimal wait for config ack to reduce latency
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 300) {
-      await new Promise(r => setTimeout(r, 10))
+    while (!this.configAcked && Date.now() - configWaitStart < 150) {
+      await new Promise(r => setTimeout(r, 5))
     }
     const configWaitTime = Date.now() - configWaitStart
     sarvamTracker.checkpoint('SARVAM_CONFIG_ACK', { waitTime: configWaitTime, acked: this.configAcked })
@@ -1783,8 +1783,8 @@ class SimplifiedSarvamTTSProcessor {
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 300 })
-        console.log('⚠️ [SARVAM-WS] No audio within 0.3s after text; reconnect+resend')
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 200 })
+        console.log('⚠️ [SARVAM-WS] No audio within 0.2s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1815,7 +1815,7 @@ class SimplifiedSarvamTTSProcessor {
           sarvamTracker.checkpoint('SARVAM_RECONNECT_ERROR', { error: error.message })
       }
       }
-    }, 300)
+    }, 200)
 
     if (this.callLogger && cleanText) {
       this.callLogger.logAIResponse(cleanText, this.language)
@@ -2002,10 +2002,10 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("interim_results", "true")
         // keep formatting minimal to avoid incompatibilities (disable if 400 persists)
         deepgramUrl.searchParams.append("smart_format", "true")
-        // balanced endpointing for faster finals with accuracy
-        deepgramUrl.searchParams.append("endpointing", "20")
+        // ultra-aggressive endpointing for ~500ms final transcript
+        deepgramUrl.searchParams.append("endpointing", "15")
         deepgramUrl.searchParams.append("vad_events", "true")
-        // remove utterance_end_ms to avoid server-side validation issues
+        deepgramUrl.searchParams.append("utterance_end_ms", "300")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -2099,11 +2099,11 @@ const setupUnifiedVoiceServer = (wss) => {
             const shouldProcessEarly = (
               endsWithPunct || 
               longPhrase || 
-              (text.length >= 2 && confidence > 0.85) || // Very high confidence short phrases
-              (text.length >= 4 && confidence > 0.7) || // High confidence medium phrases
-              (text.length >= 6 && confidence > 0.5) || // Medium confidence longer phrases
-              nowTs - lastInterimProcessAt > 200 // Reduced from 300ms
-            ) && nowTs - lastInterimProcessAt > 50 // Reduced from 100ms
+              (text.length >= 2 && confidence > 0.8) || // Very high confidence short phrases
+              (text.length >= 4 && confidence > 0.6) || // High confidence medium phrases
+              (text.length >= 6 && confidence > 0.4) || // Medium confidence longer phrases
+              nowTs - lastInterimProcessAt > 150 // Reduced from 200ms
+            ) && nowTs - lastInterimProcessAt > 30 // Reduced from 50ms
             
             if (shouldProcessEarly) {
               lastInterimProcessAt = nowTs
