@@ -1712,12 +1712,12 @@ class SimplifiedSarvamTTSProcessor {
         
         // Auto-reconnect if not interrupted and not a normal closure
         if (!this.isInterrupted && event.code !== 1000) {
-          console.log('🔄 [SARVAM-WS] Attempting auto-reconnect in 500ms...')
+          console.log('🔄 [SARVAM-WS] Attempting auto-reconnect in 200ms...')
           setTimeout(() => {
             if (!this.isInterrupted) {
               this.connectSarvamWs(0).catch(() => {})
             }
-          }, 500)
+          }, 200)
         }
       }
     })
@@ -1755,7 +1755,7 @@ class SimplifiedSarvamTTSProcessor {
 
     // Wait for config ack with timeout
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 300) {
+    while (!this.configAcked && Date.now() - configWaitStart < 150) {
       await new Promise(r => setTimeout(r, 5))
     }
     
@@ -1793,8 +1793,8 @@ class SimplifiedSarvamTTSProcessor {
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 800 })
-        console.log('⚠️ [SARVAM-WS] No audio within 0.8s after text; reconnect+resend')
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 1200 })
+        console.log('⚠️ [SARVAM-WS] No audio within 1.2s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1803,7 +1803,7 @@ class SimplifiedSarvamTTSProcessor {
           const reconnected = await this.connectSarvamWs(requestId).catch(() => false)
           if (reconnected && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
             const startWait2 = Date.now()
-            while (!this.configAcked && Date.now() - startWait2 < 200) {
+            while (!this.configAcked && Date.now() - startWait2 < 100) {
               await new Promise(r => setTimeout(r, 5))
             }
             try { 
@@ -1825,7 +1825,7 @@ class SimplifiedSarvamTTSProcessor {
           sarvamTracker.checkpoint('SARVAM_RECONNECT_ERROR', { error: error.message })
       }
       }
-    }, 800)
+    }, 1200)
 
     if (this.callLogger && cleanText) {
       this.callLogger.logAIResponse(cleanText, this.language)
