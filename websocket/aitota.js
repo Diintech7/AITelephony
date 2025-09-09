@@ -109,6 +109,22 @@ const createTimer = (label) => {
   }
 }
 
+// Format timestamp with milliseconds for detailed latency tracking
+const formatTimestamp = (timestamp = Date.now()) => {
+  const date = new Date(timestamp)
+  const hours = date.getHours().toString().padStart(2, '0')
+  const minutes = date.getMinutes().toString().padStart(2, '0')
+  const seconds = date.getSeconds().toString().padStart(2, '0')
+  const milliseconds = date.getMilliseconds().toString().padStart(3, '0')
+  return `${hours}:${minutes}:${seconds}:${milliseconds}`
+}
+
+// Enhanced logging with timestamp
+const logWithTimestamp = (prefix, message, timestamp = Date.now()) => {
+  const timeStr = formatTimestamp(timestamp)
+  console.log(`[${timeStr}] ${prefix} ${message}`)
+}
+
 // Enhanced language mappings with Marathi support
 const LANGUAGE_MAPPING = {
   hi: "hi-IN",
@@ -1603,16 +1619,19 @@ class SimplifiedSarvamTTSProcessor {
           }
           if (msg.type === 'audio' && msg.data?.audio) {
             const audioBuffer = Buffer.from(msg.data.audio, 'base64')
+            const audioReceivedTime = Date.now()
             if (this.firstAudioPending && this.firstAudioSentAt) {
-              console.log(`⚡ [SARVAM-FIRST-AUDIO] ${Date.now() - this.firstAudioSentAt}ms from text-send`)
+              const firstAudioLatency = audioReceivedTime - this.firstAudioSentAt
+              logWithTimestamp("⚡ [SARVAM-FIRST-AUDIO]", `${firstAudioLatency}ms from text-send`, audioReceivedTime)
               this.firstAudioPending = false
               this.firstAudioSentAt = 0
             }
             this.audioQueue.push(audioBuffer)
             this.totalAudioBytes += audioBuffer.length
+            logWithTimestamp("🎵 [SARVAM-AUDIO]", `Received audio chunk: ${audioBuffer.length} bytes`, audioReceivedTime)
             if (!this.isStreamingToSIP) this.startStreamingToSIP(requestId)
           } else if (msg.type === 'error') {
-            console.log(`❌ [SARVAM-WS] Error from TTS: ${msg?.data?.message || 'unknown'}`)
+            logWithTimestamp("❌ [SARVAM-WS]", `Error from TTS: ${msg?.data?.message || 'unknown'}`)
           }
         } catch (_) {}
       }
@@ -1631,10 +1650,13 @@ class SimplifiedSarvamTTSProcessor {
 
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
-    if (!text || !text.trim()) { console.log('⚠️ [SARVAM-WS] Skipping empty text'); return }
+    if (!text || !text.trim()) { logWithTimestamp('⚠️ [SARVAM-WS]', 'Skipping empty text'); return }
     const requestId = ++this.currentSarvamRequestId
     this.audioQueue = []
     this.isStreamingToSIP = false
+    const synthesisStart = Date.now()
+    logWithTimestamp("🎙️ [SARVAM-START]", `Starting synthesis: "${text}" (${text.length} chars)`, synthesisStart)
+    
     const connected = await this.connectSarvamWs(requestId).catch(() => false)
     if (!connected || this.isInterrupted || this.currentSarvamRequestId !== requestId) return
 
@@ -1647,10 +1669,11 @@ class SimplifiedSarvamTTSProcessor {
     try { 
       this.firstAudioPending = true
       this.firstAudioSentAt = Date.now()
+      logWithTimestamp("📤 [SARVAM-SEND]", `Sending text to Sarvam: "${text}"`, this.firstAudioSentAt)
       this.sarvamWs.send(JSON.stringify(textMessage)) 
     } catch (_) {}
     try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
-    console.log(`📝 [SARVAM-WS] Sent text (${text.length} chars) and flush`)
+    logWithTimestamp("📝 [SARVAM-WS]", `Sent text (${text.length} chars) and flush`)
 
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
@@ -1694,7 +1717,8 @@ class SimplifiedSarvamTTSProcessor {
   async startStreamingToSIP(requestId) {
     if (this.isStreamingToSIP || this.isInterrupted || this.currentSarvamRequestId !== requestId) return
     this.isStreamingToSIP = true
-    console.log('🚀 [SARVAM→SIP] Start streaming audio to SIP')
+    const streamStartTime = Date.now()
+    logWithTimestamp('🚀 [SARVAM→SIP]', 'Start streaming audio to SIP', streamStartTime)
 
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
@@ -1863,10 +1887,12 @@ const setupUnifiedVoiceServer = (wss) => {
         })
 
         deepgramWs.onopen = () => {
-          console.log("🎤 [DEEPGRAM] Connection established")
-          console.log(`🕒 [DEEPGRAM-CONNECT] ${Date.now()-dgConnectStart}ms`)
+          const connectTime = Date.now()
+          const connectLatency = connectTime - dgConnectStart
+          logWithTimestamp("🎤 [DEEPGRAM]", "Connection established", connectTime)
+          logWithTimestamp("🕒 [DEEPGRAM-CONNECT]", `${connectLatency}ms`, connectTime)
           deepgramReady = true
-          console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
+          logWithTimestamp("🎤 [DEEPGRAM]", `Processing queued audio packets: ${deepgramAudioQueue.length}`, connectTime)
           deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
           deepgramAudioQueue = []
         }
@@ -1903,7 +1929,10 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
-        if (!sttTimer) sttTimer = createTimer("STT_TRANSCRIPTION")
+        if (!sttTimer) {
+          sttTimer = createTimer("STT_TRANSCRIPTION")
+          logWithTimestamp("🎤 [DEEPGRAM-RESULT]", "Started STT transcription timer")
+        }
 
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
@@ -1917,14 +1946,18 @@ const setupUnifiedVoiceServer = (wss) => {
             const endsWithPunct = /[\.\!\?\u0964]$/.test(text)
             const longPhrase = text.length >= 10
             const nowTs = Date.now()
+            logWithTimestamp("🔄 [DEEPGRAM-INTERIM]", `Received interim: "${text}" (${text.length} chars)`)
+            
             if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 500) && nowTs - lastInterimProcessAt > 250) {
               lastInterimProcessAt = nowTs
+              logWithTimestamp("⚡ [EARLY-PROCESSING]", `Processing interim: "${text}"`)
               try { await processUserUtterance(text) } catch (_) {}
             }
           }
 
           if (is_final) {
-            console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
+            const finalTime = Date.now()
+            logWithTimestamp("✅ [DEEPGRAM-FINAL]", `Final transcript: "${transcript.trim()}" (${sttTimer.end()}ms)`)
             sttTimer = null
 
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
@@ -1959,9 +1992,10 @@ const setupUnifiedVoiceServer = (wss) => {
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
-      console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
-      console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
-      console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
+      const processStartTime = Date.now()
+      logWithTimestamp("🗣️ [USER-UTTERANCE]", "========== USER SPEECH ==========", processStartTime)
+      logWithTimestamp("🗣️ [USER-UTTERANCE]", `Text: "${text.trim()}"`, processStartTime)
+      logWithTimestamp("🗣️ [USER-UTTERANCE]", `Current Language: ${currentLanguage}`, processStartTime)
 
       // Do not interrupt TTS; enforce ordered playback via queue
 
@@ -1972,16 +2006,18 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         // Language detection disabled; stick to agent-configured language
         const detectedLanguage = currentLanguage || "en"
-        console.log("🌐 [USER-UTTERANCE] Language (fixed):", detectedLanguage)
+        logWithTimestamp("🌐 [USER-UTTERANCE]", `Language (fixed): ${detectedLanguage}`)
 
         // Run all AI detections in parallel for efficiency
-        console.log("🔍 [USER-UTTERANCE] Running AI detections...")
+        logWithTimestamp("🔍 [USER-UTTERANCE]", "Running AI detections...")
         
         // Disable high-latency detections; only stream OpenAI response
         // const disconnectionIntent = await detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
         // const leadStatus = await detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage)
         // const whatsappRequest = await detectWhatsAppRequest(text, conversationHistory, detectedLanguage)
         const utterStartTs = Date.now()
+        logWithTimestamp("🚀 [LLM-START]", "Starting OpenAI streaming...", utterStartTs)
+        
         const aiResponse = await processWithOpenAIStreaming(
           text,
           conversationHistory,
@@ -1993,7 +2029,8 @@ const setupUnifiedVoiceServer = (wss) => {
           null,
           {
             onFirstEnqueue: (enqueueTs) => {
-              console.log(`⚡ [PIPELINE-FIRST-ENQUEUE] ${(enqueueTs - utterStartTs)}ms from utterance to first TTS enqueue`)
+              const latency = enqueueTs - utterStartTs
+              logWithTimestamp("⚡ [PIPELINE-FIRST-ENQUEUE]", `${latency}ms from utterance to first TTS enqueue`, enqueueTs)
             }
           }
         )
@@ -2001,18 +2038,18 @@ const setupUnifiedVoiceServer = (wss) => {
         // Lead/disconnect/WhatsApp intent detection disabled to reduce latency
 
         if (processingRequestId === currentRequestId) {
-          console.log("🤖 [USER-UTTERANCE] OpenAI streaming initiated; responses will be enqueued to TTS")
-          console.log("✅ [USER-UTTERANCE] Processing completed")
+          logWithTimestamp("🤖 [USER-UTTERANCE]", "OpenAI streaming initiated; responses will be enqueued to TTS")
+          logWithTimestamp("✅ [USER-UTTERANCE]", `Processing completed (${Date.now() - processStartTime}ms total)`)
         } else {
-          console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
+          logWithTimestamp("⏭️ [USER-UTTERANCE]", "Processing skipped (newer request in progress)")
         }
       } catch (error) {
-        console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
+        logWithTimestamp("❌ [USER-UTTERANCE]", `Error processing utterance: ${error.message}`)
       } finally {
         if (processingRequestId === currentRequestId) {
           isProcessing = false
         }
-        console.log("🗣️ [USER-UTTERANCE] ======================================")
+        logWithTimestamp("🗣️ [USER-UTTERANCE]", "======================================")
       }
     }
 
@@ -2032,15 +2069,14 @@ const setupUnifiedVoiceServer = (wss) => {
             break
 
           case "start": {
+            const callStartTime = Date.now()
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
 
             // Log all incoming SIP data
-            console.log("📞 [SIP-START] ========== CALL START DATA ==========")
-            console.log("📞 [SIP-START] Raw data:", JSON.stringify(data, null, 2))
-            console.log("📞 [SIP-START] URL Parameters:", JSON.stringify(urlParams, null, 2))
-            console.log("📞 [SIP-START] StreamSID:", streamSid)
-            console.log("📞 [SIP-START] AccountSID:", accountSid)
+            logWithTimestamp("📞 [SIP-START]", "========== CALL START DATA ==========", callStartTime)
+            logWithTimestamp("📞 [SIP-START]", `StreamSID: ${streamSid}`, callStartTime)
+            logWithTimestamp("📞 [SIP-START]", `AccountSID: ${accountSid}`, callStartTime)
 
             let mobile = null;
             let callerId = null;
@@ -2294,10 +2330,15 @@ const setupUnifiedVoiceServer = (wss) => {
             ws.__ttsRunning = ws.__ttsRunning || false
             const enqueueSpeak = async (text, language) => {
               if (!text || !text.trim()) return
+              const enqueueTime = Date.now()
+              logWithTimestamp("📝 [TTS-ENQUEUE]", `Enqueuing: "${text.trim()}" (${text.trim().length} chars)`, enqueueTime)
+              
               ws.__ttsQueue.push({ text: text.trim(), language })
               if (ws.__ttsRunning) return
               ws.__ttsRunning = true
               const drainStart = Date.now()
+              logWithTimestamp("🎤 [TTS-QUEUE-START]", `Starting TTS queue drain (${ws.__ttsQueue.length} items)`, drainStart)
+              
               while (ws.__ttsQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
                 const next = ws.__ttsQueue.shift()
                 if (!ws.__sarvamTts) ws.__sarvamTts = new SimplifiedSarvamTTSProcessor(language || currentLanguage || "en", ws, streamSid, callLogger)
@@ -2305,10 +2346,13 @@ const setupUnifiedVoiceServer = (wss) => {
                   ws.__sarvamTts.reset(language || currentLanguage || "en")
                 }
                 const t0 = Date.now()
+                logWithTimestamp("🎙️ [TTS-SYNTHESIS]", `Starting synthesis: "${next.text}"`, t0)
                 try { await ws.__sarvamTts.synthesizeAndStream(next.text) } catch (_) { /* continue */ }
-                console.log(`🕒 [TTS-UTTERANCE] ${(Date.now()-t0)}ms for ${(next.text||'').length} chars`)
+                const synthesisTime = Date.now() - t0
+                logWithTimestamp("✅ [TTS-UTTERANCE]", `${synthesisTime}ms for ${(next.text||'').length} chars`, Date.now())
               }
-              console.log(`🕒 [TTS-QUEUE-DRAIN] ${(Date.now()-drainStart)}ms total`)
+              const totalDrainTime = Date.now() - drainStart
+              logWithTimestamp("🏁 [TTS-QUEUE-DRAIN]", `${totalDrainTime}ms total`, Date.now())
               ws.__ttsRunning = false
             }
             ws.__enqueueSpeak = enqueueSpeak
@@ -2320,17 +2364,21 @@ const setupUnifiedVoiceServer = (wss) => {
           case "media":
             if (data.media?.payload) {
               const audioBuffer = Buffer.from(data.media.payload, "base64")
+              const mediaReceivedTime = Date.now()
               
               // Log media stats periodically (every 1000 packets to avoid spam)
               if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
               ws.mediaPacketCount++
               
               if (ws.mediaPacketCount % 1000 === 0) {
-                console.log("🎵 [SIP-MEDIA] Audio packets received:", ws.mediaPacketCount)
+                logWithTimestamp("🎵 [SIP-MEDIA]", `Audio packets received: ${ws.mediaPacketCount}`, mediaReceivedTime)
               }
 
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
                 deepgramWs.send(audioBuffer)
+                if (ws.mediaPacketCount % 1000 === 0) {
+                  logWithTimestamp("📤 [DEEPGRAM-SEND]", `Sent audio to Deepgram: ${audioBuffer.length} bytes`, mediaReceivedTime)
+                }
               } else {
                 deepgramAudioQueue.push(audioBuffer)
                 // Cap queue to avoid memory/latency buildup
@@ -2338,17 +2386,18 @@ const setupUnifiedVoiceServer = (wss) => {
                   deepgramAudioQueue.splice(0, deepgramAudioQueue.length - 2000)
                 }
                 if (deepgramAudioQueue.length % 200 === 0) {
-                  console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+                  logWithTimestamp("⏳ [SIP-MEDIA]", `Audio queued for Deepgram: ${deepgramAudioQueue.length}`, mediaReceivedTime)
                 }
               }
             }
             break
 
           case "stop":
-            console.log("🛑 [SIP-STOP] ========== CALL END ==========")
-            console.log("🛑 [SIP-STOP] StreamSID:", streamSid)
-            console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
-            console.log("🛑 [SIP-STOP] Mobile:", mobile)
+            const callStopTime = Date.now()
+            logWithTimestamp("🛑 [SIP-STOP]", "========== CALL END ==========", callStopTime)
+            logWithTimestamp("🛑 [SIP-STOP]", `StreamSID: ${streamSid}`, callStopTime)
+            logWithTimestamp("🛑 [SIP-STOP]", `Call Direction: ${callDirection}`, callStopTime)
+            logWithTimestamp("🛑 [SIP-STOP]", `Mobile: ${mobile}`, callStopTime)
 
             // Intelligent WhatsApp send based on lead status and user requests
             try {
