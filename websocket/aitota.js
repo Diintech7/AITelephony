@@ -1200,6 +1200,7 @@ const processWithOpenAIStreaming = async (
   ws,
   streamSid,
   userName = null,
+  callbacks = {}
 ) => {
   const timer = createTimer("LLM_STREAMING")
   try {
@@ -1250,6 +1251,7 @@ const processWithOpenAIStreaming = async (
     let buffer = ""
     let fullText = ""
 
+    let firstEnqueue = true
     const flushSentences = async () => {
       const parts = buffer.split(/(?<=[\.!?])\s+/)
       // Keep last partial in buffer
@@ -1259,6 +1261,12 @@ const processWithOpenAIStreaming = async (
         if (!text) continue
         fullText += (fullText ? " " : "") + text
         if (callLogger) callLogger.logAIResponse(text, detectedLanguage)
+        if (firstEnqueue) {
+          firstEnqueue = false
+          if (callbacks?.onFirstEnqueue) {
+            try { callbacks.onFirstEnqueue(Date.now()) } catch (_) {}
+          }
+        }
         if (ws?.__enqueueSpeak) await ws.__enqueueSpeak(text, detectedLanguage)
       }
     }
@@ -1298,6 +1306,12 @@ const processWithOpenAIStreaming = async (
       const text = buffer.trim()
       fullText += (fullText ? " " : "") + text
       if (callLogger) callLogger.logAIResponse(text, detectedLanguage)
+      if (firstEnqueue) {
+        firstEnqueue = false
+        if (callbacks?.onFirstEnqueue) {
+          try { callbacks.onFirstEnqueue(Date.now()) } catch (_) {}
+        }
+      }
       if (ws?.__enqueueSpeak) await ws.__enqueueSpeak(text, detectedLanguage)
     }
 
@@ -1831,6 +1845,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const connectToDeepgram = async () => {
       try {
         const deepgramLanguage = getDeepgramLanguage(currentLanguage)
+        const dgConnectStart = Date.now()
 
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
         deepgramUrl.searchParams.append("sample_rate", "8000")
@@ -1848,6 +1863,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         deepgramWs.onopen = () => {
           console.log("🎤 [DEEPGRAM] Connection established")
+          console.log(`🕒 [DEEPGRAM-CONNECT] ${Date.now()-dgConnectStart}ms`)
           deepgramReady = true
           console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
           deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
@@ -1886,9 +1902,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
-        if (!sttTimer) {
-          sttTimer = createTimer("STT_TRANSCRIPTION")
-        }
+        if (!sttTimer) sttTimer = createTimer("STT_TRANSCRIPTION")
 
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
@@ -1966,7 +1980,22 @@ const setupUnifiedVoiceServer = (wss) => {
         // const disconnectionIntent = await detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage)
         // const leadStatus = await detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage)
         // const whatsappRequest = await detectWhatsAppRequest(text, conversationHistory, detectedLanguage)
-        const aiResponse = await processWithOpenAIStreaming(text, conversationHistory, detectedLanguage, callLogger, agentConfig, ws, streamSid)
+        const utterStartTs = Date.now()
+        const aiResponse = await processWithOpenAIStreaming(
+          text,
+          conversationHistory,
+          detectedLanguage,
+          callLogger,
+          agentConfig,
+          ws,
+          streamSid,
+          null,
+          {
+            onFirstEnqueue: (enqueueTs) => {
+              console.log(`⚡ [PIPELINE-FIRST-ENQUEUE] ${(enqueueTs - utterStartTs)}ms from utterance to first TTS enqueue`)
+            }
+          }
+        )
 
         // Lead/disconnect/WhatsApp intent detection disabled to reduce latency
 
@@ -2267,14 +2296,18 @@ const setupUnifiedVoiceServer = (wss) => {
               ws.__ttsQueue.push({ text: text.trim(), language })
               if (ws.__ttsRunning) return
               ws.__ttsRunning = true
+              const drainStart = Date.now()
               while (ws.__ttsQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
                 const next = ws.__ttsQueue.shift()
                 if (!ws.__sarvamTts) ws.__sarvamTts = new SimplifiedSarvamTTSProcessor(language || currentLanguage || "en", ws, streamSid, callLogger)
                 if (ws.__sarvamTts.language !== (language || currentLanguage || "en")) {
                   ws.__sarvamTts.reset(language || currentLanguage || "en")
                 }
+                const t0 = Date.now()
                 try { await ws.__sarvamTts.synthesizeAndStream(next.text) } catch (_) { /* continue */ }
+                console.log(`🕒 [TTS-UTTERANCE] ${(Date.now()-t0)}ms for ${(next.text||'').length} chars`)
               }
+              console.log(`🕒 [TTS-QUEUE-DRAIN] ${(Date.now()-drainStart)}ms total`)
               ws.__ttsRunning = false
             }
             ws.__enqueueSpeak = enqueueSpeak
