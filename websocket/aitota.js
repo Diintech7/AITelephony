@@ -1767,7 +1767,7 @@ class SimplifiedSarvamTTSProcessor {
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 300 })
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 30 })
         console.log('⚠️ [SARVAM-WS] No audio within 0.3s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
