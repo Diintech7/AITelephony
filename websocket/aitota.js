@@ -1576,6 +1576,15 @@ class SimplifiedSarvamTTSProcessor {
         this.connectSarvamWs(0).catch(() => {})
       }
     })
+    
+    // Keep connection alive with periodic pings
+    this.keepAliveInterval = setInterval(() => {
+      if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        try {
+          this.sarvamWs.send(JSON.stringify({ type: 'ping' }))
+        } catch (_) {}
+      }
+    }, 30000) // Ping every 30 seconds
   }
 
   interrupt() {
@@ -1584,6 +1593,12 @@ class SimplifiedSarvamTTSProcessor {
     this.sarvamWsConnected = false
     this.audioQueue = []
     this.isStreamingToSIP = false
+    
+    // Clear keep-alive interval
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval)
+      this.keepAliveInterval = null
+    }
   }
 
   reset(newLanguage) {
@@ -1684,9 +1699,19 @@ class SimplifiedSarvamTTSProcessor {
         console.log(`❌ [SARVAM-WS] Socket error: ${err?.message || err}`)
         reject(err)
       }
-      this.sarvamWs.onclose = () => {
+      this.sarvamWs.onclose = (event) => {
         this.sarvamWsConnected = false
-        console.log('🔌 [SARVAM-WS] Closed')
+        console.log(`🔌 [SARVAM-WS] Closed (code: ${event.code}, reason: ${event.reason || 'none'})`)
+        
+        // Auto-reconnect if not interrupted and not a normal closure
+        if (!this.isInterrupted && event.code !== 1000) {
+          console.log('🔄 [SARVAM-WS] Attempting auto-reconnect in 1s...')
+          setTimeout(() => {
+            if (!this.isInterrupted) {
+              this.connectSarvamWs(0).catch(() => {})
+            }
+          }, 1000)
+        }
       }
     })
   }
@@ -2055,7 +2080,11 @@ const setupUnifiedVoiceServer = (wss) => {
               if (!firstInterimTime) firstInterimTime = nowTs
               const timeFromSpeechStart = speechStartTime ? nowTs - speechStartTime : 'unknown'
               logWithTimestamp("⚡ [EARLY-PROCESSING]", `Processing interim: "${text}" (confidence: ${(confidence * 100).toFixed(1)}%, ${timeFromSpeechStart}ms from speech start)`)
-              try { await processUserUtterance(text) } catch (_) {}
+              try { 
+                // Store interim text to avoid duplicate processing
+                userUtteranceBuffer = text
+                await processUserUtterance(text) 
+              } catch (_) {}
             }
           }
 
@@ -2069,14 +2098,20 @@ const setupUnifiedVoiceServer = (wss) => {
             logWithTimestamp("📊 [PERFORMANCE]", `Final result: ${timeFromSpeechStart}ms from speech start, ${timeFromFirstInterim}ms from first interim`)
             sttTimer = null
 
-            userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
+            // Only process final if it's different from what we already processed
+            const finalText = transcript.trim()
+            if (finalText !== userUtteranceBuffer.trim()) {
+              userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + finalText
+              
+              if (callLogger && finalText) {
+                const fixedLang = currentLanguage || "en"
+                callLogger.logUserTranscript(finalText, fixedLang)
+              }
 
-            if (callLogger && transcript.trim()) {
-              const fixedLang = currentLanguage || "en"
-              callLogger.logUserTranscript(transcript.trim(), fixedLang)
+              await processUserUtterance(userUtteranceBuffer)
+            } else {
+              logWithTimestamp("🔄 [DUPLICATE-SKIP]", `Skipping duplicate final processing: "${finalText}"`)
             }
-
-            await processUserUtterance(userUtteranceBuffer)
             userUtteranceBuffer = ""
           }
         }
