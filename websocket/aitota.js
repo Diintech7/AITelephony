@@ -1759,8 +1759,8 @@ class SimplifiedSarvamTTSProcessor {
 
     // Wait for config ack with timeout
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 100) {
-      await new Promise(r => setTimeout(r, 5))
+    while (!this.configAcked && Date.now() - configWaitStart < 200) {
+      await new Promise(r => setTimeout(r, 10))
     }
     
     // If no config ack, proceed anyway to avoid blocking
@@ -1799,8 +1799,8 @@ class SimplifiedSarvamTTSProcessor {
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 600 })
-        console.log('⚠️ [SARVAM-WS] No audio within 0.6s after text; reconnect+resend')
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 2000 })
+        console.log('⚠️ [SARVAM-WS] No audio within 2s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1835,7 +1835,7 @@ class SimplifiedSarvamTTSProcessor {
           sarvamTracker.checkpoint('SARVAM_RECONNECT_ERROR', { error: error.message })
       }
       }
-    }, 600)
+    }, 2000)
 
     if (this.callLogger && cleanText) {
       this.callLogger.logAIResponse(cleanText, this.language)
@@ -2019,8 +2019,6 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("encoding", "linear16")
         deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
-        deepgramUrl.searchParams.append("interim_results", "true")
-        deepgramUrl.searchParams.append("smart_format", "true")
         // Optimized endpointing for best accuracy and low latency
         deepgramUrl.searchParams.append("endpointing", "300")
         deepgramUrl.searchParams.append("vad_events", "true")
