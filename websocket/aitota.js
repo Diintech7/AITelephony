@@ -2005,7 +2005,6 @@ const setupUnifiedVoiceServer = (wss) => {
         // ultra-aggressive endpointing for ~500ms final transcript
         deepgramUrl.searchParams.append("endpointing", "15")
         deepgramUrl.searchParams.append("vad_events", "true")
-        deepgramUrl.searchParams.append("utterance_end_ms", "300")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
