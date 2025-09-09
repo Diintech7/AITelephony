@@ -1511,6 +1511,7 @@ class SimplifiedSarvamTTSProcessor {
     this.configAcked = false
     this.firstAudioPending = false
     this.firstAudioSentAt = 0
+    this.hasPendingText = false
     // Prewarm connection to reduce first-audio latency
     setImmediate(() => {
       if (!this.isInterrupted) {
@@ -1647,35 +1648,16 @@ class SimplifiedSarvamTTSProcessor {
     try { 
       this.firstAudioPending = true
       this.firstAudioSentAt = Date.now()
+      this.hasPendingText = true
       this.sarvamWs.send(JSON.stringify(textMessage)) 
     } catch (_) {}
-    try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
+    try { if (this.hasPendingText) { this.sarvamWs.send(JSON.stringify({ type: 'flush' })); this.hasPendingText = false } } catch (_) {}
     console.log(`📝 [SARVAM-WS] Sent text (${text.length} chars) and flush`)
 
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        console.log('⚠️ [SARVAM-WS] No audio within 0.4s after text; reconnect+resend')
-        try {
-          // One-shot reconnect and resend
-          try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
-          this.sarvamWsConnected = false
-          this.configAcked = false
-          const reconnected = await this.connectSarvamWs(requestId).catch(() => false)
-          if (reconnected && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
-            const startWait2 = Date.now()
-            while (!this.configAcked && Date.now() - startWait2 < 150) {
-              await new Promise(r => setTimeout(r, 15))
-            }
-            try { 
-              this.firstAudioPending = true
-              this.firstAudioSentAt = Date.now()
-              this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text } })) 
-            } catch (_) {}
-            try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
-            console.log('🔁 [SARVAM-WS] Resent text after reconnect')
-          }
-        } catch (_) {}
+        console.log('⚠️ [SARVAM-WS] No audio within 0.4s after text; skipping reconnect as requested')
       }
     }, 400)
 
@@ -1902,8 +1884,22 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const handleDeepgramResponse = async (data) => {
+      if (data.type === "Open") {
+        ws.__sttFirstPacketAt = Date.now()
+        console.log("🧭 [STT] Stream opened")
+        return
+      }
+      if (data.type === "Close") {
+        console.log("🧭 [STT] Stream closed")
+        return
+      }
       if (data.type === "Results") {
-        if (!sttTimer) sttTimer = createTimer("STT_TRANSCRIPTION")
+        if (!sttTimer) {
+          sttTimer = createTimer("STT_TRANSCRIPTION")
+          if (typeof ws.__sttFirstPacketAt === 'number') {
+            console.log(`⏱️ [STT-FIRST-RESULT] ${Date.now() - ws.__sttFirstPacketAt}ms from stream open`)
+          }
+        }
 
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
