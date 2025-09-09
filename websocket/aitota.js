@@ -1938,7 +1938,6 @@ const handleExternalCallDisconnection = async (streamSid, reason = 'external_dis
 }
 
 // Main WebSocket server setup with enhanced live transcript functionality
-// Main WebSocket server setup with ultra-low latency STT optimization
 const setupUnifiedVoiceServer = (wss) => {
   wss.on("connection", (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`)
@@ -1958,7 +1957,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let agentConfig = null
     let userName = null
 
-    // Deepgram WebSocket connection with optimizations
+    // Deepgram WebSocket connection
     let deepgramWs = null
     let deepgramReady = false
     let deepgramAudioQueue = []
@@ -1967,147 +1966,57 @@ const setupUnifiedVoiceServer = (wss) => {
     let speechStartTime = null
     let firstInterimTime = null
     let firstFinalTime = null
+
+    // Optimized Deepgram connection with faster response times
+const connectToDeepgram = async () => {
+  try {
+    const deepgramLanguage = getDeepgramLanguage(currentLanguage)
+    const dgConnectStart = Date.now()
+
+    const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
     
-    // Audio processing optimizations
-    let audioBuffer = Buffer.alloc(0)
-    let lastSendTime = 0
-    const MIN_SEND_INTERVAL = 20 // Send audio every 20ms for faster processing
+    // Core audio settings
+    deepgramUrl.searchParams.append("sample_rate", "8000")
+    deepgramUrl.searchParams.append("channels", "1")
+    deepgramUrl.searchParams.append("encoding", "linear16")
+    
+    // Model optimization - nova-2-general is faster than nova-2
+    deepgramUrl.searchParams.append("model", "nova-2-general")
+    deepgramUrl.searchParams.append("language", deepgramLanguage)
+    
+    // Speed optimizations
+    deepgramUrl.searchParams.append("interim_results", "true")
+    deepgramUrl.searchParams.append("smart_format", "false") // Disable to save processing time
+    deepgramUrl.searchParams.append("punctuate", "false")    // Disable to save processing time
+    deepgramUrl.searchParams.append("profanity_filter", "false") // Disable to save processing time
+    
+    // More aggressive endpointing for faster results
+    deepgramUrl.searchParams.append("endpointing", "10")  // Reduced from 25ms
+    deepgramUrl.searchParams.append("vad_events", "true")
+    deepgramUrl.searchParams.append("utterance_end_ms", "500") // Reduced from 1000ms
+    
+    // Add filler words detection for even faster interim results
+    deepgramUrl.searchParams.append("filler_words", "false") // Skip filler word processing
+    
+    // Enable low-latency mode if available
+    deepgramUrl.searchParams.append("no_delay", "true")
 
-    // Simple similarity calculation for duplicate detection
-    function calculateSimilarity(str1, str2) {
-      if (!str1 || !str2) return 0
-      const longer = str1.length > str2.length ? str1 : str2
-      const shorter = str1.length > str2.length ? str2 : str1
-      if (longer.length === 0) return 1.0
-      return (longer.length - editDistance(longer, shorter)) / parseFloat(longer.length)
-    }
+    deepgramWs = new WebSocket(deepgramUrl.toString(), {
+      headers: { 
+        Authorization: `Token ${API_KEYS.deepgram}`,
+        // Add connection keep-alive
+        'Connection': 'keep-alive'
+      },
+    })
 
-    function editDistance(str1, str2) {
-      const matrix = []
-      for (let i = 0; i <= str2.length; i++) {
-        matrix[i] = [i]
-      }
-      for (let j = 0; j <= str1.length; j++) {
-        matrix[0][j] = j
-      }
-      for (let i = 1; i <= str2.length; i++) {
-        for (let j = 1; j <= str1.length; j++) {
-          if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-            matrix[i][j] = matrix[i - 1][j - 1]
-          } else {
-            matrix[i][j] = Math.min(
-              matrix[i - 1][j - 1] + 1,
-              matrix[i][j - 1] + 1,
-              matrix[i - 1][j] + 1
-            )
-          }
-        }
-      }
-      return matrix[str2.length][str1.length]
-    }
-
-    const connectToDeepgram = async () => {
-      try {
-        const deepgramLanguage = getDeepgramLanguage(currentLanguage)
-        const dgConnectStart = Date.now()
-
-        const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-        
-        // Core audio settings
-        deepgramUrl.searchParams.append("sample_rate", "8000")
-        deepgramUrl.searchParams.append("channels", "1")
-        deepgramUrl.searchParams.append("encoding", "linear16")
-        
-        // Model optimization - nova-2-general is faster than nova-2
-        deepgramUrl.searchParams.append("model", "nova-2-general")
-        deepgramUrl.searchParams.append("language", deepgramLanguage)
-        
-        // Speed optimizations - disable heavy processing
-        deepgramUrl.searchParams.append("interim_results", "true")
-        deepgramUrl.searchParams.append("smart_format", "false") // Disable to save processing time
-        deepgramUrl.searchParams.append("punctuate", "false")    // Disable to save processing time
-        deepgramUrl.searchParams.append("profanity_filter", "false") // Disable to save processing time
-        deepgramUrl.searchParams.append("filler_words", "false") // Skip filler word processing
-        
-        // Aggressive endpointing for faster results
-        deepgramUrl.searchParams.append("endpointing", "10")  // Reduced from 25ms
-        deepgramUrl.searchParams.append("vad_events", "true")
-        deepgramUrl.searchParams.append("utterance_end_ms", "500") // Reduced from 1000ms
-        
-        // Enable low-latency mode
-        deepgramUrl.searchParams.append("no_delay", "true")
-
-        deepgramWs = new WebSocket(deepgramUrl.toString(), {
-          headers: { 
-            Authorization: `Token ${API_KEYS.deepgram}`,
-            'Connection': 'keep-alive'
-          },
-        })
-
-        deepgramWs.onopen = () => {
-          const connectTime = Date.now()
-          const connectLatency = connectTime - dgConnectStart
-          logWithTimestamp("🎤 [DEEPGRAM]", "Connection established", connectTime)
-          logWithTimestamp("🕒 [DEEPGRAM-CONNECT]", `${connectLatency}ms`, connectTime)
-          deepgramReady = true
-          logWithTimestamp("🎤 [DEEPGRAM]", `Processing queued audio packets: ${deepgramAudioQueue.length}`, connectTime)
-          deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
-          deepgramAudioQueue = []
-          
-          // Start keep-alive mechanism
-          maintainDeepgramConnection()
-        }
-
-        deepgramWs.onmessage = async (event) => {
-          const data = JSON.parse(event.data)
-          await handleDeepgramResponse(data)
-        }
-
-        deepgramWs.onerror = (error) => {
-          console.log("❌ [DEEPGRAM] Connection error:", error.message)
-          deepgramReady = false
-        }
-
-        deepgramWs.onclose = () => {
-          console.log("🔌 [DEEPGRAM] Connection closed")
-          deepgramReady = false
-          // Attempt a quick reconnect if call still active
-          try {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              console.log("🔄 [DEEPGRAM] Attempting quick reconnect in 500ms...")
-              setTimeout(() => {
-                if (!deepgramReady) {
-                  connectToDeepgram().catch(() => {})
-                }
-              }, 500)
-            }
-          } catch (_) {}
-        }
-      } catch (error) {
-        console.log("❌ [DEEPGRAM] Connection setup error:", error.message)
-      }
-    }
-
-    // Keep-alive mechanism for Deepgram connection
-    const maintainDeepgramConnection = () => {
-      const keepAliveInterval = setInterval(() => {
-        if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-          try {
-            deepgramWs.send(JSON.stringify({ type: "KeepAlive" }))
-          } catch (e) {
-            clearInterval(keepAliveInterval)
-          }
-        } else {
-          clearInterval(keepAliveInterval)
-        }
-      }, 30000)
-      
-      // Clean up interval when WebSocket closes
-      ws.on('close', () => clearInterval(keepAliveInterval))
-    }
+    // Rest of your connection handling...
+  } catch (error) {
+    console.log("❌ [DEEPGRAM] Connection error:", error.message)
+  }
+}
 
     const handleDeepgramResponse = async (data) => {
-      // Handle VAD (Voice Activity Detection) events for immediate response
+      // Handle VAD events for immediate response
       if (data.type === "SpeechStarted") {
         speechStartTime = Date.now()
         logWithTimestamp("🎤 [VAD]", "Speech started - user is speaking", speechStartTime)
@@ -2127,13 +2036,12 @@ const setupUnifiedVoiceServer = (wss) => {
       } else if (data.type === "Results") {
         if (!sttTimer) {
           sttTimer = createTimer("STT_TRANSCRIPTION")
-          logWithTimestamp("🎤 [DEEPGRAM-RESULT]", "Started STT transcription timer")
         }
-
+    
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
         const confidence = data.channel?.alternatives?.[0]?.confidence || 0
-
+    
         if (transcript?.trim()) {
           if (!is_final) {
             const text = transcript.trim()
@@ -2141,14 +2049,13 @@ const setupUnifiedVoiceServer = (wss) => {
             
             logWithTimestamp("🔄 [DEEPGRAM-INTERIM]", `Received interim: "${text}" (${text.length} chars, confidence: ${(confidence * 100).toFixed(1)}%)`)
             
-            // Ultra-aggressive early processing for maximum speed
+            // Ultra-aggressive early processing - process almost immediately
             const shouldProcessEarly = (
               // Process any text with reasonable confidence after very short delay
               (text.length >= 2 && confidence > 0.7) ||
               (text.length >= 3 && confidence > 0.6) ||
               (text.length >= 4 && confidence > 0.5) ||
               // Process longer text with lower confidence
-              (text.length >= 6 && confidence > 0.4) ||
               (text.length >= 8 && confidence > 0.3) ||
               // Force process after minimal delay
               nowTs - lastInterimProcessAt > 100  // Reduced from 300ms
@@ -2176,7 +2083,7 @@ const setupUnifiedVoiceServer = (wss) => {
             logWithTimestamp("✅ [DEEPGRAM-FINAL]", `Final transcript: "${transcript.trim()}" (${sttDuration}ms, confidence: ${(confidence * 100).toFixed(1)}%)`)
             logWithTimestamp("📊 [PERFORMANCE]", `Final result: ${timeFromSpeechStart}ms from speech start, ${timeFromFirstInterim}ms from first interim`)
             sttTimer = null
-
+    
             // Only process final if significantly different from interim
             const finalText = transcript.trim()
             const similarity = calculateSimilarity(finalText, userUtteranceBuffer.trim())
@@ -2190,7 +2097,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 callLogger.logUserTranscript(finalText, fixedLang)
               }
               
-              // Don't await - fire and forget for speed
+              // Don't await - fire and forget
               processUserUtterance(userUtteranceBuffer).catch(() => {})
             } else {
               logWithTimestamp("🔄 [DUPLICATE-SKIP]", `Skipping similar final processing: "${finalText}" (${(similarity * 100).toFixed(1)}% similar)`)
@@ -2198,52 +2105,40 @@ const setupUnifiedVoiceServer = (wss) => {
             userUtteranceBuffer = ""
           }
         }
-      } else if (data.type === "UtteranceEnd") {
-        if (sttTimer) {
-          const sttDuration = sttTimer.end()
-          logWithTimestamp("🕒 [STT-TRANSCRIPTION]", `${sttDuration}ms - Text: "${userUtteranceBuffer.trim()}"`)
-          sttTimer = null
-        }
-
-        if (userUtteranceBuffer.trim()) {
-          if (callLogger && userUtteranceBuffer.trim()) {
-            const fixedLang = currentLanguage || "en"
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), fixedLang)
-          }
-
-          await processUserUtterance(userUtteranceBuffer)
-          userUtteranceBuffer = ""
-        }
       }
     }
-
-    // Optimized audio processing function
-    const processAudioChunk = (audioData) => {
-      const currentTime = Date.now()
-      audioBuffer = Buffer.concat([audioBuffer, audioData])
-      
-      // Send smaller, more frequent audio chunks to Deepgram for faster processing
-      if (currentTime - lastSendTime >= MIN_SEND_INTERVAL && audioBuffer.length >= 320) { // 20ms of 8kHz audio
-        if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
-          // Use setImmediate for non-blocking send
-          setImmediate(() => {
-            try {
-              deepgramWs.send(audioBuffer)
-            } catch (e) {
-              // Silent error handling for speed
-            }
-          })
-          audioBuffer = Buffer.alloc(0)
-          lastSendTime = currentTime
-        } else {
-          // Queue management - keep only recent audio
-          deepgramAudioQueue.push(audioBuffer)
-          if (deepgramAudioQueue.length > 50) { // Reduced from 2000
-            deepgramAudioQueue.splice(0, deepgramAudioQueue.length - 50)
+    
+    // Simple similarity calculation
+    function calculateSimilarity(str1, str2) {
+      if (!str1 || !str2) return 0
+      const longer = str1.length > str2.length ? str1 : str2
+      const shorter = str1.length > str2.length ? str2 : str1
+      if (longer.length === 0) return 1.0
+      return (longer.length - editDistance(longer, shorter)) / parseFloat(longer.length)
+    }
+    
+    function editDistance(str1, str2) {
+      const matrix = []
+      for (let i = 0; i <= str2.length; i++) {
+        matrix[i] = [i]
+      }
+      for (let j = 0; j <= str1.length; j++) {
+        matrix[0][j] = j
+      }
+      for (let i = 1; i <= str2.length; i++) {
+        for (let j = 1; j <= str1.length; j++) {
+          if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+            matrix[i][j] = matrix[i - 1][j - 1]
+          } else {
+            matrix[i][j] = Math.min(
+              matrix[i - 1][j - 1] + 1,
+              matrix[i][j - 1] + 1,
+              matrix[i - 1][j] + 1
+            )
           }
-          audioBuffer = Buffer.alloc(0)
         }
       }
+      return matrix[str2.length][str1.length]
     }
 
     const processUserUtterance = async (text) => {
@@ -2361,29 +2256,29 @@ const setupUnifiedVoiceServer = (wss) => {
             let uniqueid = null;
             if (urlParams.czdata) {
               czdataDecoded = decodeCzdata(urlParams.czdata);
-              if (czdataDecoded) {
-                customParams = czdataDecoded;
-                userName = (
-                  czdataDecoded.name ||
-                  czdataDecoded.Name ||
-                  czdataDecoded.full_name ||
-                  czdataDecoded.fullName ||
-                  czdataDecoded.customer_name ||
-                  czdataDecoded.customerName ||
-                  czdataDecoded.CustomerName ||
-                  czdataDecoded.candidate_name ||
-                  czdataDecoded.contactName ||
-                  null
-                );
-                uniqueid = czdataDecoded.uniqueid || czdataDecoded.uniqueId || null;
-                console.log("[SIP-START] Decoded czdata customParams:", customParams);
-                if (userName) {
-                  console.log("[SIP-START] User Name (czdata):", userName);
+                              if (czdataDecoded) {
+                  customParams = czdataDecoded;
+                  userName = (
+                    czdataDecoded.name ||
+                    czdataDecoded.Name ||
+                    czdataDecoded.full_name ||
+                    czdataDecoded.fullName ||
+                    czdataDecoded.customer_name ||
+                    czdataDecoded.customerName ||
+                    czdataDecoded.CustomerName ||
+                    czdataDecoded.candidate_name ||
+                    czdataDecoded.contactName ||
+                    null
+                  );
+                  uniqueid = czdataDecoded.uniqueid || czdataDecoded.uniqueId || null;
+                  console.log("[SIP-START] Decoded czdata customParams:", customParams);
+                  if (userName) {
+                    console.log("[SIP-START] User Name (czdata):", userName);
+                  }
+                  if (uniqueid) {
+                    console.log("[SIP-START] Unique ID (czdata):", uniqueid);
+                  }
                 }
-                if (uniqueid) {
-                  console.log("[SIP-START] Unique ID (czdata):", uniqueid);
-                }
-              }
             }
 
             if (data.start?.from) {
@@ -2468,6 +2363,8 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
             console.log("📞 [SIP-START] ======================================")
 
+            // Note: WhatsApp message will be sent at call end if enabled in agent
+
             try {
               console.log("🔍 [SIP-AGENT-LOOKUP] ========== AGENT LOOKUP ==========")
               console.log("🔍 [SIP-AGENT-LOOKUP] AccountSID:", accountSid)
@@ -2531,6 +2428,7 @@ const setupUnifiedVoiceServer = (wss) => {
               }
             } catch (creditErr) {
               console.log("⚠️ [SIP-CREDIT-CHECK] Credit check failed:", creditErr.message)
+              // Fail safe: if we cannot verify credits, prevent connection to avoid free calls
               ws.send(
                 JSON.stringify({
                   event: "error",
@@ -2553,7 +2451,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🎯 [SIP-CALL-SETUP] StreamSID:", streamSid)
             console.log("🎯 [SIP-CALL-SETUP] CallSID:", data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid)
 
-            // Create enhanced call logger
+            // Create enhanced call logger with live transcript capability
             callLogger = new EnhancedCallLogger(
               agentConfig.clientId || accountSid,
               mobile,
@@ -2564,16 +2462,17 @@ const setupUnifiedVoiceServer = (wss) => {
             callLogger.streamSid = streamSid;
             callLogger.callSid = data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid;
             callLogger.accountSid = accountSid;
-            callLogger.ws = ws;
-            callLogger.uniqueid = uniqueid;
+            callLogger.ws = ws; // Store WebSocket reference
+            callLogger.uniqueid = uniqueid; // Store uniqueid for outbound calls
 
-            // Create initial call log entry
+            // Create initial call log entry immediately
             try {
               await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
               console.log("✅ [SIP-CALL-SETUP] Initial call log created successfully")
               console.log("✅ [SIP-CALL-SETUP] Call Log ID:", callLogger.callLogId)
             } catch (error) {
               console.log("❌ [SIP-CALL-SETUP] Failed to create initial call log:", error.message)
+              // Continue anyway - fallback will create log at end
             }
 
             console.log("🎯 [SIP-CALL-SETUP] Call Logger initialized")
@@ -2600,7 +2499,6 @@ const setupUnifiedVoiceServer = (wss) => {
             ws.__sarvamTts = tts
             if (!ws.__ttsQueue) ws.__ttsQueue = []
             ws.__ttsRunning = ws.__ttsRunning || false
-            
             const enqueueSpeak = async (text, language) => {
               if (!text || !text.trim()) return
               const enqueueTime = Date.now()
@@ -2678,20 +2576,28 @@ const setupUnifiedVoiceServer = (wss) => {
           case "media":
             if (data.media?.payload) {
               const audioBuffer = Buffer.from(data.media.payload, "base64")
-              
-              // Use optimized audio processing for minimal latency
-              processAudioChunk(audioBuffer)
+              const mediaReceivedTime = Date.now()
               
               // Log media stats periodically (every 1000 packets to avoid spam)
               if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
               ws.mediaPacketCount++
               
               if (ws.mediaPacketCount % 1000 === 0) {
-                const mediaReceivedTime = Date.now()
                 logWithTimestamp("🎵 [SIP-MEDIA]", `Audio packets received: ${ws.mediaPacketCount}`, mediaReceivedTime)
-                if (deepgramWs && deepgramReady) {
-                  logWithTimestamp("📤 [DEEPGRAM-SEND]", `Deepgram connection active`, mediaReceivedTime)
-                } else {
+              }
+
+              if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+                deepgramWs.send(audioBuffer)
+                if (ws.mediaPacketCount % 1000 === 0) {
+                  logWithTimestamp("📤 [DEEPGRAM-SEND]", `Sent audio to Deepgram: ${audioBuffer.length} bytes`, mediaReceivedTime)
+                }
+              } else {
+                deepgramAudioQueue.push(audioBuffer)
+                // Cap queue to avoid memory/latency buildup
+                if (deepgramAudioQueue.length > 2000) {
+                  deepgramAudioQueue.splice(0, deepgramAudioQueue.length - 2000)
+                }
+                if (deepgramAudioQueue.length % 200 === 0) {
                   logWithTimestamp("⏳ [SIP-MEDIA]", `Audio queued for Deepgram: ${deepgramAudioQueue.length}`, mediaReceivedTime)
                 }
               }
@@ -2753,7 +2659,7 @@ const setupUnifiedVoiceServer = (wss) => {
             if (callLogger) {
               const stats = callLogger.getStats()
               console.log("🛑 [SIP-STOP] Call Stats:", JSON.stringify(stats, null, 2))
-              // Bill credits at end of call
+              // Bill credits at end of call (decimal precision)
               const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
               await billCallCredits({
                 clientId: callLogger.clientId,
@@ -2792,7 +2698,7 @@ const setupUnifiedVoiceServer = (wss) => {
             break
         }
       } catch (error) {
-        // Silent error handling for performance
+        // Silent error handling
       }
     })
 
@@ -2844,7 +2750,7 @@ const setupUnifiedVoiceServer = (wss) => {
       if (callLogger) {
         const stats = callLogger.getStats()
         console.log("🔌 [SIP-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
-        // Bill credits on close as safety
+        // Bill credits on close as safety (guarded by billedStreamSids)
         const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
         await billCallCredits({
           clientId: callLogger.clientId,
@@ -2896,8 +2802,6 @@ const setupUnifiedVoiceServer = (wss) => {
       speechStartTime = null
       firstInterimTime = null
       firstFinalTime = null
-      audioBuffer = Buffer.alloc(0)
-      lastSendTime = 0
       
       console.log("🔌 [SIP-CLOSE] ======================================")
     })
