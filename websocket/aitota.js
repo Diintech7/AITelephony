@@ -1330,6 +1330,7 @@ const processWithOpenAIStreaming = async (
     }
 
     let sawFirstDelta = false
+    let charsSinceLastFlush = 0
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -1350,9 +1351,11 @@ const processWithOpenAIStreaming = async (
           if (delta) {
             if (!sawFirstDelta) { sawFirstDelta = true; console.log(`⚡ [LLM-FIRST-TOKEN] ${firstTokenTimer.end()}ms`) }
             buffer += delta
+            charsSinceLastFlush += delta.length
             // Flush on punctuation for immediate TTS
-            if (/[\.!?]\s$/.test(buffer)) {
+            if (/[\.!?]\s$/.test(buffer) || charsSinceLastFlush >= 40) {
               await flushSentences()
+              charsSinceLastFlush = 0
             }
           }
         } catch (_) {}
@@ -1745,9 +1748,9 @@ class SimplifiedSarvamTTSProcessor {
     }
     sarvamTracker.checkpoint('SARVAM_CONNECTED', { requestId })
 
-    // Minimal wait for config ack to avoid race (tightened)
+    // Slightly longer wait for config ack to avoid reconnect penalty
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 100) {
+    while (!this.configAcked && Date.now() - configWaitStart < 200) {
       await new Promise(r => setTimeout(r, 10))
     }
     const configWaitTime = Date.now() - configWaitStart
@@ -1984,13 +1987,13 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("sample_rate", "8000")
         deepgramUrl.searchParams.append("channels", "1")
         deepgramUrl.searchParams.append("encoding", "linear16")
-        deepgramUrl.searchParams.append("model", "nova-2")
+        deepgramUrl.searchParams.append("model", "nova-2-phonecall")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         // keep formatting minimal to avoid incompatibilities
         deepgramUrl.searchParams.append("smart_format", "true")
-        // conservative endpointing to avoid 400s
-        deepgramUrl.searchParams.append("endpointing", "25")
+        // balanced endpointing for faster finals with accuracy
+        deepgramUrl.searchParams.append("endpointing", "20")
         deepgramUrl.searchParams.append("vad_events", "true")
         // remove utterance_end_ms to avoid server-side validation issues
 
@@ -2159,7 +2162,7 @@ const setupUnifiedVoiceServer = (wss) => {
           // Process immediately with setImmediate for faster execution
           setImmediate(async () => {
             try { 
-              await processUserUtterance(userUtteranceBuffer) 
+          await processUserUtterance(userUtteranceBuffer)
             } catch (_) {}
           })
           userUtteranceBuffer = ""
