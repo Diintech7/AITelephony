@@ -1987,10 +1987,10 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("sample_rate", "8000")
         deepgramUrl.searchParams.append("channels", "1")
         deepgramUrl.searchParams.append("encoding", "linear16")
-        deepgramUrl.searchParams.append("model", "nova-2-phonecall")
+        deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
-        // keep formatting minimal to avoid incompatibilities
+        // keep formatting minimal to avoid incompatibilities (disable if 400 persists)
         deepgramUrl.searchParams.append("smart_format", "true")
         // balanced endpointing for faster finals with accuracy
         deepgramUrl.searchParams.append("endpointing", "20")
