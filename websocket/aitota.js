@@ -1989,14 +1989,9 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("punctuate", "true")
-        deepgramUrl.searchParams.append("diarize", "false")
-        deepgramUrl.searchParams.append("multichannel", "false")
         deepgramUrl.searchParams.append("endpointing", "10")
         deepgramUrl.searchParams.append("vad_events", "true")
         deepgramUrl.searchParams.append("utterance_end_ms", "500")
-        deepgramUrl.searchParams.append("no_delay", "true")
-        deepgramUrl.searchParams.append("filler_words", "false")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
