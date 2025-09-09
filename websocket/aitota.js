@@ -1495,6 +1495,14 @@ class SimplifiedSarvamTTSProcessor {
     this.totalAudioBytes = 0
     this.currentSarvamRequestId = 0
     this.configAcked = false
+    this.firstAudioPending = false
+    this.firstAudioSentAt = 0
+    // Prewarm connection to reduce first-audio latency
+    setImmediate(() => {
+      if (!this.isInterrupted) {
+        this.connectSarvamWs(0).catch(() => {})
+      }
+    })
   }
 
   interrupt() {
@@ -1534,7 +1542,8 @@ class SimplifiedSarvamTTSProcessor {
 
     return new Promise((resolve, reject) => {
       this.sarvamWs.onopen = () => {
-        if (this.isInterrupted || this.currentSarvamRequestId !== requestId) {
+        // Allow prewarm (requestId === 0) even if currentSarvamRequestId differs
+        if (this.isInterrupted || (requestId !== 0 && this.currentSarvamRequestId !== requestId)) {
           try { this.sarvamWs.close() } catch (_) {}
           return reject(new Error("Sarvam WS opened for outdated request"))
         }
@@ -1558,8 +1567,8 @@ class SimplifiedSarvamTTSProcessor {
             output_audio_codec: 'linear16',
             output_audio_bitrate: '128k',
             speech_sample_rate: 8000,
-            min_buffer_size: 50,
-            max_chunk_length: 150,
+            min_buffer_size: 20,
+            max_chunk_length: 90,
             enable_preprocessing: false,
           }
         }
@@ -1580,6 +1589,11 @@ class SimplifiedSarvamTTSProcessor {
           }
           if (msg.type === 'audio' && msg.data?.audio) {
             const audioBuffer = Buffer.from(msg.data.audio, 'base64')
+            if (this.firstAudioPending && this.firstAudioSentAt) {
+              console.log(`⚡ [SARVAM-FIRST-AUDIO] ${Date.now() - this.firstAudioSentAt}ms from text-send`)
+              this.firstAudioPending = false
+              this.firstAudioSentAt = 0
+            }
             this.audioQueue.push(audioBuffer)
             this.totalAudioBytes += audioBuffer.length
             if (!this.isStreamingToSIP) this.startStreamingToSIP(requestId)
@@ -1609,20 +1623,24 @@ class SimplifiedSarvamTTSProcessor {
     const connected = await this.connectSarvamWs(requestId).catch(() => false)
     if (!connected || this.isInterrupted || this.currentSarvamRequestId !== requestId) return
 
-    // Wait briefly for config ack to avoid race
+    // Minimal wait for config ack to avoid race (tightened)
     const startWait = Date.now()
-    while (!this.configAcked && Date.now() - startWait < 400) {
-      await new Promise(r => setTimeout(r, 20))
+    while (!this.configAcked && Date.now() - startWait < 150) {
+      await new Promise(r => setTimeout(r, 15))
     }
     const textMessage = { type: 'text', data: { text } }
-    try { this.sarvamWs.send(JSON.stringify(textMessage)) } catch (_) {}
+    try { 
+      this.firstAudioPending = true
+      this.firstAudioSentAt = Date.now()
+      this.sarvamWs.send(JSON.stringify(textMessage)) 
+    } catch (_) {}
     try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
     console.log(`📝 [SARVAM-WS] Sent text (${text.length} chars) and flush`)
 
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        console.log('⚠️ [SARVAM-WS] No audio received within 1.5s after text; attempting one reconnect and resend')
+        console.log('⚠️ [SARVAM-WS] No audio within 0.4s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1631,16 +1649,20 @@ class SimplifiedSarvamTTSProcessor {
           const reconnected = await this.connectSarvamWs(requestId).catch(() => false)
           if (reconnected && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
             const startWait2 = Date.now()
-            while (!this.configAcked && Date.now() - startWait2 < 400) {
-              await new Promise(r => setTimeout(r, 20))
+            while (!this.configAcked && Date.now() - startWait2 < 150) {
+              await new Promise(r => setTimeout(r, 15))
             }
-            try { this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text } })) } catch (_) {}
+            try { 
+              this.firstAudioPending = true
+              this.firstAudioSentAt = Date.now()
+              this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text } })) 
+            } catch (_) {}
             try { this.sarvamWs.send(JSON.stringify({ type: 'flush' })) } catch (_) {}
             console.log('🔁 [SARVAM-WS] Resent text after reconnect')
           }
         } catch (_) {}
       }
-    }, 700)
+    }, 400)
 
     if (this.callLogger && text) {
       this.callLogger.logAIResponse(text, this.language)
