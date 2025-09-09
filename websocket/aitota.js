@@ -1681,6 +1681,10 @@ class SimplifiedSarvamTTSProcessor {
             try {
               this.sarvamWs.send(JSON.stringify({ type: 'pong' }))
             } catch (_) {}
+          } else if (msg.type === 'error') {
+            console.log(`❌ [SARVAM-WS] Config error: ${msg.message || 'Unknown error'}`)
+            // If config fails, try to proceed anyway
+            this.configAcked = true
           }
           if (msg.type === 'audio' && msg.data?.audio) {
             const audioBuffer = Buffer.from(msg.data.audio, 'base64')
@@ -1755,13 +1759,15 @@ class SimplifiedSarvamTTSProcessor {
 
     // Wait for config ack with timeout
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 150) {
+    while (!this.configAcked && Date.now() - configWaitStart < 100) {
       await new Promise(r => setTimeout(r, 5))
     }
     
     // If no config ack, proceed anyway to avoid blocking
     if (!this.configAcked) {
       console.log('⚠️ [SARVAM-WS] No config ACK received, proceeding anyway')
+      // Force config ack to true to avoid blocking
+      this.configAcked = true
     }
     const configWaitTime = Date.now() - configWaitStart
     sarvamTracker.checkpoint('SARVAM_CONFIG_ACK', { waitTime: configWaitTime, acked: this.configAcked })
@@ -1793,8 +1799,8 @@ class SimplifiedSarvamTTSProcessor {
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 1200 })
-        console.log('⚠️ [SARVAM-WS] No audio within 1.2s after text; reconnect+resend')
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 600 })
+        console.log('⚠️ [SARVAM-WS] No audio within 0.6s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1803,8 +1809,12 @@ class SimplifiedSarvamTTSProcessor {
           const reconnected = await this.connectSarvamWs(requestId).catch(() => false)
           if (reconnected && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
             const startWait2 = Date.now()
-            while (!this.configAcked && Date.now() - startWait2 < 100) {
+            while (!this.configAcked && Date.now() - startWait2 < 50) {
               await new Promise(r => setTimeout(r, 5))
+            }
+            // Force config ack if still not received
+            if (!this.configAcked) {
+              this.configAcked = true
             }
             try { 
               if (cleanText && cleanText.trim().length > 0) {
@@ -1825,7 +1835,7 @@ class SimplifiedSarvamTTSProcessor {
           sarvamTracker.checkpoint('SARVAM_RECONNECT_ERROR', { error: error.message })
       }
       }
-    }, 1200)
+    }, 600)
 
     if (this.callLogger && cleanText) {
       this.callLogger.logAIResponse(cleanText, this.language)
@@ -2010,11 +2020,13 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("model", "nova-3")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
-        // keep formatting minimal to avoid incompatibilities (disable if 400 persists)
         deepgramUrl.searchParams.append("smart_format", "true")
-        // ultra-aggressive endpointing for ~500ms final transcript
-        deepgramUrl.searchParams.append("endpointing", "15")
+        // Optimized endpointing for best accuracy and low latency
+        deepgramUrl.searchParams.append("endpointing", "300")
         deepgramUrl.searchParams.append("vad_events", "true")
+        // Additional parameters for better performance
+        deepgramUrl.searchParams.append("no_delay", "true")
+        deepgramUrl.searchParams.append("filler_words", "false")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
