@@ -1512,6 +1512,7 @@ class SimplifiedSarvamTTSProcessor {
     this.firstAudioPending = false
     this.firstAudioSentAt = 0
     this.hasPendingText = false
+    this.primerSent = false
     // Prewarm connection to reduce first-audio latency
     setImmediate(() => {
       if (!this.isInterrupted) {
@@ -1643,6 +1644,15 @@ class SimplifiedSarvamTTSProcessor {
     const startWait = Date.now()
     while (!this.configAcked && Date.now() - startWait < 300) {
       await new Promise(r => setTimeout(r, 20))
+    }
+    // Send a language-valid primer once to nudge first audio (no reconnects)
+    if (!this.primerSent) {
+      try {
+        const primer = (this.sarvamLanguage || '').toLowerCase().startsWith('hi') ? 'हाँ' : 'ok'
+        this.sarvamWs.send(JSON.stringify({ type: 'text', data: { text: primer } }))
+        this.sarvamWs.send(JSON.stringify({ type: 'flush' }))
+        this.primerSent = true
+      } catch (_) {}
     }
     const textMessage = { type: 'text', data: { text } }
     try { 
