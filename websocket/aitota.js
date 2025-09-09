@@ -1713,8 +1713,8 @@ class SimplifiedSarvamTTSProcessor {
 
     // Minimal wait for config ack to avoid race (tightened)
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 150) {
-      await new Promise(r => setTimeout(r, 15))
+    while (!this.configAcked && Date.now() - configWaitStart < 100) {
+      await new Promise(r => setTimeout(r, 10))
     }
     const configWaitTime = Date.now() - configWaitStart
     sarvamTracker.checkpoint('SARVAM_CONFIG_ACK', { waitTime: configWaitTime, acked: this.configAcked })
@@ -1742,8 +1742,8 @@ class SimplifiedSarvamTTSProcessor {
     // Warn if no audio arrives shortly
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 400 })
-        console.log('⚠️ [SARVAM-WS] No audio within 0.4s after text; reconnect+resend')
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 300 })
+        console.log('⚠️ [SARVAM-WS] No audio within 0.3s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1752,8 +1752,8 @@ class SimplifiedSarvamTTSProcessor {
           const reconnected = await this.connectSarvamWs(requestId).catch(() => false)
           if (reconnected && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
             const startWait2 = Date.now()
-            while (!this.configAcked && Date.now() - startWait2 < 150) {
-              await new Promise(r => setTimeout(r, 15))
+            while (!this.configAcked && Date.now() - startWait2 < 100) {
+              await new Promise(r => setTimeout(r, 10))
             }
             try { 
               this.firstAudioPending = true
@@ -1768,7 +1768,7 @@ class SimplifiedSarvamTTSProcessor {
           sarvamTracker.checkpoint('SARVAM_RECONNECT_ERROR', { error: error.message })
         }
       }
-    }, 400)
+    }, 300)
 
     if (this.callLogger && text) {
       this.callLogger.logAIResponse(text, this.language)
@@ -1937,6 +1937,9 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramAudioQueue = []
     let sttTimer = null
     let lastInterimProcessAt = 0
+    let speechStartTime = null
+    let firstInterimTime = null
+    let firstFinalTime = null
 
     const connectToDeepgram = async () => {
       try {
@@ -1951,7 +1954,9 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "100")
+        deepgramUrl.searchParams.append("endpointing", "25")
+        deepgramUrl.searchParams.append("vad_events", "true")
+        deepgramUrl.searchParams.append("utterance_end_ms", "1000")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1999,7 +2004,24 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const handleDeepgramResponse = async (data) => {
-      if (data.type === "Results") {
+      // Handle VAD (Voice Activity Detection) events for faster processing
+      if (data.type === "SpeechStarted") {
+        speechStartTime = Date.now()
+        logWithTimestamp("🎤 [VAD]", "Speech started - user is speaking", speechStartTime)
+      } else if (data.type === "SpeechEnded") {
+        const speechEndTime = Date.now()
+        const speechDuration = speechStartTime ? speechEndTime - speechStartTime : 'unknown'
+        logWithTimestamp("🎤 [VAD]", `Speech ended - processing any pending audio (duration: ${speechDuration}ms)`, speechEndTime)
+        
+        // Force process any pending utterance buffer immediately
+        if (userUtteranceBuffer.trim()) {
+          logWithTimestamp("⚡ [VAD-TRIGGERED]", `Processing pending utterance: "${userUtteranceBuffer.trim()}"`, speechEndTime)
+          try { 
+            await processUserUtterance(userUtteranceBuffer.trim()) 
+          } catch (_) {}
+          userUtteranceBuffer = ""
+        }
+      } else if (data.type === "Results") {
         if (!sttTimer) {
           sttTimer = createTimer("STT_TRANSCRIPTION")
           logWithTimestamp("🎤 [DEEPGRAM-RESULT]", "Started STT transcription timer")
@@ -2019,9 +2041,20 @@ const setupUnifiedVoiceServer = (wss) => {
             
             logWithTimestamp("🔄 [DEEPGRAM-INTERIM]", `Received interim: "${text}" (${text.length} chars, confidence: ${(confidence * 100).toFixed(1)}%)`)
             
-            if ((endsWithPunct || longPhrase || nowTs - lastInterimProcessAt > 500) && nowTs - lastInterimProcessAt > 250) {
+            // More aggressive early processing for faster response
+            const shouldProcessEarly = (
+              endsWithPunct || 
+              longPhrase || 
+              (text.length >= 3 && confidence > 0.8) || // High confidence short phrases
+              (text.length >= 5 && confidence > 0.6) || // Medium confidence medium phrases
+              nowTs - lastInterimProcessAt > 300 // Reduced from 500ms
+            ) && nowTs - lastInterimProcessAt > 100 // Reduced from 250ms
+            
+            if (shouldProcessEarly) {
               lastInterimProcessAt = nowTs
-              logWithTimestamp("⚡ [EARLY-PROCESSING]", `Processing interim: "${text}" (confidence: ${(confidence * 100).toFixed(1)}%)`)
+              if (!firstInterimTime) firstInterimTime = nowTs
+              const timeFromSpeechStart = speechStartTime ? nowTs - speechStartTime : 'unknown'
+              logWithTimestamp("⚡ [EARLY-PROCESSING]", `Processing interim: "${text}" (confidence: ${(confidence * 100).toFixed(1)}%, ${timeFromSpeechStart}ms from speech start)`)
               try { await processUserUtterance(text) } catch (_) {}
             }
           }
@@ -2029,7 +2062,11 @@ const setupUnifiedVoiceServer = (wss) => {
           if (is_final) {
             const finalTime = Date.now()
             const sttDuration = sttTimer.end()
+            if (!firstFinalTime) firstFinalTime = finalTime
+            const timeFromSpeechStart = speechStartTime ? finalTime - speechStartTime : 'unknown'
+            const timeFromFirstInterim = firstInterimTime ? finalTime - firstInterimTime : 'unknown'
             logWithTimestamp("✅ [DEEPGRAM-FINAL]", `Final transcript: "${transcript.trim()}" (${sttDuration}ms, confidence: ${(confidence * 100).toFixed(1)}%)`)
+            logWithTimestamp("📊 [PERFORMANCE]", `Final result: ${timeFromSpeechStart}ms from speech start, ${timeFromFirstInterim}ms from first interim`)
             sttTimer = null
 
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
@@ -2720,6 +2757,9 @@ const setupUnifiedVoiceServer = (wss) => {
       callDirection = "inbound"
       agentConfig = null
       sttTimer = null
+      speechStartTime = null
+      firstInterimTime = null
+      firstFinalTime = null
       
       console.log("🔌 [SIP-CLOSE] ======================================")
     })
