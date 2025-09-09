@@ -2017,16 +2017,13 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("sample_rate", "8000")
         deepgramUrl.searchParams.append("channels", "1")
         deepgramUrl.searchParams.append("encoding", "linear16")
-        deepgramUrl.searchParams.append("model", "nova-3")
+        deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
         // Optimized endpointing for best accuracy and low latency
         deepgramUrl.searchParams.append("endpointing", "300")
         deepgramUrl.searchParams.append("vad_events", "true")
-        // Additional parameters for better performance
-        deepgramUrl.searchParams.append("no_delay", "true")
-        deepgramUrl.searchParams.append("filler_words", "false")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
