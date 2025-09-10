@@ -891,7 +891,7 @@ class EnhancedCallLogger {
   }
 }
 
-// AI response generation (OpenAI) - language-agnostic
+// AI response generation (OpenAI) - non-streaming fallback
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
@@ -966,6 +966,109 @@ const processWithOpenAI = async (
   } catch (error) {
     console.error(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
     return null
+  }
+}
+
+// AI response generation (OpenAI) - streaming for low latency
+const processWithOpenAIStream = async (
+  userMessage,
+  conversationHistory,
+  agentConfig,
+  userName = null,
+  onPartial = null,
+) => {
+  const timer = createTimer("LLM_STREAMING")
+  let accumulated = ""
+  try {
+    if (!API_KEYS.openai) {
+      console.warn("⚠️ [LLM-STREAM] OPENAI_API_KEY not set; skipping generation")
+      return null
+    }
+
+    const basePrompt = agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely."
+    const firstMessage = (agentConfig?.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If specifics (address/phone/timings) are missing, say you don't have that info.",
+      "End with a brief follow-up question.",
+      "Keep reply under 100 tokens.",
+    ].join(" ")
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
+      : null
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
+      ...conversationHistory.slice(-6),
+      { role: "user", content: userMessage },
+    ]
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        max_tokens: 120,
+        temperature: 0.3,
+        stream: true,
+      }),
+    })
+
+    if (!response.ok || !response.body) {
+      console.error(`❌ [LLM-STREAM] ${timer.end()}ms - HTTP ${response.status}`)
+      return null
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder("utf-8")
+    let buffer = ""
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() || ""
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        if (trimmed === "data: [DONE]") {
+          break
+        }
+        if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.slice(5).trim()
+          try {
+            const chunk = JSON.parse(jsonStr)
+            const delta = chunk.choices?.[0]?.delta?.content || ""
+            if (delta) {
+              accumulated += delta
+              if (typeof onPartial === "function") {
+                try { await onPartial(accumulated) } catch (_) {}
+              }
+            }
+          } catch (_) {
+            // ignore malformed lines
+          }
+        }
+      }
+    }
+
+    console.log(`🕒 [LLM-STREAM] ${timer.end()}ms - Streaming completed (${accumulated.length} chars)`) 
+
+    if (accumulated && !(/[?]\s*$/.test(accumulated))) {
+      accumulated = `${accumulated} Is there anything else I can help you with?`.trim()
+    }
+    return accumulated || null
+  } catch (error) {
+    console.error(`❌ [LLM-STREAM] ${timer.end()}ms - Error: ${error.message}`)
+    return accumulated || null
   }
 }
 
@@ -1331,14 +1434,49 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         // Language detection removed
 
-        // Run all AI detections in parallel for efficiency
+        // Run AI response generation
         console.log("🔍 [USER-UTTERANCE] Running AI detections...")
         
-        // AI detections removed; only generate AI response if configured
+        // AI detections removed; only generate AI response(s)
         const disconnectionIntent = "CONTINUE"
         const leadStatus = "maybe"
         const whatsappRequest = "NO_REQUEST"
-        const aiResponse = await processWithOpenAI(text, conversationHistory, callLogger, agentConfig, userName)
+
+        let finalResponse = null
+
+        if (API_KEYS.openai) {
+          // Streaming path for low latency; send partials to TTS sequentially
+          console.log("🌊 [USER-UTTERANCE] Using streaming LLM → TTS path")
+          const tts = new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
+          currentTTS = tts
+          let lastLen = 0
+          const shouldFlush = (prev, curr) => {
+            const delta = curr.slice(prev)
+            if (delta.length >= 60) return true
+            return /[.!?]\s?$/.test(curr)
+          }
+          finalResponse = await processWithOpenAIStream(
+            text,
+            conversationHistory,
+            agentConfig,
+            userName,
+            async (partial) => {
+              if (processingRequestId !== currentRequestId) return
+              if (!partial || partial.length <= lastLen) return
+              if (!shouldFlush(lastLen, partial)) return
+              const chunk = partial.slice(lastLen)
+              lastLen = partial.length
+              if (chunk.trim()) {
+                try {
+                  await tts.synthesizeAndStream(chunk.trim())
+                } catch (_) {}
+              }
+            }
+          )
+        } else {
+          // Fallback non-streaming path
+          finalResponse = await processWithOpenAI(text, conversationHistory, callLogger, agentConfig, userName)
+        }
 
         // Update call logger with detected information
         if (callLogger) {
@@ -1363,16 +1501,13 @@ const setupUnifiedVoiceServer = (wss) => {
           return
         }
 
-        if (processingRequestId === currentRequestId && aiResponse) {
-          console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-          console.log("🎤 [USER-UTTERANCE] Starting TTS...")
-          
-          currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
-          await currentTTS.synthesizeAndStream(aiResponse)
+        if (processingRequestId === currentRequestId && finalResponse) {
+          console.log("🤖 [USER-UTTERANCE] AI Response:", finalResponse)
+          console.log("🎤 [USER-UTTERANCE] TTS completed/streamed")
 
           conversationHistory.push(
             { role: "user", content: text },
-            { role: "assistant", content: aiResponse }
+            { role: "assistant", content: finalResponse }
           )
 
           if (conversationHistory.length > 10) {
