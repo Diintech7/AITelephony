@@ -2065,11 +2065,11 @@ class SimplifiedDeepgramTTSProcessor {
     url.searchParams.append('sample_rate', '8000')
 
     return new Promise((resolve, reject) => {
-      this.dgWs = new WebSocket(url.toString(), {
+      this.dgWs = new WebSocket(url.toString(), undefined, {
         headers: { Authorization: `Token ${API_KEYS.deepgram}` },
       })
 
-      this.dgWs.onopen = () => {
+      this.dgWs.on('open', () => {
         if (this.isInterrupted || this.currentRequestId !== requestId) {
           try { this.dgWs.close() } catch (_) {}
           return reject(new Error('DG WS opened for outdated request'))
@@ -2077,36 +2077,36 @@ class SimplifiedDeepgramTTSProcessor {
         this.dgWsConnected = true
         console.log(`🎙️ [DG-WS] Connected (model=${model}, lang=${this.language})`)
         resolve(true)
-      }
+      })
 
-      this.dgWs.onmessage = (event) => {
+      this.dgWs.on('message', (data, isBinary) => {
         if (this.isInterrupted || this.currentRequestId !== requestId) return
         try {
-          if (Buffer.isBuffer(event.data)) {
-            const audioBuffer = event.data
+          if (isBinary || Buffer.isBuffer(data)) {
+            const audioBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data)
             this.audioQueue.push(audioBuffer)
             if (!this.isStreamingToSIP) this.startStreamingToSIP(requestId)
-          } else if (typeof event.data === 'string') {
+          } else if (typeof data === 'string') {
             try {
-              const msg = JSON.parse(event.data)
+              const msg = JSON.parse(data)
               if (msg?.type === 'error') {
                 logWithTimestamp('❌ [DG-WS]', `Error from TTS: ${msg?.message || 'unknown'}`)
               }
             } catch (_) {}
           }
         } catch (_) {}
-      }
+      })
 
-      this.dgWs.onerror = (err) => {
+      this.dgWs.on('error', (err) => {
         this.dgWsConnected = false
         console.log(`❌ [DG-WS] Socket error: ${err?.message || err}`)
         reject(err)
-      }
+      })
 
-      this.dgWs.onclose = () => {
+      this.dgWs.on('close', () => {
         this.dgWsConnected = false
         console.log('🔌 [DG-WS] Closed')
-      }
+      })
     })
   }
 
