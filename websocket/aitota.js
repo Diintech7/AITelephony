@@ -1334,11 +1334,11 @@ const setupUnifiedVoiceServer = (wss) => {
         // Run all AI detections in parallel for efficiency
         console.log("🔍 [USER-UTTERANCE] Running AI detections...")
         
-        // AI detections removed; proceed without external analysis
+        // AI detections removed; only generate AI response if configured
         const disconnectionIntent = "CONTINUE"
         const leadStatus = "maybe"
         const whatsappRequest = "NO_REQUEST"
-        const aiResponse = null
+        const aiResponse = await processWithOpenAI(text, conversationHistory, callLogger, agentConfig, userName)
 
         // Update call logger with detected information
         if (callLogger) {
