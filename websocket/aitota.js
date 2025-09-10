@@ -1832,7 +1832,7 @@ class SimplifiedSarvamTTSProcessor {
             speech_sample_rate: 8000,
             min_buffer_size: 50,
             max_chunk_length: 150,
-            enable_preprocessing: false,
+            enable_preprocessing: true,
           }
         }
         try {
@@ -2020,154 +2020,6 @@ class SimplifiedSarvamTTSProcessor {
   }
 }
 
-// Deepgram TTS processor (streaming WS → SIP)
-class SimplifiedDeepgramTTSProcessor {
-  constructor(language, ws, streamSid, callLogger = null) {
-    this.language = language
-    this.ws = ws
-    this.streamSid = streamSid
-    this.callLogger = callLogger
-    this.dgWs = null
-    this.dgWsConnected = false
-    this.isInterrupted = false
-    this.audioQueue = []
-    this.isStreamingToSIP = false
-    this.currentRequestId = 0
-  }
-
-  interrupt() {
-    this.isInterrupted = true
-    try { if (this.dgWs && this.dgWs.readyState === WebSocket.OPEN) this.dgWs.close() } catch (_) {}
-    this.dgWsConnected = false
-    this.audioQueue = []
-    this.isStreamingToSIP = false
-  }
-
-  reset(newLanguage) {
-    this.interrupt()
-    if (newLanguage) this.language = newLanguage
-    this.isInterrupted = false
-  }
-
-  getDeepgramModelForLanguage(lang) {
-    const l = (lang || 'en').toLowerCase()
-    if (l.startsWith('hi')) return 'aura-hera-hi'
-    if (l.startsWith('en')) return 'aura-asteria-en'
-    return 'aura-asteria-en'
-  }
-
-  async connectDgWs(requestId) {
-    if (this.dgWsConnected && this.dgWs?.readyState === WebSocket.OPEN) return true
-    const model = this.getDeepgramModelForLanguage(this.language)
-    const url = new URL('wss://api.deepgram.com/v1/speak')
-    url.searchParams.append('model', model)
-    url.searchParams.append('encoding', 'linear16')
-    url.searchParams.append('sample_rate', '8000')
-
-    return new Promise((resolve, reject) => {
-      this.dgWs = new WebSocket(url.toString(), undefined, {
-        headers: { Authorization: `Token ${API_KEYS.deepgram}` },
-      })
-
-      this.dgWs.on('open', () => {
-        if (this.isInterrupted || this.currentRequestId !== requestId) {
-          try { this.dgWs.close() } catch (_) {}
-          return reject(new Error('DG WS opened for outdated request'))
-        }
-        this.dgWsConnected = true
-        console.log(`🎙️ [DG-WS] Connected (model=${model}, lang=${this.language})`)
-        resolve(true)
-      })
-
-      this.dgWs.on('message', (data, isBinary) => {
-        if (this.isInterrupted || this.currentRequestId !== requestId) return
-        try {
-          if (isBinary || Buffer.isBuffer(data)) {
-            const audioBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data)
-            this.audioQueue.push(audioBuffer)
-            if (!this.isStreamingToSIP) this.startStreamingToSIP(requestId)
-          } else if (typeof data === 'string') {
-            try {
-              const msg = JSON.parse(data)
-              if (msg?.type === 'error') {
-                logWithTimestamp('❌ [DG-WS]', `Error from TTS: ${msg?.message || 'unknown'}`)
-              }
-            } catch (_) {}
-          }
-        } catch (_) {}
-      })
-
-      this.dgWs.on('error', (err) => {
-        this.dgWsConnected = false
-        console.log(`❌ [DG-WS] Socket error: ${err?.message || err}`)
-        reject(err)
-      })
-
-      this.dgWs.on('close', () => {
-        this.dgWsConnected = false
-        console.log('🔌 [DG-WS] Closed')
-      })
-    })
-  }
-
-  async synthesizeAndStream(text) {
-    if (this.isInterrupted) return
-    if (!text || !text.trim()) { logWithTimestamp('⚠️ [DG-WS]', 'Skipping empty text'); return }
-    const requestId = ++this.currentRequestId
-    this.audioQueue = []
-    this.isStreamingToSIP = false
-
-    const connected = await this.connectDgWs(requestId).catch(() => false)
-    if (!connected || this.isInterrupted || this.currentRequestId !== requestId) return
-
-    const speakMsg = { type: 'Speak', text }
-    try { this.dgWs.send(JSON.stringify(speakMsg)) } catch (_) {}
-    try { this.dgWs.send(JSON.stringify({ type: 'Flush' })) } catch (_) {}
-
-    if (this.callLogger && text) {
-      this.callLogger.logAIResponse(text, this.language)
-    }
-  }
-
-  async startStreamingToSIP(requestId) {
-    if (this.isStreamingToSIP || this.isInterrupted || this.currentRequestId !== requestId) return
-    this.isStreamingToSIP = true
-
-    const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
-
-    let sentChunks = 0
-    let sentBytes = 0
-    while (!this.isInterrupted && this.currentRequestId === requestId) {
-      if (this.audioQueue.length === 0) { await new Promise(r => setTimeout(r, 30)); continue }
-      const audioBuffer = this.audioQueue.shift()
-      let position = 0
-      while (position < audioBuffer.length && !this.isInterrupted && this.currentRequestId === requestId) {
-        const remaining = audioBuffer.length - position
-        const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-        const chunk = audioBuffer.slice(position, position + chunkSize)
-        const mediaMessage = { event: 'media', streamSid: this.streamSid, media: { payload: chunk.toString('base64') } }
-        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-          try { this.ws.send(JSON.stringify(mediaMessage)); sentChunks++; sentBytes += chunk.length } catch (e) { this.isInterrupted = true; break }
-        } else { this.isInterrupted = true; break }
-        if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-          const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-          const delayMs = Math.max(chunkDurationMs - 2, 10)
-          await new Promise(res => setTimeout(res, delayMs))
-        }
-        position += chunkSize
-      }
-      if (sentChunks % 50 === 0 && sentChunks > 0) {
-        console.log(`🎧 [DG→SIP] Sent ${sentChunks} chunks, ${(sentBytes/1024).toFixed(1)} KB`)
-      }
-    }
-    this.isStreamingToSIP = false
-    console.log('🛑 [DG→SIP] Streaming stopped')
-  }
-}
-
 // Enhanced agent lookup function with isActive check
 const findAgentForCall = async (callData) => {
   const timer = createTimer("MONGODB_AGENT_LOOKUP")
@@ -2273,6 +2125,12 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramWs = null
     let deepgramReady = false
     let deepgramAudioQueue = []
+    // Buffer for paced sending (~100ms frames)
+    let deepgramSendBuffer = Buffer.alloc(0)
+    let deepgramPacer = null
+    let deepgramKeepAliveTimer = null
+    let lastAudioSentAt = 0
+    let deepgramConnectAttempts = 0
     let sttTimer = null
     let lastInterimProcessAt = 0
     let speechStartTime = null
@@ -2288,27 +2146,68 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("sample_rate", "8000")
         deepgramUrl.searchParams.append("channels", "1")
         deepgramUrl.searchParams.append("encoding", "linear16")
-        deepgramUrl.searchParams.append("model", "nova-2")
+        // Allow faster model selection via agent config; fallback to nova-2
+        const dgModel = (ws?.sessionAgentConfig?.sttModel || "nova-2").toString()
+        deepgramUrl.searchParams.append("model", dgModel)
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "25")
+        // Avoid tiny endpointing; rely on interim for responsiveness
+        deepgramUrl.searchParams.append("endpointing", "300")
         deepgramUrl.searchParams.append("vad_events", "true")
-        deepgramUrl.searchParams.append("utterance_end_ms", "1000")
+        deepgramUrl.searchParams.append("utterance_end_ms", "1200")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         })
 
+        // 5s connect timeout + jittered retry
+        deepgramConnectAttempts += 1
+        const connectTimeout = setTimeout(() => {
+          try { if (deepgramWs && deepgramWs.readyState === WebSocket.CONNECTING) deepgramWs.close() } catch (_) {}
+        }, 5000)
+
         deepgramWs.onopen = () => {
+          clearTimeout(connectTimeout)
           const connectTime = Date.now()
           const connectLatency = connectTime - dgConnectStart
           logWithTimestamp("🎤 [DEEPGRAM]", "Connection established", connectTime)
           logWithTimestamp("🕒 [DEEPGRAM-CONNECT]", `${connectLatency}ms`, connectTime)
           deepgramReady = true
-          logWithTimestamp("🎤 [DEEPGRAM]", `Processing queued audio packets: ${deepgramAudioQueue.length}`, connectTime)
-          deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
-          deepgramAudioQueue = []
+          // Move any queued audio into send buffer; pace at ~100ms frames
+          if (deepgramAudioQueue.length > 0) {
+            logWithTimestamp("🎤 [DEEPGRAM]", `Processing queued audio packets: ${deepgramAudioQueue.length}`, connectTime)
+            const concatenated = Buffer.concat(deepgramAudioQueue)
+            deepgramSendBuffer = Buffer.concat([deepgramSendBuffer, concatenated])
+            deepgramAudioQueue = []
+          }
+          // Start pacer
+          const SAMPLE_RATE = 8000
+          const BYTES_PER_SAMPLE = 2
+          const BYTES_PER_100MS = Math.floor((SAMPLE_RATE * BYTES_PER_SAMPLE) / 10) // 1600 bytes
+          if (deepgramPacer) { try { clearInterval(deepgramPacer) } catch (_) {} }
+          deepgramPacer = setInterval(() => {
+            if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) return
+            // Drain ~100ms per tick; if backlog large, occasionally send 2 chunks (~1.2-1.3x realtime)
+            let sendsThisTick = 0
+            const backlogChunks = Math.floor(deepgramSendBuffer.length / BYTES_PER_100MS)
+            const maxPerTick = backlogChunks > 20 ? 2 : 1
+            while (sendsThisTick < maxPerTick && deepgramSendBuffer.length >= BYTES_PER_100MS) {
+              const chunk = deepgramSendBuffer.subarray(0, BYTES_PER_100MS)
+              deepgramSendBuffer = deepgramSendBuffer.subarray(BYTES_PER_100MS)
+              try { deepgramWs.send(chunk); lastAudioSentAt = Date.now() } catch (_) { break }
+              sendsThisTick++
+            }
+          }, 100)
+          // KeepAlive if idle (no audio) every ~10s
+          if (deepgramKeepAliveTimer) { try { clearInterval(deepgramKeepAliveTimer) } catch (_) {} }
+          deepgramKeepAliveTimer = setInterval(() => {
+            if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) return
+            const idleMs = Date.now() - (lastAudioSentAt || 0)
+            if (idleMs > 9500) {
+              try { deepgramWs.send(JSON.stringify({ type: "KeepAlive" })) } catch (_) {}
+            }
+          }, 5000)
         }
 
         deepgramWs.onmessage = async (event) => {
@@ -2322,17 +2221,21 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         deepgramWs.onclose = () => {
+          try { clearTimeout(connectTimeout) } catch (_) {}
+          if (deepgramPacer) { try { clearInterval(deepgramPacer) } catch (_) {} deepgramPacer = null }
+          if (deepgramKeepAliveTimer) { try { clearInterval(deepgramKeepAliveTimer) } catch (_) {} deepgramKeepAliveTimer = null }
           console.log("🔌 [DEEPGRAM] Connection closed")
           deepgramReady = false
           // Attempt a quick reconnect if call still active
           try {
             if (ws && ws.readyState === WebSocket.OPEN) {
-              console.log("🔄 [DEEPGRAM] Attempting quick reconnect in 500ms...")
+              const backoff = 1000 + Math.floor(Math.random() * 1000)
+              console.log(`🔄 [DEEPGRAM] Attempting reconnect in ${backoff}ms... (attempt ${deepgramConnectAttempts + 1})`)
               setTimeout(() => {
                 if (!deepgramReady) {
                   connectToDeepgram().catch(() => {})
                 }
-              }, 500)
+              }, backoff)
             }
           } catch (_) {}
         }
@@ -2368,6 +2271,22 @@ const setupUnifiedVoiceServer = (wss) => {
         const transcript = data.channel?.alternatives?.[0]?.transcript
         const is_final = data.is_final
         const confidence = data.channel?.alternatives?.[0]?.confidence || 0
+
+        // Interim latency measurement (audio_cursor − transcript_cursor) if fields available
+        try {
+          const words = data.channel?.alternatives?.[0]?.words
+          const audioCursorMs = data?.metadata?.request?.received_audio_ms
+          if (Array.isArray(words) && words.length > 0 && typeof audioCursorMs === 'number') {
+            const lastWord = words[words.length - 1]
+            const transcriptCursorMs = Math.round(1000 * (lastWord.end || lastWord.end_time || 0))
+            if (transcriptCursorMs >= 0) {
+              const latencyMs = audioCursorMs - transcriptCursorMs
+              if (latencyMs >= -2000 && latencyMs <= 10000) {
+                logWithTimestamp("⏱️ [STT-LATENCY]", `${latencyMs}ms interim (audio−transcript)`)
+              }
+            }
+          }
+        } catch (_) {}
 
         if (transcript?.trim()) {
           // Opportunistic early processing on strong interim hypotheses
@@ -2806,8 +2725,8 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            // Initialize persistent Deepgram WS-based TTS processor and FIFO queue
-            const tts = new SimplifiedDeepgramTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            // Initialize persistent Sarvam WS-based TTS processor and FIFO queue
+            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             ws.__sarvamTts = tts
             if (!ws.__ttsQueue) ws.__ttsQueue = []
             ws.__ttsRunning = ws.__ttsRunning || false
@@ -2898,11 +2817,9 @@ const setupUnifiedVoiceServer = (wss) => {
                 logWithTimestamp("🎵 [SIP-MEDIA]", `Audio packets received: ${ws.mediaPacketCount}`, mediaReceivedTime)
               }
 
+              // Enqueue for paced sending (~100ms frames)
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
-                deepgramWs.send(audioBuffer)
-                if (ws.mediaPacketCount % 1000 === 0) {
-                  logWithTimestamp("📤 [DEEPGRAM-SEND]", `Sent audio to Deepgram: ${audioBuffer.length} bytes`, mediaReceivedTime)
-                }
+                deepgramSendBuffer = Buffer.concat([deepgramSendBuffer, audioBuffer])
               } else {
                 deepgramAudioQueue.push(audioBuffer)
                 // Cap queue to avoid memory/latency buildup
