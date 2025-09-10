@@ -16,7 +16,7 @@ const API_KEYS = {
 }
 
 // Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+if (!API_KEYS.deepgram || !API_KEYS.sarvam) {
   console.error("❌ Missing required API keys in environment variables")
   process.exit(1)
 }
@@ -99,6 +99,25 @@ const createTimer = (label) => {
     checkpoint: (checkpointName) => Date.now() - start,
   }
 }
+
+// Timestamped logging helper to show latency like [HH:MM:SS:ms]
+const formatTimeForLogs = () => {
+  const d = new Date()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  const ms = String(d.getMilliseconds()).padStart(3, '0')
+  return `${hh}:${mm}:${ss}:${ms}`
+}
+
+;(function patchConsoleForTimestamps() {
+  const origLog = console.log
+  const origError = console.error
+  const origWarn = console.warn
+  console.log = (...args) => origLog(`[${formatTimeForLogs()}]`, ...args)
+  console.error = (...args) => origError(`[${formatTimeForLogs()}]`, ...args)
+  console.warn = (...args) => origWarn(`[${formatTimeForLogs()}]`, ...args)
+})()
 
 // Language mappings and detection removed
 
@@ -872,7 +891,7 @@ class EnhancedCallLogger {
   }
 }
 
-// Simplified OpenAI processing
+// AI response generation (OpenAI) - language-agnostic
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
@@ -881,27 +900,25 @@ const processWithOpenAI = async (
   userName = null,
 ) => {
   const timer = createTimer("LLM_PROCESSING")
-
   try {
-    // Build a stricter system prompt that embeds firstMessage and sets answering policy
-    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
-    const firstMessage = (agentConfig.firstMessage || "").trim()
-    const knowledgeBlock = firstMessage
-      ? `FirstGreeting: "${firstMessage}"\n`
-      : ""
+    if (!API_KEYS.openai) {
+      console.warn("⚠️ [LLM-PROCESSING] OPENAI_API_KEY not set; skipping generation")
+      return null
+    }
 
+    const basePrompt = agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely."
+    const firstMessage = (agentConfig?.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
     const policyBlock = [
       "Answer strictly using the information provided above.",
-      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
-      "If the information is not present, reply briefly that you don't have that information.",
-      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
-      "Keep the entire reply under 100 tokens.",
+      "If specifics (address/phone/timings) are missing, say you don't have that info.",
+      "End with a brief follow-up question.",
+      "Keep reply under 100 tokens.",
     ].join(" ")
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
-
     const personalizationMessage = userName && userName.trim()
-      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
       : null
 
     const messages = [
@@ -926,21 +943,18 @@ const processWithOpenAI = async (
     })
 
     if (!response.ok) {
-      console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${response.status}`)
+      console.error(`❌ [LLM-PROCESSING] ${timer.end()}ms - HTTP ${response.status}`)
       return null
     }
 
     const data = await response.json()
-    let fullResponse = data.choices[0]?.message?.content?.trim()
-
+    let fullResponse = data.choices?.[0]?.message?.content?.trim() || null
     console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
 
-    // Ensure a follow-up question is present at the end (fixed English)
     if (fullResponse) {
       const needsFollowUp = !(/[?]\s*$/.test(fullResponse))
       if (needsFollowUp) {
-        const fu = "Is there anything else I can help you with?"
-        fullResponse = `${fullResponse} ${fu}`.trim()
+        fullResponse = `${fullResponse} Is there anything else I can help you with?`.trim()
       }
     }
 
@@ -950,177 +964,8 @@ const processWithOpenAI = async (
 
     return fullResponse
   } catch (error) {
-    console.log(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
+    console.error(`❌ [LLM-PROCESSING] ${timer.end()}ms - Error: ${error.message}`)
     return null
-  }
-}
-
-// Intelligent lead status detection using OpenAI
-const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory) => {
-  const timer = createTimer("LEAD_STATUS_DETECTION")
-  try {
-    const leadStatusPrompt = `Analyze the user's interest level and conversation context to determine the appropriate lead status.
-
-Available statuses:
-- 'vvi' (very very interested): User shows high enthusiasm, asks detailed questions, wants to proceed immediately
-- 'maybe': User shows some interest but is hesitant or needs more information
-- 'enrolled': User has agreed to enroll, sign up, or take action
-- 'junk_lead': User is clearly not interested, rude, or spam
-- 'not_required': User says they don't need the service
-- 'enrolled_other': User mentions they're already enrolled elsewhere
-- 'decline': User explicitly declines the offer
-- 'not_eligible': User doesn't meet requirements
-- 'wrong_number': Wrong number or person
-- 'hot_followup': User wants to be called back later with high interest
-- 'cold_followup': User wants to be called back later with low interest
-- 'schedule': User wants to schedule something
-- 'not_connected': Call didn't connect or was very short
-
-User message: "${userMessage}"
-Conversation context: ${conversationHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join(' | ')}
-
-Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on the user's current interest level and intent.`
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: leadStatusPrompt },
-        ],
-        max_tokens: 15,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      console.log(`❌ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
-      return "maybe" // Default to maybe on error
-    }
-
-    const data = await response.json()
-    const detectedStatus = data.choices[0]?.message?.content?.trim().toLowerCase()
-
-    // Validate the detected status
-    const validStatuses = ['vvi', 'maybe', 'enrolled', 'junk_lead', 'not_required', 'enrolled_other', 'decline', 'not_eligible', 'wrong_number', 'hot_followup', 'cold_followup', 'schedule', 'not_connected']
-    
-    if (validStatuses.includes(detectedStatus)) {
-      console.log(`🕒 [LEAD-STATUS-DETECTION] ${timer.end()}ms - Detected: ${detectedStatus}`)
-      return detectedStatus
-    } else {
-      console.log(`⚠️ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Invalid status detected: ${detectedStatus}, defaulting to maybe`)
-      return "maybe"
-    }
-  } catch (error) {
-    console.log(`❌ [LEAD-STATUS-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
-    return "maybe" // Default to maybe on error
-  }
-}
-
-// Intelligent call disconnection detection using OpenAI
-const detectCallDisconnectionIntent = async (userMessage, conversationHistory) => {
-  const timer = createTimer("DISCONNECTION_DETECTION")
-  try {
-    const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
-- "thank you", "thanks", "bye", "goodbye", "end call", "hang up"
-- "hold on", "wait", "not available", "busy", "call back later"
-- "not interested", "no thanks", "stop calling"
-- Any indication they want to end the conversation
-
-User message: "${userMessage}"
-
-Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they want to continue.`
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: disconnectionPrompt },
-        ],
-        max_tokens: 10,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
-      return "CONTINUE" // Default to continue on error
-    }
-
-    const data = await response.json()
-    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
-
-    if (result === "DISCONNECT") {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
-      return "DISCONNECT"
-    } else {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
-      return "CONTINUE"
-    }
-  } catch (error) {
-    console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
-    return "CONTINUE" // Default to continue on error
-  }
-}
-
-// Intelligent WhatsApp request detection using OpenAI
-const detectWhatsAppRequest = async (userMessage, conversationHistory) => {
-  const timer = createTimer("WHATSAPP_REQUEST_DETECTION")
-  try {
-    const whatsappPrompt = `Analyze if the user is asking for WhatsApp information, link, or contact details. Look for:
-- "WhatsApp", "whatsapp", "WA", "wa"
-- "send me", "share", "link", "contact", "number"
-- "message me", "text me", "connect on WhatsApp"
-- "send details", "share information"
-- Any request for digital communication or messaging
-
-User message: "${userMessage}"
-
-Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if not.`
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: whatsappPrompt },
-        ],
-        max_tokens: 15,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      console.log(`❌ [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
-      return "NO_REQUEST" // Default to no request on error
-    }
-
-    const data = await response.json()
-    const result = data.choices[0]?.message?.content?.trim().toUpperCase()
-
-    if (result === "WHATSAPP_REQUEST") {
-      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - User wants WhatsApp info`)
-      return "WHATSAPP_REQUEST"
-    } else {
-      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - No WhatsApp request`)
-      return "NO_REQUEST"
-    }
-  } catch (error) {
-    console.log(`❌ [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
-    return "NO_REQUEST" // Default to no request on error
   }
 }
 
@@ -1489,24 +1334,15 @@ const setupUnifiedVoiceServer = (wss) => {
         // Run all AI detections in parallel for efficiency
         console.log("🔍 [USER-UTTERANCE] Running AI detections...")
         
-        const [
-          disconnectionIntent, 
-          leadStatus, 
-          whatsappRequest, 
-          aiResponse
-        ] = await Promise.all([
-          detectCallDisconnectionIntent(text, conversationHistory),
-          detectLeadStatusWithOpenAI(text, conversationHistory),
-          detectWhatsAppRequest(text, conversationHistory),
-          processWithOpenAI(text, conversationHistory, callLogger, agentConfig)
-        ])
+        // AI detections removed; proceed without external analysis
+        const disconnectionIntent = "CONTINUE"
+        const leadStatus = "maybe"
+        const whatsappRequest = "NO_REQUEST"
+        const aiResponse = null
 
         // Update call logger with detected information
         if (callLogger) {
           callLogger.updateLeadStatus(leadStatus)
-          if (whatsappRequest === "WHATSAPP_REQUEST") {
-            callLogger.markWhatsAppRequested()
-          }
         }
         
         if (disconnectionIntent === "DISCONNECT") {
