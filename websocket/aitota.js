@@ -1471,7 +1471,15 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          if (currentTTS && isProcessing) {
+          // Only interrupt if the new text is a significant change (not just an extension)
+          const trimmed = transcript.trim()
+          const significantChange = currentTTS && isProcessing && (
+            !lastProcessedText || (
+              trimmed.length > 10 &&
+              !trimmed.startsWith(lastProcessedText)
+            )
+          )
+          if (significantChange) {
             currentTTS.interrupt()
             isProcessing = false
             processingRequestId++
@@ -1580,7 +1588,7 @@ const setupUnifiedVoiceServer = (wss) => {
           let lastLen = 0
           const shouldFlush = (prev, curr) => {
             const delta = curr.slice(prev)
-            if (delta.length >= 60) return true
+            if (delta.length >= 20) return true
             return /[.!?]\s?$/.test(curr)
           }
           finalResponse = await processWithGeminiStream(
@@ -1601,6 +1609,13 @@ const setupUnifiedVoiceServer = (wss) => {
               }
             }
           )
+          // Ensure any trailing text after stream completion is also enqueued
+          if (finalResponse && finalResponse.length > lastLen) {
+            const tail = finalResponse.slice(lastLen).trim()
+            if (tail) {
+              try { await tts.enqueueText(tail) } catch (_) {}
+            }
+          }
         } else if (API_KEYS.openai) {
           // Fallback: if Gemini not set but OpenAI is, use old non-streaming
           finalResponse = await processWithGemini(text, conversationHistory, callLogger, agentConfig, userName)
