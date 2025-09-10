@@ -1315,8 +1315,10 @@ const processWithOpenAIStreaming = async (
     let firstEnqueue = true
     let firstTokenReceived = false
     let sentencesProcessed = 0
+    let hasReturnedEarly = false  // Prevent multiple early returns
     const maxSentencesBeforeReturn = 1  // Return after first sentence for minimal latency
     const enableEarlyReturn = true  // Enable early return for minimal latency
+    const earlyReturnTimeout = 2000  // Max time to wait before forcing early return
     
     // Enhanced sentence processing with immediate callbacks
     const processSentence = async (sentence) => {
@@ -1384,7 +1386,8 @@ const processWithOpenAIStreaming = async (
         sentencesProcessed++
         
         // Return early after processing first sentence for minimal latency
-        if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+        if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn && !hasReturnedEarly) {
+          hasReturnedEarly = true
           console.log(`[STREAM] Returning early after ${sentencesProcessed} sentence(s) for minimal latency`)
           return fullText
         }
@@ -1406,7 +1409,8 @@ const processWithOpenAIStreaming = async (
           sentencesProcessed++
           
           // Return early after processing first chunk
-          if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+          if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn && !hasReturnedEarly) {
+            hasReturnedEarly = true
             console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
             return fullText
           }
@@ -1428,7 +1432,8 @@ const processWithOpenAIStreaming = async (
           sentencesProcessed++
           
           // Return early after processing first chunk
-          if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+          if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn && !hasReturnedEarly) {
+            hasReturnedEarly = true
             console.log(`[STREAM] Returning early after ${sentencesProcessed} word chunk(s) for minimal latency`)
             return fullText
           }
@@ -1437,6 +1442,17 @@ const processWithOpenAIStreaming = async (
     }
 
     let sawFirstDelta = false
+    const streamStartTime = Date.now()
+    
+    // Set up timeout-based early return as fallback
+    const timeoutEarlyReturn = setTimeout(() => {
+      if (!hasReturnedEarly && enableEarlyReturn) {
+        hasReturnedEarly = true
+        console.log(`[STREAM] Timeout-based early return after ${earlyReturnTimeout}ms`)
+        return fullText
+      }
+    }, earlyReturnTimeout)
+    
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -1473,7 +1489,8 @@ const processWithOpenAIStreaming = async (
               await flushSentences()
               
               // Return early after first sentence for minimal latency
-              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn && !hasReturnedEarly) {
+                hasReturnedEarly = true
                 console.log(`[STREAM] Returning early after ${sentencesProcessed} sentence(s) for minimal latency`)
                 return fullText
               }
@@ -1484,7 +1501,8 @@ const processWithOpenAIStreaming = async (
               await flushSentences()
               
               // Return early after first chunk
-              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn && !hasReturnedEarly) {
+                hasReturnedEarly = true
                 console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
                 return fullText
               }
@@ -1495,7 +1513,8 @@ const processWithOpenAIStreaming = async (
               await processLongBuffer()
               
               // Return early after processing
-              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn && !hasReturnedEarly) {
+                hasReturnedEarly = true
                 console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
                 return fullText
               }
@@ -1506,7 +1525,8 @@ const processWithOpenAIStreaming = async (
               await processWordChunks()
               
               // Return early after processing
-              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn && !hasReturnedEarly) {
+                hasReturnedEarly = true
                 console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
                 return fullText
               }
@@ -1520,8 +1540,11 @@ const processWithOpenAIStreaming = async (
               sentencesProcessed++
               
               // Return immediately for short responses
-              console.log(`[STREAM] Returning immediately for short response: "${sentenceBuffer.trim()}"`)
-              return fullText
+              if (!hasReturnedEarly) {
+                hasReturnedEarly = true
+                console.log(`[STREAM] Returning immediately for short response: "${sentenceBuffer.trim()}"`)
+                return fullText
+              }
             }
           }
         } catch (e) {
@@ -1530,6 +1553,9 @@ const processWithOpenAIStreaming = async (
       }
     }
 
+    // Clear timeout
+    clearTimeout(timeoutEarlyReturn)
+    
     // Flush any remaining content
     if (sentenceBuffer.trim()) {
       await processSentence(sentenceBuffer.trim())
@@ -1799,13 +1825,13 @@ class SimplifiedSarvamTTSProcessor {
             target_language_code: this.sarvamLanguage,
             speaker: resolvedVoice,
             pitch: 0.0,
-            pace: 1.0,
+            pace: 1.2,  // Slightly faster speech
             loudness: 1.0,
             output_audio_codec: 'linear16',
             output_audio_bitrate: '128k',
             speech_sample_rate: 8000,
-            min_buffer_size: 50,
-            max_chunk_length: 150,
+            min_buffer_size: 20,  // Reduced for faster first audio
+            max_chunk_length: 100,  // Reduced for faster processing
             enable_preprocessing: false,
           }
         }
@@ -1875,10 +1901,10 @@ class SimplifiedSarvamTTSProcessor {
     }
     sarvamTracker.checkpoint('SARVAM_CONNECTED', { requestId })
 
-    // Minimal wait for config ack to avoid race (tightened)
+    // Wait for config ack with longer timeout to avoid reconnects
     const configWaitStart = Date.now()
-    while (!this.configAcked && Date.now() - configWaitStart < 100) {
-      await new Promise(r => setTimeout(r, 10))
+    while (!this.configAcked && Date.now() - configWaitStart < 500) {
+      await new Promise(r => setTimeout(r, 20))
     }
     const configWaitTime = Date.now() - configWaitStart
     sarvamTracker.checkpoint('SARVAM_CONFIG_ACK', { waitTime: configWaitTime, acked: this.configAcked })
@@ -1903,11 +1929,11 @@ class SimplifiedSarvamTTSProcessor {
     
     logWithTimestamp("📝 [SARVAM-WS]", `Sent text (${text.length} chars) and flush`)
 
-    // Warn if no audio arrives shortly
+    // Warn if no audio arrives shortly - increased timeout to reduce reconnects
     const audioWarnTimer = setTimeout(async () => {
       if (!this.isStreamingToSIP && this.audioQueue.length === 0 && this.currentSarvamRequestId === requestId && !this.isInterrupted) {
-        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 300 })
-        console.log('⚠️ [SARVAM-WS] No audio within 0.3s after text; reconnect+resend')
+        sarvamTracker.checkpoint('SARVAM_AUDIO_TIMEOUT', { timeout: 1000 })
+        console.log('⚠️ [SARVAM-WS] No audio within 1s after text; reconnect+resend')
         try {
           // One-shot reconnect and resend
           try { if (this.sarvamWs && this.sarvamWs.readyState === WebSocket.OPEN) this.sarvamWs.close() } catch (_) {}
@@ -1916,8 +1942,8 @@ class SimplifiedSarvamTTSProcessor {
           const reconnected = await this.connectSarvamWs(requestId).catch(() => false)
           if (reconnected && !this.isInterrupted && this.currentSarvamRequestId === requestId) {
             const startWait2 = Date.now()
-            while (!this.configAcked && Date.now() - startWait2 < 100) {
-              await new Promise(r => setTimeout(r, 10))
+            while (!this.configAcked && Date.now() - startWait2 < 500) {
+              await new Promise(r => setTimeout(r, 20))
             }
             try { 
               this.firstAudioPending = true
@@ -1932,7 +1958,7 @@ class SimplifiedSarvamTTSProcessor {
           sarvamTracker.checkpoint('SARVAM_RECONNECT_ERROR', { error: error.message })
         }
       }
-    }, 300)
+    }, 1000)
 
     if (this.callLogger && text) {
       this.callLogger.logAIResponse(text, this.language)
@@ -2117,7 +2143,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
-        deepgramUrl.searchParams.append("smart_format", "true")
+        deepgramUrl.searchParams.append("smart_format", "false")
         deepgramUrl.searchParams.append("endpointing", "25")
         deepgramUrl.searchParams.append("vad_events", "true")
         deepgramUrl.searchParams.append("utterance_end_ms", "1000")
