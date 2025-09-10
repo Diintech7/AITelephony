@@ -1249,7 +1249,7 @@ const processWithOpenAI = async (
   }
 }
 
-// OpenAI streaming with sentence-by-sentence enqueue to TTS
+// OpenAI streaming with immediate sentence-by-sentence processing
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -1309,24 +1309,106 @@ const processWithOpenAIStreaming = async (
     const decoder = new TextDecoder()
     let buffer = ""
     let fullText = ""
+    let sentenceBuffer = ""
+    let lastSentenceTime = Date.now()
 
     let firstEnqueue = true
+    let firstTokenReceived = false
+    
+    // Enhanced sentence processing with immediate callbacks
+    const processSentence = async (sentence) => {
+      if (!sentence || !sentence.trim()) return
+      
+      const sentenceText = sentence.trim()
+      fullText += (fullText ? " " : "") + sentenceText
+      
+      // Log to call logger
+      if (callLogger) {
+        callLogger.logAIResponse(sentenceText, detectedLanguage)
+      }
+      
+      // Trigger first enqueue callback
+      if (firstEnqueue) {
+        firstEnqueue = false
+        firstTokenReceived = true
+        if (callbacks?.onFirstEnqueue) {
+          try { 
+            callbacks.onFirstEnqueue(Date.now()) 
+            console.log(`[STREAM] First token received at ${Date.now()}`)
+          } catch (e) {
+            console.log(`[STREAM] Error in onFirstEnqueue: ${e.message}`)
+          }
+        }
+      }
+      
+      // Trigger sentence ready callback for immediate processing
+      if (callbacks?.onSentenceReady) {
+        try {
+          await callbacks.onSentenceReady(sentenceText)
+          console.log(`[STREAM] Sentence processed immediately: "${sentenceText}"`)
+        } catch (e) {
+          console.log(`[STREAM] Error in onSentenceReady: ${e.message}`)
+        }
+      }
+      
+      // Enqueue to TTS for immediate playback
+      if (ws?.__enqueueSpeak) {
+        try {
+          await ws.__enqueueSpeak(sentenceText, detectedLanguage)
+          console.log(`[STREAM] Sentence enqueued to TTS: "${sentenceText}"`)
+        } catch (e) {
+          console.log(`[STREAM] Error enqueuing to TTS: ${e.message}`)
+        }
+      }
+    }
+
+    // Enhanced sentence flushing with better punctuation detection
     const flushSentences = async () => {
-      const parts = buffer.split(/(?<=[\.!?])\s+/)
-      // Keep last partial in buffer
-      buffer = parts.pop() || ""
+      // Split on sentence boundaries (period, exclamation, question mark, and some Indian punctuation)
+      const sentenceRegex = /(?<=[\.!?\u0964\u0965])\s+/
+      const parts = sentenceBuffer.split(sentenceRegex)
+      
+      // Keep last partial sentence in buffer
+      sentenceBuffer = parts.pop() || ""
+      
+      // Process complete sentences immediately
       for (const part of parts) {
         const text = part.trim()
         if (!text) continue
-        fullText += (fullText ? " " : "") + text
-        if (callLogger) callLogger.logAIResponse(text, detectedLanguage)
-        if (firstEnqueue) {
-          firstEnqueue = false
-          if (callbacks?.onFirstEnqueue) {
-            try { callbacks.onFirstEnqueue(Date.now()) } catch (_) {}
-          }
+        
+        await processSentence(text)
+        lastSentenceTime = Date.now()
+      }
+    }
+
+    // Process partial sentences if they're getting too long (fallback)
+    const processLongBuffer = async () => {
+      if (sentenceBuffer.length > 100) { // If buffer gets too long, process it
+        const words = sentenceBuffer.split(/\s+/)
+        if (words.length > 10) { // If more than 10 words, process first half
+          const midPoint = Math.floor(words.length / 2)
+          const firstHalf = words.slice(0, midPoint).join(' ')
+          const secondHalf = words.slice(midPoint).join(' ')
+          
+          await processSentence(firstHalf)
+          sentenceBuffer = secondHalf
+          lastSentenceTime = Date.now()
         }
-        if (ws?.__enqueueSpeak) await ws.__enqueueSpeak(text, detectedLanguage)
+      }
+    }
+
+    // Process word chunks for very fast responses (optional)
+    const processWordChunks = async () => {
+      if (sentenceBuffer.length > 50 && sentenceBuffer.includes(' ')) {
+        const words = sentenceBuffer.split(/\s+/)
+        if (words.length >= 5) { // Process first 5 words
+          const chunk = words.slice(0, 5).join(' ')
+          const remaining = words.slice(5).join(' ')
+          
+          await processSentence(chunk)
+          sentenceBuffer = remaining
+          lastSentenceTime = Date.now()
+        }
       }
     }
 
@@ -1334,47 +1416,76 @@ const processWithOpenAIStreaming = async (
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      
       const chunk = decoder.decode(value, { stream: true })
-      // SSE-style: lines starting with data:
       const lines = chunk.split(/\n/)
+      
       for (const line of lines) {
         const trimmed = line.trim()
         if (!trimmed.startsWith("data:")) continue
+        
         const dataStr = trimmed.slice(5).trim()
         if (dataStr === "[DONE]") {
           await flushSentences()
           break
         }
+        
         try {
           const obj = JSON.parse(dataStr)
           const delta = obj?.choices?.[0]?.delta?.content || ""
+          
           if (delta) {
-            if (!sawFirstDelta) { sawFirstDelta = true; console.log(`⚡ [LLM-FIRST-TOKEN] ${firstTokenTimer.end()}ms`) }
+            if (!sawFirstDelta) { 
+              sawFirstDelta = true
+              const firstTokenTime = firstTokenTimer.end()
+              console.log(`⚡ [LLM-FIRST-TOKEN] ${firstTokenTime}ms`)
+            }
+            
             buffer += delta
-            // Flush on punctuation for immediate TTS
-            if (/[\.!?]\s$/.test(buffer)) {
+            sentenceBuffer += delta
+            
+            // Immediate processing on sentence completion
+            if (/[\.!?\u0964\u0965]\s*$/.test(sentenceBuffer)) {
               await flushSentences()
             }
+            
+            // Also process on commas and semicolons for faster response (optional)
+            if (/[,;]\s*$/.test(sentenceBuffer) && sentenceBuffer.length > 20) {
+              await flushSentences()
+            }
+            
+            // Fallback processing for long buffers
+            if (Date.now() - lastSentenceTime > 2000) { // 2 seconds timeout
+              await processLongBuffer()
+            }
+            
+            // Process word chunks for faster response (1 second timeout)
+            if (Date.now() - lastSentenceTime > 1000) { // 1 second timeout for word chunks
+              await processWordChunks()
+            }
+            
+            // Process very short responses immediately (like "Yes", "No", "OK")
+            if (sentenceBuffer.trim().length > 0 && 
+                /^(yes|no|ok|okay|sure|alright|thanks?|thank you|bye|goodbye)$/i.test(sentenceBuffer.trim())) {
+              await processSentence(sentenceBuffer.trim())
+              sentenceBuffer = ""
+            }
           }
-        } catch (_) {}
+        } catch (e) {
+          // Silent error handling for malformed JSON
+        }
       }
     }
 
     // Flush any remaining content
-    if (buffer.trim()) {
-      const text = buffer.trim()
-      fullText += (fullText ? " " : "") + text
-      if (callLogger) callLogger.logAIResponse(text, detectedLanguage)
-      if (firstEnqueue) {
-        firstEnqueue = false
-        if (callbacks?.onFirstEnqueue) {
-          try { callbacks.onFirstEnqueue(Date.now()) } catch (_) {}
-        }
-      }
-      if (ws?.__enqueueSpeak) await ws.__enqueueSpeak(text, detectedLanguage)
+    if (sentenceBuffer.trim()) {
+      await processSentence(sentenceBuffer.trim())
     }
 
-    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Completed (total=${Date.now()-llmStart}ms)`) 
+    const totalTime = Date.now() - llmStart
+    console.log(`🕒 [LLM-STREAMING] ${timer.end()}ms - Completed (total=${totalTime}ms)`) 
+    console.log(`[STREAM] Full response: "${fullText}"`)
+    
     return fullText || null
   } catch (error) {
     console.log(`❌ [LLM-STREAMING] ${timer.end()}ms - Error: ${error.message}`)
@@ -2134,7 +2245,7 @@ const setupUnifiedVoiceServer = (wss) => {
           agentConfig,
           ws,
           streamSid,
-          null,
+          userName,
           {
             onFirstEnqueue: (enqueueTs) => {
               const latency = enqueueTs - llmStartTime
@@ -2143,6 +2254,21 @@ const setupUnifiedVoiceServer = (wss) => {
                 textLength: text.length,
                 timeFromUtterance: latency 
               })
+              console.log(`[STREAM] First token received at ${enqueueTs}`)
+            },
+            onSentenceReady: async (sentence) => {
+              // Immediately process this sentence for TTS
+              console.log(`[STREAM] Processing sentence immediately: "${sentence}"`)
+              
+              // The sentence is already being processed in the streaming function
+              // This callback allows for additional custom processing if needed
+              try {
+                // Add any custom processing here if needed
+                // For example, you could add custom logging, analytics, etc.
+                console.log(`[STREAM] Custom processing for sentence: "${sentence}"`)
+              } catch (error) {
+                console.log(`[STREAM] Error in custom sentence processing: ${error.message}`)
+              }
             }
           }
         )
