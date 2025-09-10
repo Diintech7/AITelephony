@@ -2020,6 +2020,154 @@ class SimplifiedSarvamTTSProcessor {
   }
 }
 
+// Deepgram TTS processor (streaming WS → SIP)
+class SimplifiedDeepgramTTSProcessor {
+  constructor(language, ws, streamSid, callLogger = null) {
+    this.language = language
+    this.ws = ws
+    this.streamSid = streamSid
+    this.callLogger = callLogger
+    this.dgWs = null
+    this.dgWsConnected = false
+    this.isInterrupted = false
+    this.audioQueue = []
+    this.isStreamingToSIP = false
+    this.currentRequestId = 0
+  }
+
+  interrupt() {
+    this.isInterrupted = true
+    try { if (this.dgWs && this.dgWs.readyState === WebSocket.OPEN) this.dgWs.close() } catch (_) {}
+    this.dgWsConnected = false
+    this.audioQueue = []
+    this.isStreamingToSIP = false
+  }
+
+  reset(newLanguage) {
+    this.interrupt()
+    if (newLanguage) this.language = newLanguage
+    this.isInterrupted = false
+  }
+
+  getDeepgramModelForLanguage(lang) {
+    const l = (lang || 'en').toLowerCase()
+    if (l.startsWith('hi')) return 'aura-hera-hi'
+    if (l.startsWith('en')) return 'aura-asteria-en'
+    return 'aura-asteria-en'
+  }
+
+  async connectDgWs(requestId) {
+    if (this.dgWsConnected && this.dgWs?.readyState === WebSocket.OPEN) return true
+    const model = this.getDeepgramModelForLanguage(this.language)
+    const url = new URL('wss://api.deepgram.com/v1/speak')
+    url.searchParams.append('model', model)
+    url.searchParams.append('encoding', 'linear16')
+    url.searchParams.append('sample_rate', '8000')
+
+    return new Promise((resolve, reject) => {
+      this.dgWs = new WebSocket(url.toString(), {
+        headers: { Authorization: `Token ${API_KEYS.deepgram}` },
+      })
+
+      this.dgWs.onopen = () => {
+        if (this.isInterrupted || this.currentRequestId !== requestId) {
+          try { this.dgWs.close() } catch (_) {}
+          return reject(new Error('DG WS opened for outdated request'))
+        }
+        this.dgWsConnected = true
+        console.log(`🎙️ [DG-WS] Connected (model=${model}, lang=${this.language})`)
+        resolve(true)
+      }
+
+      this.dgWs.onmessage = (event) => {
+        if (this.isInterrupted || this.currentRequestId !== requestId) return
+        try {
+          if (Buffer.isBuffer(event.data)) {
+            const audioBuffer = event.data
+            this.audioQueue.push(audioBuffer)
+            if (!this.isStreamingToSIP) this.startStreamingToSIP(requestId)
+          } else if (typeof event.data === 'string') {
+            try {
+              const msg = JSON.parse(event.data)
+              if (msg?.type === 'error') {
+                logWithTimestamp('❌ [DG-WS]', `Error from TTS: ${msg?.message || 'unknown'}`)
+              }
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+
+      this.dgWs.onerror = (err) => {
+        this.dgWsConnected = false
+        console.log(`❌ [DG-WS] Socket error: ${err?.message || err}`)
+        reject(err)
+      }
+
+      this.dgWs.onclose = () => {
+        this.dgWsConnected = false
+        console.log('🔌 [DG-WS] Closed')
+      }
+    })
+  }
+
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
+    if (!text || !text.trim()) { logWithTimestamp('⚠️ [DG-WS]', 'Skipping empty text'); return }
+    const requestId = ++this.currentRequestId
+    this.audioQueue = []
+    this.isStreamingToSIP = false
+
+    const connected = await this.connectDgWs(requestId).catch(() => false)
+    if (!connected || this.isInterrupted || this.currentRequestId !== requestId) return
+
+    const speakMsg = { type: 'Speak', text }
+    try { this.dgWs.send(JSON.stringify(speakMsg)) } catch (_) {}
+    try { this.dgWs.send(JSON.stringify({ type: 'Flush' })) } catch (_) {}
+
+    if (this.callLogger && text) {
+      this.callLogger.logAIResponse(text, this.language)
+    }
+  }
+
+  async startStreamingToSIP(requestId) {
+    if (this.isStreamingToSIP || this.isInterrupted || this.currentRequestId !== requestId) return
+    this.isStreamingToSIP = true
+
+    const SAMPLE_RATE = 8000
+    const BYTES_PER_SAMPLE = 2
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+
+    let sentChunks = 0
+    let sentBytes = 0
+    while (!this.isInterrupted && this.currentRequestId === requestId) {
+      if (this.audioQueue.length === 0) { await new Promise(r => setTimeout(r, 30)); continue }
+      const audioBuffer = this.audioQueue.shift()
+      let position = 0
+      while (position < audioBuffer.length && !this.isInterrupted && this.currentRequestId === requestId) {
+        const remaining = audioBuffer.length - position
+        const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+        const chunk = audioBuffer.slice(position, position + chunkSize)
+        const mediaMessage = { event: 'media', streamSid: this.streamSid, media: { payload: chunk.toString('base64') } }
+        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+          try { this.ws.send(JSON.stringify(mediaMessage)); sentChunks++; sentBytes += chunk.length } catch (e) { this.isInterrupted = true; break }
+        } else { this.isInterrupted = true; break }
+        if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+          const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
+          const delayMs = Math.max(chunkDurationMs - 2, 10)
+          await new Promise(res => setTimeout(res, delayMs))
+        }
+        position += chunkSize
+      }
+      if (sentChunks % 50 === 0 && sentChunks > 0) {
+        console.log(`🎧 [DG→SIP] Sent ${sentChunks} chunks, ${(sentBytes/1024).toFixed(1)} KB`)
+      }
+    }
+    this.isStreamingToSIP = false
+    console.log('🛑 [DG→SIP] Streaming stopped')
+  }
+}
+
 // Enhanced agent lookup function with isActive check
 const findAgentForCall = async (callData) => {
   const timer = createTimer("MONGODB_AGENT_LOOKUP")
@@ -2658,8 +2806,8 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            // Initialize persistent Sarvam WS-based TTS processor and FIFO queue
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            // Initialize persistent Deepgram WS-based TTS processor and FIFO queue
+            const tts = new SimplifiedDeepgramTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             ws.__sarvamTts = tts
             if (!ws.__ttsQueue) ws.__ttsQueue = []
             ws.__ttsRunning = ws.__ttsRunning || false
