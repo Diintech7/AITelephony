@@ -100,6 +100,8 @@ const createTimer = (label) => {
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 // Timestamped logging helper to show latency like [HH:MM:SS:ms]
 const formatTimeForLogs = () => {
   const d = new Date()
@@ -928,7 +930,7 @@ const processWithOpenAI = async (
       { role: "user", content: userMessage },
     ]
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const makeRequest = () => fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -941,6 +943,19 @@ const processWithOpenAI = async (
         temperature: 0.3,
       }),
     })
+
+    // Simple retry with backoff on 429/5xx
+    let response = await makeRequest()
+    if (!response.ok && (response.status === 429 || response.status >= 500)) {
+      console.warn(`⚠️ [LLM-PROCESSING] HTTP ${response.status} - retrying in 250ms`)
+      await sleep(250)
+      response = await makeRequest()
+      if (!response.ok && (response.status === 429 || response.status >= 500)) {
+        console.warn(`⚠️ [LLM-PROCESSING] HTTP ${response.status} - retrying in 500ms`)
+        await sleep(500)
+        response = await makeRequest()
+      }
+    }
 
     if (!response.ok) {
       console.error(`❌ [LLM-PROCESSING] ${timer.end()}ms - HTTP ${response.status}`)
@@ -1007,7 +1022,7 @@ const processWithOpenAIStream = async (
       { role: "user", content: userMessage },
     ]
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const makeRequest = () => fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1021,6 +1036,19 @@ const processWithOpenAIStream = async (
         stream: true,
       }),
     })
+
+    // Simple retry with backoff on 429/5xx
+    let response = await makeRequest()
+    if (!response.ok && (response.status === 429 || response.status >= 500)) {
+      console.warn(`⚠️ [LLM-STREAM] HTTP ${response.status} - retrying in 250ms`)
+      await sleep(250)
+      response = await makeRequest()
+      if (!response.ok && (response.status === 429 || response.status >= 500)) {
+        console.warn(`⚠️ [LLM-STREAM] HTTP ${response.status} - retrying in 500ms`)
+        await sleep(500)
+        response = await makeRequest()
+      }
+    }
 
     if (!response.ok || !response.body) {
       console.error(`❌ [LLM-STREAM] ${timer.end()}ms - HTTP ${response.status}`)
