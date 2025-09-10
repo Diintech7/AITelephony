@@ -1249,7 +1249,7 @@ const processWithOpenAI = async (
   }
 }
 
-// OpenAI streaming with immediate sentence-by-sentence processing
+// OpenAI streaming with immediate sentence-by-sentence processing and early return
 const processWithOpenAIStreaming = async (
   userMessage,
   conversationHistory,
@@ -1314,6 +1314,9 @@ const processWithOpenAIStreaming = async (
 
     let firstEnqueue = true
     let firstTokenReceived = false
+    let sentencesProcessed = 0
+    const maxSentencesBeforeReturn = 1  // Return after first sentence for minimal latency
+    const enableEarlyReturn = true  // Enable early return for minimal latency
     
     // Enhanced sentence processing with immediate callbacks
     const processSentence = async (sentence) => {
@@ -1378,6 +1381,13 @@ const processWithOpenAIStreaming = async (
         
         await processSentence(text)
         lastSentenceTime = Date.now()
+        sentencesProcessed++
+        
+        // Return early after processing first sentence for minimal latency
+        if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+          console.log(`[STREAM] Returning early after ${sentencesProcessed} sentence(s) for minimal latency`)
+          return fullText
+        }
       }
     }
 
@@ -1393,6 +1403,13 @@ const processWithOpenAIStreaming = async (
           await processSentence(firstHalf)
           sentenceBuffer = secondHalf
           lastSentenceTime = Date.now()
+          sentencesProcessed++
+          
+          // Return early after processing first chunk
+          if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+            console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
+            return fullText
+          }
         }
       }
     }
@@ -1408,6 +1425,13 @@ const processWithOpenAIStreaming = async (
           await processSentence(chunk)
           sentenceBuffer = remaining
           lastSentenceTime = Date.now()
+          sentencesProcessed++
+          
+          // Return early after processing first chunk
+          if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+            console.log(`[STREAM] Returning early after ${sentencesProcessed} word chunk(s) for minimal latency`)
+            return fullText
+          }
         }
       }
     }
@@ -1447,21 +1471,45 @@ const processWithOpenAIStreaming = async (
             // Immediate processing on sentence completion
             if (/[\.!?\u0964\u0965]\s*$/.test(sentenceBuffer)) {
               await flushSentences()
+              
+              // Return early after first sentence for minimal latency
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+                console.log(`[STREAM] Returning early after ${sentencesProcessed} sentence(s) for minimal latency`)
+                return fullText
+              }
             }
             
             // Also process on commas and semicolons for faster response (optional)
             if (/[,;]\s*$/.test(sentenceBuffer) && sentenceBuffer.length > 20) {
               await flushSentences()
+              
+              // Return early after first chunk
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+                console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
+                return fullText
+              }
             }
             
             // Fallback processing for long buffers
             if (Date.now() - lastSentenceTime > 2000) { // 2 seconds timeout
               await processLongBuffer()
+              
+              // Return early after processing
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+                console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
+                return fullText
+              }
             }
             
             // Process word chunks for faster response (1 second timeout)
             if (Date.now() - lastSentenceTime > 1000) { // 1 second timeout for word chunks
               await processWordChunks()
+              
+              // Return early after processing
+              if (enableEarlyReturn && sentencesProcessed >= maxSentencesBeforeReturn) {
+                console.log(`[STREAM] Returning early after ${sentencesProcessed} chunk(s) for minimal latency`)
+                return fullText
+              }
             }
             
             // Process very short responses immediately (like "Yes", "No", "OK")
@@ -1469,6 +1517,11 @@ const processWithOpenAIStreaming = async (
                 /^(yes|no|ok|okay|sure|alright|thanks?|thank you|bye|goodbye)$/i.test(sentenceBuffer.trim())) {
               await processSentence(sentenceBuffer.trim())
               sentenceBuffer = ""
+              sentencesProcessed++
+              
+              // Return immediately for short responses
+              console.log(`[STREAM] Returning immediately for short response: "${sentenceBuffer.trim()}"`)
+              return fullText
             }
           }
         } catch (e) {
@@ -2277,7 +2330,8 @@ const setupUnifiedVoiceServer = (wss) => {
         const llmDuration = Date.now() - llmStartTime
         pipelineTracker.stageComplete('LLM_PROCESSING', llmStartTime, { 
           responseLength: aiResponse?.length || 0,
-          streaming: true 
+          streaming: true,
+          earlyReturn: true // Mark that we returned early for minimal latency
         })
 
         if (processingRequestId === currentRequestId) {
