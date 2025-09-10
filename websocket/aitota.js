@@ -1825,13 +1825,13 @@ class SimplifiedSarvamTTSProcessor {
             target_language_code: this.sarvamLanguage,
             speaker: resolvedVoice,
             pitch: 0.0,
-            pace: 1.2,  // Slightly faster speech
+            pace: 1.0,
             loudness: 1.0,
             output_audio_codec: 'linear16',
             output_audio_bitrate: '128k',
             speech_sample_rate: 8000,
-            min_buffer_size: 20,  // Reduced for faster first audio
-            max_chunk_length: 100,  // Reduced for faster processing
+            min_buffer_size: 50,
+            max_chunk_length: 150,
             enable_preprocessing: false,
           }
         }
@@ -2143,7 +2143,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
-        deepgramUrl.searchParams.append("smart_format", "false")
+        deepgramUrl.searchParams.append("smart_format", "true")
         deepgramUrl.searchParams.append("endpointing", "25")
         deepgramUrl.searchParams.append("vad_events", "true")
         deepgramUrl.searchParams.append("utterance_end_ms", "1000")
