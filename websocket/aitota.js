@@ -1407,6 +1407,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramReady = false
     let deepgramAudioQueue = []
     let sttTimer = null
+    let earlyUtteranceTimer = null
+    let lastInterimText = ""
 
     const connectToDeepgram = async () => {
       try {
@@ -1419,6 +1421,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("model", "nova-2")
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
+        deepgramUrl.searchParams.append("endpointing", "200")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -1458,6 +1461,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         const transcript = data.channel?.alternatives?.[0]?.transcript
+        const confidence = Number(data.channel?.alternatives?.[0]?.confidence || 0)
         const is_final = data.is_final
 
         if (transcript?.trim()) {
@@ -1479,6 +1483,41 @@ const setupUnifiedVoiceServer = (wss) => {
 
             await processUserUtterance(userUtteranceBuffer)
             userUtteranceBuffer = ""
+            // Clear any pending early trigger
+            if (earlyUtteranceTimer) {
+              clearTimeout(earlyUtteranceTimer)
+              earlyUtteranceTimer = null
+            }
+          }
+          else {
+            // Handle interim: schedule early process based on confidence or punctuation or length
+            const interimText = transcript.trim()
+            const endsSentence = /[\.!?]$/ .test(interimText)
+            const longEnough = interimText.split(/\s+/).length >= 4
+            const highConfidence = confidence >= 0.85
+            if (interimText !== lastInterimText) {
+              lastInterimText = interimText
+              if (earlyUtteranceTimer) {
+                clearTimeout(earlyUtteranceTimer)
+              }
+              // Short debounce to avoid jitter; trigger earlier if high-confidence/sentence end
+              const delayMs = highConfidence || endsSentence ? 120 : 220
+              earlyUtteranceTimer = setTimeout(async () => {
+                try {
+                  // Use the interim text directly to act fast; finals still logged later
+                  if (lastInterimText && !isProcessing) {
+                    await processUserUtterance(lastInterimText)
+                  }
+                } catch (_) {}
+              }, delayMs)
+            } else if ((highConfidence || endsSentence || longEnough) && !isProcessing) {
+              // If stable content meets heuristic, trigger immediately (guarded by debounce above)
+              if (earlyUtteranceTimer) {
+                clearTimeout(earlyUtteranceTimer)
+                earlyUtteranceTimer = null
+              }
+              try { await processUserUtterance(interimText) } catch (_) {}
+            }
           }
         }
       } else if (data.type === "UtteranceEnd") {
@@ -2101,6 +2140,10 @@ const setupUnifiedVoiceServer = (wss) => {
       callDirection = "inbound"
       agentConfig = null
       sttTimer = null
+      if (earlyUtteranceTimer) {
+        clearTimeout(earlyUtteranceTimer)
+        earlyUtteranceTimer = null
+      }
       
       console.log("🔌 [SIP-CLOSE] ======================================")
     })
