@@ -12,6 +12,7 @@ const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
   sarvam: process.env.SARVAM_API_KEY,
   openai: process.env.OPENAI_API_KEY,
+  gemini: process.env.GEMINI_API_KEY,
   whatsapp: process.env.WHATSAPP_TOKEN,
 }
 
@@ -260,7 +261,7 @@ class EnhancedCallLogger {
           lastUpdated: new Date(),
           sttProvider: 'deepgram',
           ttsProvider: 'sarvam',
-          llmProvider: 'openai',
+          llmProvider: 'gemini',
           customParams: this.customParams || {},
           callerId: this.callerId || undefined,
         },
@@ -891,8 +892,8 @@ class EnhancedCallLogger {
   }
 }
 
-// AI response generation (OpenAI) - non-streaming fallback
-const processWithOpenAI = async (
+// AI response generation (Gemini) - non-streaming fallback
+const processWithGemini = async (
   userMessage,
   conversationHistory,
   callLogger,
@@ -901,8 +902,8 @@ const processWithOpenAI = async (
 ) => {
   const timer = createTimer("LLM_PROCESSING")
   try {
-    if (!API_KEYS.openai) {
-      console.warn("⚠️ [LLM-PROCESSING] OPENAI_API_KEY not set; skipping generation")
+    if (!API_KEYS.gemini) {
+      console.warn("⚠️ [LLM-PROCESSING] GEMINI_API_KEY not set; skipping generation")
       return null
     }
 
@@ -921,24 +922,29 @@ const processWithOpenAI = async (
       ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
       : null
 
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...(personalizationMessage ? [personalizationMessage] : []),
-      ...conversationHistory.slice(-6),
-      { role: "user", content: userMessage },
+    // Map conversation to Gemini contents
+    const historyContents = conversationHistory.slice(-6).map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    }))
+    const contents = [
+      ...historyContents,
+      { role: 'user', parts: [{ text: userMessage }] }
     ]
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(API_KEYS.gemini)}`
+    const response = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages,
-        max_tokens: 120,
-        temperature: 0.3,
+        contents,
+        system_instruction: { role: "system", parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 120,
+        },
       }),
     })
 
@@ -948,7 +954,8 @@ const processWithOpenAI = async (
     }
 
     const data = await response.json()
-    let fullResponse = data.choices?.[0]?.message?.content?.trim() || null
+    const parts = data?.candidates?.[0]?.content?.parts || []
+    let fullResponse = parts.map(p => p.text || "").join("").trim() || null
     console.log(`🕒 [LLM-PROCESSING] ${timer.end()}ms - Response generated`)
 
     if (fullResponse) {
@@ -969,8 +976,8 @@ const processWithOpenAI = async (
   }
 }
 
-// AI response generation (OpenAI) - streaming for low latency
-const processWithOpenAIStream = async (
+// AI response generation (Gemini) - streaming for low latency
+const processWithGeminiStream = async (
   userMessage,
   conversationHistory,
   agentConfig,
@@ -980,8 +987,8 @@ const processWithOpenAIStream = async (
   const timer = createTimer("LLM_STREAMING")
   let accumulated = ""
   try {
-    if (!API_KEYS.openai) {
-      console.warn("⚠️ [LLM-STREAM] OPENAI_API_KEY not set; skipping generation")
+    if (!API_KEYS.gemini) {
+      console.warn("⚠️ [LLM-STREAM] GEMINI_API_KEY not set; skipping generation")
       return null
     }
 
@@ -996,29 +1003,27 @@ const processWithOpenAIStream = async (
       "Do not give any fornts or styles in it"
     ].join(" ")
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
-    const personalizationMessage = userName && userName.trim()
-      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
-      : null
 
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...(personalizationMessage ? [personalizationMessage] : []),
-      ...conversationHistory.slice(-6),
-      { role: "user", content: userMessage },
+    const historyContents = conversationHistory.slice(-6).map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    }))
+    const contents = [
+      ...historyContents,
+      { role: 'user', parts: [{ text: userMessage }] }
     ]
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key=${encodeURIComponent(API_KEYS.gemini)}`
+    const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages,
-        max_tokens: 120,
-        temperature: 0.3,
-        stream: true,
+        contents,
+        system_instruction: { role: "system", parts: [{ text: systemPrompt }] },
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 120,
+        },
       }),
     })
 
@@ -1047,7 +1052,8 @@ const processWithOpenAIStream = async (
           const jsonStr = trimmed.slice(5).trim()
           try {
             const chunk = JSON.parse(jsonStr)
-            const delta = chunk.choices?.[0]?.delta?.content || ""
+            const parts = chunk?.candidates?.[0]?.content?.parts || []
+            const delta = parts.map(p => p.text || "").join("")
             if (delta) {
               accumulated += delta
               if (typeof onPartial === "function") {
@@ -1566,9 +1572,9 @@ const setupUnifiedVoiceServer = (wss) => {
 
         let finalResponse = null
 
-        if (API_KEYS.openai) {
+        if (API_KEYS.gemini) {
           // Streaming path for low latency; send partials to TTS sequentially
-          console.log("🌊 [USER-UTTERANCE] Using streaming LLM → TTS path")
+          console.log("🌊 [USER-UTTERANCE] Using streaming LLM → TTS path (Gemini)")
           const tts = new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
           currentTTS = tts
           let lastLen = 0
@@ -1577,7 +1583,7 @@ const setupUnifiedVoiceServer = (wss) => {
             if (delta.length >= 60) return true
             return /[.!?]\s?$/.test(curr)
           }
-          finalResponse = await processWithOpenAIStream(
+          finalResponse = await processWithGeminiStream(
             text,
             conversationHistory,
             agentConfig,
@@ -1595,9 +1601,9 @@ const setupUnifiedVoiceServer = (wss) => {
               }
             }
           )
-        } else {
-          // Fallback non-streaming path
-          finalResponse = await processWithOpenAI(text, conversationHistory, callLogger, agentConfig, userName)
+        } else if (API_KEYS.openai) {
+          // Fallback: if Gemini not set but OpenAI is, use old non-streaming
+          finalResponse = await processWithGemini(text, conversationHistory, callLogger, agentConfig, userName)
         }
 
         // Update call logger with detected information
