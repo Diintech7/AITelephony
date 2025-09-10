@@ -993,6 +993,7 @@ const processWithOpenAIStream = async (
       "If specifics (address/phone/timings) are missing, say you don't have that info.",
       "End with a brief follow-up question.",
       "Keep reply under 100 tokens.",
+      "Do not give any fornts or styles in it"
     ].join(" ")
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
     const personalizationMessage = userName && userName.trim()
@@ -1083,6 +1084,8 @@ class SimplifiedSarvamTTSProcessor {
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
+    this.pendingQueue = [] // { text, audioBase64, preparing }
+    this.isProcessingQueue = false
   }
 
   interrupt() {
@@ -1158,6 +1161,86 @@ class SimplifiedSarvamTTSProcessor {
     }
   }
 
+  async synthesizeToBuffer(text) {
+    const timer = createTimer("TTS_PREPARE")
+    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "API-Subscription-Key": API_KEYS.sarvam,
+      },
+      body: JSON.stringify({
+        inputs: [text],
+        target_language_code: this.sarvamLanguage,
+        speaker: this.voice,
+        pitch: 0,
+        pace: 1.0,
+        loudness: 1.0,
+        speech_sample_rate: 8000,
+        enable_preprocessing: true,
+        model: "bulbul:v1",
+      }),
+    })
+    if (!response.ok) {
+      console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
+      throw new Error(`Sarvam API error: ${response.status}`)
+    }
+    const responseData = await response.json()
+    const audioBase64 = responseData.audios?.[0]
+    if (!audioBase64) {
+      console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
+      throw new Error("No audio data received from Sarvam API")
+    }
+    console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
+    return audioBase64
+  }
+
+  async enqueueText(text) {
+    if (this.isInterrupted) return
+    const item = { text, audioBase64: null, preparing: true }
+    this.pendingQueue.push(item)
+    // Start prefetch immediately
+    ;(async () => {
+      try {
+        item.audioBase64 = await this.synthesizeToBuffer(text)
+      } catch (_) {
+        item.audioBase64 = null
+      } finally {
+        item.preparing = false
+      }
+    })()
+
+    if (!this.isProcessingQueue) {
+      this.processQueue().catch(() => {})
+    }
+  }
+
+  async processQueue() {
+    if (this.isProcessingQueue) return
+    this.isProcessingQueue = true
+    try {
+      while (!this.isInterrupted && this.pendingQueue.length > 0) {
+        const item = this.pendingQueue[0]
+        if (!item.audioBase64) {
+          // Wait briefly for preparation if in progress
+          let waited = 0
+          while (!this.isInterrupted && item.preparing && waited < 3000) {
+            await new Promise(r => setTimeout(r, 20))
+            waited += 20
+          }
+        }
+        if (this.isInterrupted) break
+        const audioBase64 = item.audioBase64
+        this.pendingQueue.shift()
+        if (audioBase64) {
+          await this.streamAudioOptimizedForSIP(audioBase64)
+        }
+      }
+    } finally {
+      this.isProcessingQueue = false
+    }
+  }
+
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
@@ -1168,7 +1251,7 @@ class SimplifiedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PERMS)
 
     let position = 0
     let chunkIndex = 0
@@ -1200,7 +1283,7 @@ class SimplifiedSarvamTTSProcessor {
 
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
+        const delayMs = Math.max(chunkDurationMs - 5, 5)
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
@@ -1468,7 +1551,7 @@ const setupUnifiedVoiceServer = (wss) => {
               lastLen = partial.length
               if (chunk.trim()) {
                 try {
-                  await tts.synthesizeAndStream(chunk.trim())
+                  await tts.enqueueText(chunk.trim())
                 } catch (_) {}
               }
             }
