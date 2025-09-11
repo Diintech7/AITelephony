@@ -1258,6 +1258,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         "If specifics (address/phone/timings) are missing, say you don't have that info.",
         "End with a brief follow-up question.",
         "Keep reply under 100 tokens.",
+        "dont give any fornts or styles in it or symbols in it",
       ].join(" ")
       const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
       const personalizationMessage = userName && userName.trim()
