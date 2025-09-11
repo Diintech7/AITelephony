@@ -1760,12 +1760,9 @@ const setupSanPbxWebSocketServer = (ws) => {
       let aiResponse = null
       const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
       currentTTS = tts
-      let lastLen = 0
-      const shouldFlush = (prev, curr) => {
-        const delta = curr.slice(prev)
-        if (delta.length >= 60) return true
-        return /[.!?]\s?$/.test(curr)
-      }
+      let sentIndex = 0
+      const MIN_TOKENS = 5
+      const MAX_TOKENS = 8
       aiResponse = await processWithOpenAIStream(
         text,
         conversationHistory,
@@ -1773,12 +1770,17 @@ const setupSanPbxWebSocketServer = (ws) => {
         userName,
         async (partial) => {
           if (processingRequestId !== currentRequestId) return
-          if (!partial || partial.length <= lastLen) return
-          if (!shouldFlush(lastLen, partial)) return
-          const chunk = partial.slice(lastLen)
-          lastLen = partial.length
-          if (chunk.trim()) {
-            try { await tts.enqueueText(chunk.trim()) } catch (_) {}
+          if (!partial || partial.length <= sentIndex) return
+          // Process in 5–8 token chunks
+          let pending = partial.slice(sentIndex)
+          while (pending.trim()) {
+            const tokens = pending.trim().split(/\s+/)
+            if (tokens.length < MIN_TOKENS) break
+            const take = Math.min(MAX_TOKENS, tokens.length)
+            const chunkText = tokens.slice(0, take).join(' ')
+            sentIndex += pending.indexOf(chunkText) + chunkText.length
+            try { await tts.enqueueText(chunkText) } catch (_) {}
+            pending = partial.slice(sentIndex)
           }
         }
       )
