@@ -1907,8 +1907,10 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
         if (!this.isInterrupted) {
-          await this.streamAudioOptimizedForSIP(audioBase64)
-          const audioBuffer = Buffer.from(audioBase64, "base64")
+          // Strip WAV header if present; send raw PCM 16-bit mono @ 8kHz
+          const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
+          await this.streamAudioOptimizedForSIP(pcmBase64)
+          const audioBuffer = Buffer.from(pcmBase64, "base64")
           this.totalAudioBytes += audioBuffer.length
         }
       } catch (error) {
@@ -1988,7 +1990,10 @@ const setupSanPbxWebSocketServer = (ws) => {
           const audioBase64 = item.audioBase64
           this.pendingQueue.shift()
           if (audioBase64) {
-            await this.streamAudioOptimizedForSIP(audioBase64)
+            const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
+            await this.streamAudioOptimizedForSIP(pcmBase64)
+            // Small gap to avoid chunk boundary artifacts between enqueued items
+            await new Promise(r => setTimeout(r, 60))
           }
         }
       } finally {
