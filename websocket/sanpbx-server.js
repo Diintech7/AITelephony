@@ -1211,6 +1211,126 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
   }
 
+  // Simple TTS queue to serialize chunk playback and avoid overlaps
+  let ttsQueue = []
+  let ttsBusy = false
+  const enqueueTts = async (text, language = "en") => {
+    if (!text || !text.trim()) return
+    ttsQueue.push({ text: text.trim(), language })
+    if (!ttsBusy) {
+      processTtsQueue().catch(() => {})
+    }
+  }
+  const processTtsQueue = async () => {
+    if (ttsBusy) return
+    ttsBusy = true
+    try {
+      while (ttsQueue.length > 0) {
+        const item = ttsQueue.shift()
+        await synthesizeAndStreamAudio(item.text, item.language)
+      }
+    } finally {
+      ttsBusy = false
+    }
+  }
+
+  // Streaming OpenAI completion that emits partials via callback
+  const processWithOpenAIStream = async (
+    userMessage,
+    conversationHistory,
+    agentConfig,
+    userName = null,
+    onPartial = null,
+  ) => {
+    const timer = createTimer("LLM_STREAMING")
+    let accumulated = ""
+    try {
+      if (!API_KEYS.openai) {
+        console.warn("⚠️ [LLM-STREAM] OPENAI_API_KEY not set; skipping generation")
+        return null
+      }
+
+      const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
+      const firstMessage = (agentConfig?.firstMessage || "").trim()
+      const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+      const policyBlock = [
+        "Answer strictly using the information provided above.",
+        "If specifics (address/phone/timings) are missing, say you don't have that info.",
+        "End with a brief follow-up question.",
+        "Keep reply under 100 tokens.",
+      ].join(" ")
+      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+      const personalizationMessage = userName && userName.trim()
+        ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
+        : null
+
+      const messages = [
+        { role: "system", content: systemPrompt },
+        ...(personalizationMessage ? [personalizationMessage] : []),
+        ...conversationHistory.slice(-6),
+        { role: "user", content: userMessage },
+      ]
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${API_KEYS.openai}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages,
+          max_tokens: 120,
+          temperature: 0.3,
+          stream: true,
+        }),
+      })
+
+      if (!response.ok || !response.body) {
+        console.error(`❌ [LLM-STREAM] ${timer.end()}ms - HTTP ${response.status}`)
+        return null
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder("utf-8")
+      let buffer = ""
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ""
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          if (trimmed === "data: [DONE]") {
+            break
+          }
+          if (trimmed.startsWith("data:")) {
+            const jsonStr = trimmed.slice(5).trim()
+            try {
+              const chunk = JSON.parse(jsonStr)
+              const delta = chunk.choices?.[0]?.delta?.content || ""
+              if (delta) {
+                accumulated += delta
+                if (typeof onPartial === "function") {
+                  try { await onPartial(accumulated) } catch (_) {}
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      }
+
+      console.log(`🕒 [LLM-STREAM] ${timer.end()}ms - Streaming completed (${accumulated.length} chars)`) 
+      return accumulated || null
+    } catch (error) {
+      console.error(`❌ [LLM-STREAM] ${timer.end()}ms - Error: ${error.message}`)
+      return accumulated || null
+    }
+  }
+
   const updateLiveCallLog = async () => {
     try {
       if (!callLogId) return
@@ -1995,30 +2115,49 @@ const setupSanPbxWebSocketServer = (ws) => {
         await synthesizeAndStreamAudio(quickResponse)
         console.log(`[PROCESS] TTS finished for quick response.`)
       } else if (isResponseActive(responseId)) {
-        console.log(`[PROCESS] Getting AI response for: "${transcript}"`)
-        
-        const aiResponse = await getAIResponse(transcript)
-        if (aiResponse && isResponseActive(responseId)) {
-          console.log(`[PROCESS] AI response received: "${aiResponse}"`)
-          
-          conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: aiResponse })
+        console.log(`[PROCESS] Getting AI response (streaming) for: "${transcript}"`)
 
-          // Keep history lean for performance
+        let lastLen = 0
+        const tokenFlush = (prev, curr) => {
+          const delta = curr.slice(prev)
+          const prevTokens = (curr.slice(0, prev).trim().split(/\s+/).filter(Boolean).length)
+          const totalTokens = (curr.trim().split(/\s+/).filter(Boolean).length)
+          const newTokens = totalTokens - prevTokens
+          if (newTokens >= 5) return true
+          return /[.!?]\s?$/.test(curr)
+        }
+
+        const finalResponse = await processWithOpenAIStream(
+          transcript,
+          conversationHistory,
+          ws.sessionAgentConfig || {},
+          sessionUserName,
+          async (partial) => {
+            if (!isResponseActive(responseId)) return
+            if (!partial || partial.length <= lastLen) return
+            if (!tokenFlush(lastLen, partial)) return
+            const chunk = partial.slice(lastLen)
+            lastLen = partial.length
+            if (chunk.trim()) {
+              await enqueueTts(chunk.trim(), (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+            }
+          }
+        )
+
+        if (finalResponse && isResponseActive(responseId)) {
+          conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: finalResponse })
           if (conversationHistory.length > 6) {
             conversationHistory = conversationHistory.slice(-6)
           }
           try {
             aiResponses.push({
               type: 'ai',
-              text: aiResponse,
+              text: finalResponse,
               language: (ws.sessionAgentConfig?.language || 'en').toLowerCase(),
               timestamp: new Date(),
             })
           } catch (_) {}
-          // Live update after AI response
           await updateLiveCallLog()
-          await synthesizeAndStreamAudio(aiResponse)
-          console.log(`[PROCESS] TTS finished for AI response.`)
         }
       }
 
