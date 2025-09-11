@@ -1764,23 +1764,23 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       
       
-      if (disconnectionIntent === "DISCONNECT") {
-        console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
+      // if (disconnectionIntent === "DISCONNECT") {
+      //   console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
         
-        // Wait 2 seconds to ensure last message is processed, then terminate
-        setTimeout(async () => {
-          if (callLogger) {
-            try {
-              await callLogger.saveToDatabase(callLogger.currentLeadStatus || "maybe")
-              console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
-            } catch (err) {
-              console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
-            }
-          }
-        }, 2000)
+      //   // Wait 2 seconds to ensure last message is processed, then terminate
+      //   setTimeout(async () => {
+      //     if (callLogger) {
+      //       try {
+      //         await callLogger.saveToDatabase(callLogger.currentLeadStatus || "maybe")
+      //         console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
+      //       } catch (err) {
+      //         console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
+      //       }
+      //     }
+      //   }, 2000)
         
-        return
-      }
+      //   return
+      // }
 
       if (processingRequestId === currentRequestId && aiResponse) {
         console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
