@@ -1786,6 +1786,14 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
       )
 
+      // Final flush: send any remaining short tail (below MIN_TOKENS)
+      if (processingRequestId === currentRequestId && aiResponse && aiResponse.length > sentIndex) {
+        const tail = aiResponse.slice(sentIndex).trim()
+        if (tail) {
+          try { await currentTTS.enqueueText(tail) } catch (_) {}
+          sentIndex = aiResponse.length
+        }
+      }
       
       
       // if (disconnectionIntent === "DISCONNECT") {
