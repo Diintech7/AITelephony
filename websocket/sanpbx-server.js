@@ -1786,7 +1786,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
         console.log("🎤 [USER-UTTERANCE] Starting TTS...")
         
-        currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamId, callLogger)
+        currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
         await currentTTS.synthesizeAndStream(aiResponse)
 
         conversationHistory.push(
@@ -2505,7 +2505,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
 
           console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
-          currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamId, callLogger)
+          currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
           await currentTTS.synthesizeAndStream(greeting)
           console.log("✅ [SANPBX-TTS] Greeting TTS completed")
           break
