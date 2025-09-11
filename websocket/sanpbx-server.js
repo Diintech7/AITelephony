@@ -1756,11 +1756,32 @@ const setupSanPbxWebSocketServer = (ws) => {
       // Run all AI detections in parallel for efficiency
       console.log("🔍 [USER-UTTERANCE] Running AI detections...")
       
-      const [
-        aiResponse
-      ] = await Promise.all([
-        processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig, userName)
-      ])
+      // Use streaming path immediately (like testing2) so partials can play
+      let aiResponse = null
+      const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
+      currentTTS = tts
+      let lastLen = 0
+      const shouldFlush = (prev, curr) => {
+        const delta = curr.slice(prev)
+        if (delta.length >= 60) return true
+        return /[.!?]\s?$/.test(curr)
+      }
+      aiResponse = await processWithOpenAIStream(
+        text,
+        conversationHistory,
+        agentConfig,
+        userName,
+        async (partial) => {
+          if (processingRequestId !== currentRequestId) return
+          if (!partial || partial.length <= lastLen) return
+          if (!shouldFlush(lastLen, partial)) return
+          const chunk = partial.slice(lastLen)
+          lastLen = partial.length
+          if (chunk.trim()) {
+            try { await tts.enqueueText(chunk.trim()) } catch (_) {}
+          }
+        }
+      )
 
       
       
