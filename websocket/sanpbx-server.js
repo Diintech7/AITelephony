@@ -1749,26 +1749,16 @@ const setupSanPbxWebSocketServer = (ws) => {
     const currentRequestId = ++processingRequestId
 
     try {
-      const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
+      const detectedLanguage = "en"
       console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
 
-      if (detectedLanguage !== currentLanguage) {
-        console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
-        currentLanguage = detectedLanguage
-      }
 
       // Run all AI detections in parallel for efficiency
       console.log("🔍 [USER-UTTERANCE] Running AI detections...")
       
       const [
-        disconnectionIntent, 
-        leadStatus, 
-        whatsappRequest, 
         aiResponse
       ] = await Promise.all([
-        detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
-        detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
-        detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
         processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig, userName)
       ])
 
