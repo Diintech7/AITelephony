@@ -1762,13 +1762,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig, userName)
       ])
 
-      // Update call logger with detected information
-      if (callLogger) {
-        callLogger.updateLeadStatus(leadStatus)
-        if (whatsappRequest === "WHATSAPP_REQUEST") {
-          callLogger.markWhatsAppRequested()
-        }
-      }
+      
       
       if (disconnectionIntent === "DISCONNECT") {
         console.log("🛑 [USER-UTTERANCE] User wants to disconnect - waiting 2 seconds then ending call")
