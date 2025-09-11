@@ -1148,7 +1148,9 @@ class SimplifiedSarvamTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        await this.streamAudioOptimizedForSIP(audioBase64)
+        // Ensure the audio we stream is raw PCM 16-bit mono at 8kHz
+        const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
+        await this.streamAudioOptimizedForSIP(pcmBase64)
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
       }
@@ -1297,6 +1299,38 @@ class SimplifiedSarvamTTSProcessor {
     return {
       totalAudioBytes: this.totalAudioBytes,
     }
+  }
+}
+
+// Ensure base64 audio is raw PCM 16-bit mono @ 8kHz.
+// If it's a WAV (RIFF/WAVE), strip header and return the data chunk.
+const extractPcmLinear16Mono8kBase64 = (audioBase64) => {
+  try {
+    const buf = Buffer.from(audioBase64, 'base64')
+    if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') {
+      let offset = 12
+      let dataOffset = null
+      let dataSize = null
+      while (offset + 8 <= buf.length) {
+        const chunkId = buf.toString('ascii', offset, offset + 4)
+        const chunkSize = buf.readUInt32LE(offset + 4)
+        const next = offset + 8 + chunkSize
+        if (chunkId === 'data') {
+          dataOffset = offset + 8
+          dataSize = chunkSize
+          break
+        }
+        offset = next
+      }
+      if (dataOffset != null && dataSize != null) {
+        const dataBuf = buf.slice(dataOffset, dataOffset + dataSize)
+        return dataBuf.toString('base64')
+      }
+    }
+    // Assume it's already raw PCM
+    return audioBase64
+  } catch (_) {
+    return audioBase64
   }
 }
 
