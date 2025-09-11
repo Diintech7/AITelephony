@@ -1649,6 +1649,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       deepgramUrl.searchParams.append("model", "nova-2")
       deepgramUrl.searchParams.append("language", deepgramLanguage)
       deepgramUrl.searchParams.append("interim_results", "true")
+      deepgramUrl.searchParams.append("endpointing", "200")
       deepgramUrl.searchParams.append("smart_format", "true")
 
       deepgramWs = new WebSocket(deepgramUrl.toString(), {
@@ -1811,18 +1812,19 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
   }
 
-  // Simplified TTS processor
+  // Simplified TTS processor (aligned with testing2.js behavior + SanPBX transport)
   class SimplifiedSarvamTTSProcessor {
-    constructor(language, ws, streamSid, callLogger = null) {
-      this.language = language
+    constructor(ws, streamSid, callLogger = null) {
       this.ws = ws
       this.streamSid = streamSid
       this.callLogger = callLogger
-      this.sarvamLanguage = getSarvamLanguage(language)
+      this.sarvamLanguage = getSarvamLanguage((ws.sessionAgentConfig?.language || 'en').toLowerCase())
       this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
       this.isInterrupted = false
       this.currentAudioStreaming = null
       this.totalAudioBytes = 0
+      this.pendingQueue = [] // { text, audioBase64, preparing }
+      this.isProcessingQueue = false
     }
 
     interrupt() {
@@ -1832,12 +1834,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
     }
 
-    reset(newLanguage) {
+    reset() {
       this.interrupt()
-      if (newLanguage) {
-        this.language = newLanguage
-        this.sarvamLanguage = getSarvamLanguage(newLanguage)
-      }
       this.isInterrupted = false
       this.totalAudioBytes = 0
     }
@@ -1846,7 +1844,6 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (this.isInterrupted) return
 
       const timer = createTimer("TTS_SYNTHESIS")
-
       try {
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
           method: "POST",
@@ -1862,7 +1859,6 @@ const setupSanPbxWebSocketServer = (ws) => {
             pace: 1.0,
             loudness: 1.0,
             speech_sample_rate: 8000,
-            enable_preprocessing: false,
             enable_preprocessing: true,
             model: "bulbul:v1",
           }),
@@ -1878,7 +1874,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         const responseData = await response.json()
         const audioBase64 = responseData.audios?.[0]
-
         if (!audioBase64 || this.isInterrupted) {
           if (!this.isInterrupted) {
             console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
@@ -1888,7 +1883,6 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
 
         console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
-
         if (!this.isInterrupted) {
           await this.streamAudioOptimizedForSIP(audioBase64)
           const audioBuffer = Buffer.from(audioBase64, "base64")
@@ -1902,6 +1896,83 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
     }
 
+    async synthesizeToBuffer(text) {
+      const timer = createTimer("TTS_PREPARE")
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": API_KEYS.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: this.sarvamLanguage,
+          speaker: this.voice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: true,
+          model: "bulbul:v1",
+        }),
+      })
+      if (!response.ok) {
+        console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
+        throw new Error(`Sarvam API error: ${response.status}`)
+      }
+      const responseData = await response.json()
+      const audioBase64 = responseData.audios?.[0]
+      if (!audioBase64) {
+        console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
+        throw new Error("No audio data received from Sarvam API")
+      }
+      console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
+      return audioBase64
+    }
+
+    async enqueueText(text) {
+      if (this.isInterrupted) return
+      const item = { text, audioBase64: null, preparing: true }
+      this.pendingQueue.push(item)
+      ;(async () => {
+        try {
+          item.audioBase64 = await this.synthesizeToBuffer(text)
+        } catch (_) {
+          item.audioBase64 = null
+        } finally {
+          item.preparing = false
+        }
+      })()
+      if (!this.isProcessingQueue) {
+        this.processQueue().catch(() => {})
+      }
+    }
+
+    async processQueue() {
+      if (this.isProcessingQueue) return
+      this.isProcessingQueue = true
+      try {
+        while (!this.isInterrupted && this.pendingQueue.length > 0) {
+          const item = this.pendingQueue[0]
+          if (!item.audioBase64) {
+            let waited = 0
+            while (!this.isInterrupted && item.preparing && waited < 3000) {
+              await new Promise(r => setTimeout(r, 20))
+              waited += 20
+            }
+          }
+          if (this.isInterrupted) break
+          const audioBase64 = item.audioBase64
+          this.pendingQueue.shift()
+          if (audioBase64) {
+            await this.streamAudioOptimizedForSIP(audioBase64)
+          }
+        }
+      } finally {
+        this.isProcessingQueue = false
+      }
+    }
+
     async streamAudioOptimizedForSIP(audioBase64) {
       if (this.isInterrupted) return
 
@@ -1911,54 +1982,39 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       const SAMPLE_RATE = 8000
       const BYTES_PER_SAMPLE = 2
-      const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-      const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+      const CHUNK_SIZE = 320 // 20ms @ 8kHz mono 16-bit
 
       let position = 0
-      let chunkIndex = 0
-      let successfulChunks = 0
-
       while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-        const remaining = audioBuffer.length - position
-        const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-        const chunk = audioBuffer.slice(position, position + chunkSize)
-
+        const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
+        const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
         const mediaMessage = {
           event: "reverse-media",
-          payload: chunk.toString("base64"),
+          payload: padded.toString("base64"),
           streamId: this.streamSid,
           channelId: channelId,
           callId: callId,
         }
-
         if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
           try {
             this.ws.send(JSON.stringify(mediaMessage))
-            successfulChunks++
-          } catch (error) {
+          } catch (_) {
             break
           }
         } else {
           break
         }
-
-        if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-          const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-          const delayMs = Math.max(chunkDurationMs - 2, 10)
-          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        position += CHUNK_SIZE
+        if (position < audioBuffer.length && !this.isInterrupted) {
+          await new Promise(r => setTimeout(r, 20))
         }
-
-        position += chunkSize
-        chunkIndex++
       }
 
       this.currentAudioStreaming = null
     }
 
     getStats() {
-      return {
-        totalAudioBytes: this.totalAudioBytes,
-      }
+      return { totalAudioBytes: this.totalAudioBytes }
     }
   }
 
@@ -2101,12 +2157,9 @@ const setupSanPbxWebSocketServer = (ws) => {
         console.log(`[PROCESS] Getting AI response (streaming) for: "${transcript}"`)
 
         let lastLen = 0
-        const tokenFlush = (prev, curr) => {
+        const shouldFlush = (prev, curr) => {
           const delta = curr.slice(prev)
-          const prevTokens = (curr.slice(0, prev).trim().split(/\s+/).filter(Boolean).length)
-          const totalTokens = (curr.trim().split(/\s+/).filter(Boolean).length)
-          const newTokens = totalTokens - prevTokens
-          if (newTokens >= 5) return true
+          if (delta.length >= 60) return true
           return /[.!?]\s?$/.test(curr)
         }
 
@@ -2118,11 +2171,16 @@ const setupSanPbxWebSocketServer = (ws) => {
           async (partial) => {
             if (!isResponseActive(responseId)) return
             if (!partial || partial.length <= lastLen) return
-            if (!tokenFlush(lastLen, partial)) return
+            if (!shouldFlush(lastLen, partial)) return
             const chunk = partial.slice(lastLen)
             lastLen = partial.length
             if (chunk.trim()) {
-              await enqueueTts(chunk.trim(), (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+              try {
+                // Mirror testing2: enqueue text for prefetch + serialized playback
+                const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
+                currentTTS = tts
+                await tts.enqueueText(chunk.trim())
+              } catch (_) {}
             }
           }
         )
