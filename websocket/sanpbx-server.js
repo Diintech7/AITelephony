@@ -1781,11 +1781,6 @@ const setupSanPbxWebSocketServer = (ws) => {
             const chunkText = tokens.slice(0, take).join(' ')
             sentIndex += pending.indexOf(chunkText) + chunkText.length
             try { await tts.enqueueText(chunkText) } catch (_) {}
-            try {
-              if (callLogger && chunkText && chunkText.trim()) {
-                callLogger.logAIResponse(chunkText.trim(), (currentLanguage || 'en').toLowerCase())
-              }
-            } catch (_) {}
             pending = partial.slice(sentIndex)
           }
         }
@@ -1796,11 +1791,6 @@ const setupSanPbxWebSocketServer = (ws) => {
         const tail = aiResponse.slice(sentIndex).trim()
         if (tail) {
           try { await currentTTS.enqueueText(tail) } catch (_) {}
-          try {
-            if (callLogger) {
-              callLogger.logAIResponse(tail, (currentLanguage || 'en').toLowerCase())
-            }
-          } catch (_) {}
           sentIndex = aiResponse.length
         }
       }
@@ -1828,6 +1818,13 @@ const setupSanPbxWebSocketServer = (ws) => {
         console.log("🤖 [USER-UTTERANCE] AI Response (streamed):", aiResponse)
         // Do NOT TTS the full response here – partials already queued
         
+        // Save the complete AI response as a single entry
+        try {
+          if (callLogger && aiResponse && aiResponse.trim()) {
+            callLogger.logAIResponse(aiResponse.trim(), (currentLanguage || 'en').toLowerCase())
+          }
+        } catch (_) {}
+
         conversationHistory.push(
           { role: "user", content: text },
           { role: "assistant", content: aiResponse }
