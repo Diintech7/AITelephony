@@ -1806,12 +1806,9 @@ const setupSanPbxWebSocketServer = (ws) => {
       // }
 
       if (processingRequestId === currentRequestId && aiResponse) {
-        console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
-        console.log("🎤 [USER-UTTERANCE] Starting TTS...")
+        console.log("🤖 [USER-UTTERANCE] AI Response (streamed):", aiResponse)
+        // Do NOT TTS the full response here – partials already queued
         
-        currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-        await currentTTS.synthesizeAndStream(aiResponse)
-
         conversationHistory.push(
           { role: "user", content: text },
           { role: "assistant", content: aiResponse }
@@ -2190,6 +2187,8 @@ const setupSanPbxWebSocketServer = (ws) => {
           if (delta.length >= 60) return true
           return /[.!?]\s?$/.test(curr)
         }
+        const tts = new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
+        currentTTS = tts
 
         const finalResponse = await processWithOpenAIStream(
           transcript,
@@ -2203,12 +2202,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             const chunk = partial.slice(lastLen)
             lastLen = partial.length
             if (chunk.trim()) {
-              try {
-                // Mirror testing2: enqueue text for prefetch + serialized playback
-                const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-                currentTTS = tts
-                await tts.enqueueText(chunk.trim())
-              } catch (_) {}
+              try { await tts.enqueueText(chunk.trim()) } catch (_) {}
             }
           }
         )
