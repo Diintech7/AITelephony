@@ -45,6 +45,14 @@ const CallLogSchema = new mongoose.Schema({
     type: String, 
     default: null 
   },
+  dispositionId: { 
+    type: String, 
+    default: null 
+  },
+  subDispositionId: { 
+    type: String, 
+    default: null 
+  },
   
   // Telephony identifiers for call management
   streamSid: { type: String, index: true }, // For active call tracking

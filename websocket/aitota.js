@@ -968,6 +968,8 @@ class EnhancedCallLogger {
       // Detect disposition based on conversation history and agent's depositions
       let disposition = null
       let subDisposition = null
+      let dispositionId = null
+      let subDispositionId = null
       
       if (agentConfig && agentConfig.depositions && Array.isArray(agentConfig.depositions) && agentConfig.depositions.length > 0) {
         try {
@@ -976,9 +978,11 @@ class EnhancedCallLogger {
           const dispositionResult = await detectDispositionWithOpenAI(conversationHistory, agentConfig.depositions, this.currentLanguage || 'en')
           disposition = dispositionResult.disposition
           subDisposition = dispositionResult.subDisposition
+          dispositionId = dispositionResult.dispositionId
+          subDispositionId = dispositionResult.subDispositionId
           
           if (disposition) {
-            console.log(`📊 [DISPOSITION-DETECTION] Detected disposition: ${disposition} | ${subDisposition || 'N/A'}`)
+            console.log(`📊 [DISPOSITION-DETECTION] Detected disposition: ${disposition} (ID: ${dispositionId}) | ${subDisposition || 'N/A'} (ID: ${subDispositionId || 'N/A'})`)
           } else {
             console.log(`⚠️ [DISPOSITION-DETECTION] No disposition detected`)
           }
@@ -997,6 +1001,8 @@ class EnhancedCallLogger {
           leadStatus: leadStatus,
           disposition: disposition,
           subDisposition: subDisposition,
+          dispositionId: dispositionId,
+          subDispositionId: subDispositionId,
           streamSid: this.streamSid,
           callSid: this.callSid,
           'metadata.userTranscriptCount': this.transcripts.length,
@@ -1028,6 +1034,8 @@ class EnhancedCallLogger {
           leadStatus: leadStatus,
           disposition: disposition,
           subDisposition: subDisposition,
+          dispositionId: dispositionId,
+          subDispositionId: subDispositionId,
           streamSid: this.streamSid,
           callSid: this.callSid,
           metadata: {
@@ -1409,17 +1417,19 @@ Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if n
  * @param {Array} conversationHistory - Array of conversation messages with role and content
  * @param {Array} agentDepositions - Array of disposition objects from agent config
  * @param {String} detectedLanguage - Current language for context
- * @returns {Object} - { disposition: string, subDisposition: string }
+ * @returns {Object} - { disposition: string, subDisposition: string, dispositionId: string, subDispositionId: string }
  * 
  * Example agentDepositions:
  * [
  *   {
+ *     _id: "68c3e47072168419ceb3631e",
  *     title: "Interested",
- *     sub: ["Very Interested", "Somewhat Interested", "Needs Follow-up"]
+ *     sub: ["For All Services", "For PPC and Lead Generation"]
  *   },
  *   {
+ *     _id: "68c3e47072168419ceb3631f",
  *     title: "Not Interested", 
- *     sub: ["Not Required", "Wrong Number", "Already Enrolled"]
+ *     sub: []
  *   }
  * ]
  */
@@ -1428,10 +1438,10 @@ const detectDispositionWithOpenAI = async (conversationHistory, agentDepositions
   try {
     if (!agentDepositions || !Array.isArray(agentDepositions) || agentDepositions.length === 0) {
       console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - No depositions configured for agent`)
-      return { disposition: null, subDisposition: null }
+      return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
     }
 
-    // Build depositions list for the prompt
+    // Build depositions list for the prompt with proper structure
     const depositionsList = agentDepositions.map((dep, index) => {
       const subDeps = dep.sub && Array.isArray(dep.sub) && dep.sub.length > 0 
         ? dep.sub.map((sub, subIndex) => `${subIndex + 1}. ${sub}`).join('\n        ')
@@ -1483,7 +1493,7 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
 
     if (!response.ok) {
       console.log(`❌ [DISPOSITION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
-      return { disposition: null, subDisposition: null }
+      return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
     }
 
     const data = await response.json()
@@ -1493,34 +1503,42 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
     const dispositionMatch = result.match(/DISPOSITION:\s*(.+)/i)
     const subDispositionMatch = result.match(/SUB_DISPOSITION:\s*(.+)/i)
 
-    const disposition = dispositionMatch ? dispositionMatch[1].trim() : null
-    const subDisposition = subDispositionMatch ? subDispositionMatch[1].trim() : null
+    const dispositionTitle = dispositionMatch ? dispositionMatch[1].trim() : null
+    const subDispositionTitle = subDispositionMatch ? subDispositionMatch[1].trim() : null
 
-    // Validate disposition exists in agent's depositions
-    const validDisposition = agentDepositions.find(dep => dep.title === disposition)
+    // Find the disposition object and get its _id
+    const validDisposition = agentDepositions.find(dep => dep.title === dispositionTitle)
     if (!validDisposition) {
-      console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid disposition detected: ${disposition}`)
-      return { disposition: null, subDisposition: null }
+      console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid disposition detected: ${dispositionTitle}`)
+      return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
     }
 
-    // Validate sub-disposition if provided
+    // Find the sub-disposition and get its _id if it exists
     let validSubDisposition = null
-    if (subDisposition && subDisposition !== "N/A" && validDisposition.sub && Array.isArray(validDisposition.sub)) {
-      validSubDisposition = validDisposition.sub.find(sub => sub === subDisposition)
+    let subDispositionId = null
+    
+    if (subDispositionTitle && subDispositionTitle !== "N/A" && validDisposition.sub && Array.isArray(validDisposition.sub)) {
+      validSubDisposition = validDisposition.sub.find(sub => sub === subDispositionTitle)
       if (!validSubDisposition) {
-        console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid sub-disposition detected: ${subDisposition}`)
+        console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid sub-disposition detected: ${subDispositionTitle}`)
         validSubDisposition = null
+      } else {
+        // For sub-dispositions, we'll use the title as the ID since they don't have separate _id fields
+        subDispositionId = subDispositionTitle
       }
     }
 
-    console.log(`🕒 [DISPOSITION-DETECTION] ${timer.end()}ms - Detected: ${disposition} | ${validSubDisposition || 'N/A'}`)
+    console.log(`🕒 [DISPOSITION-DETECTION] ${timer.end()}ms - Detected: ${dispositionTitle} (ID: ${validDisposition._id}) | ${validSubDisposition || 'N/A'}`)
+    
     return { 
-      disposition: disposition, 
-      subDisposition: validSubDisposition || null 
+      disposition: dispositionTitle, 
+      subDisposition: validSubDisposition || null,
+      dispositionId: validDisposition._id,
+      subDispositionId: subDispositionId
     }
   } catch (error) {
     console.log(`❌ [DISPOSITION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
-    return { disposition: null, subDisposition: null }
+    return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
   }
 }
 
