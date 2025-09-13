@@ -102,6 +102,22 @@ const agentSchema = new mongoose.Schema({
   backgroundImage: { type: String }, // base64 image for background
   backgroundColor: { type: String }, // hex color string
 
+  // Knowledge Base: store S3 keys and optional titles
+  knowledgeBase: [
+    {
+      key: { type: String, required: true },
+      name: { type: String },
+      uploadedAt: { type: Date, default: Date.now },
+    },
+  ],
+
+  // Depositions with sub-depositions
+  depositions: [
+    {
+      title: { type: String, required: true },
+      sub: [{ type: String }],
+    },
+  ],
   // Audio storage - Store as base64 string instead of Buffer
   audioFile: { type: String }, // File path (legacy support)
   audioBytes: {

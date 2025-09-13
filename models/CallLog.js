@@ -36,6 +36,16 @@ const CallLogSchema = new mongoose.Schema({
     default: 'maybe' 
   },
   
+  // Disposition tracking based on agent's depositions
+  disposition: { 
+    type: String, 
+    default: null 
+  },
+  subDisposition: { 
+    type: String, 
+    default: null 
+  },
+  
   // Telephony identifiers for call management
   streamSid: { type: String, index: true }, // For active call tracking
   callSid: { type: String, index: true },   // For call identification

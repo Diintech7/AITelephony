@@ -439,6 +439,7 @@ class EnhancedCallLogger {
     this.currentLeadStatus = 'not_connected' // Track current lead status
     this.whatsappSent = false // Track if WhatsApp was already sent
     this.whatsappRequested = false // Track if user requested WhatsApp
+    this.currentLanguage = 'en' // Track current language for disposition analysis
   }
 
   // Create initial call log entry immediately when call starts
@@ -949,7 +950,7 @@ class EnhancedCallLogger {
   }
 
   // Final save with complete call data
-  async saveToDatabase(leadStatusInput = 'maybe') {
+  async saveToDatabase(leadStatusInput = 'maybe', agentConfig = null) {
     const timer = createTimer("FINAL_CALL_LOG_SAVE")
     try {
       const callEndTime = new Date()
@@ -964,12 +965,38 @@ class EnhancedCallLogger {
 
       const leadStatus = normalizeLeadStatus(leadStatusInput, 'maybe')
 
+      // Detect disposition based on conversation history and agent's depositions
+      let disposition = null
+      let subDisposition = null
+      
+      if (agentConfig && agentConfig.depositions && Array.isArray(agentConfig.depositions) && agentConfig.depositions.length > 0) {
+        try {
+          console.log("🔍 [DISPOSITION-DETECTION] Analyzing conversation for disposition...")
+          const conversationHistory = this.generateConversationHistory()
+          const dispositionResult = await detectDispositionWithOpenAI(conversationHistory, agentConfig.depositions, this.currentLanguage || 'en')
+          disposition = dispositionResult.disposition
+          subDisposition = dispositionResult.subDisposition
+          
+          if (disposition) {
+            console.log(`📊 [DISPOSITION-DETECTION] Detected disposition: ${disposition} | ${subDisposition || 'N/A'}`)
+          } else {
+            console.log(`⚠️ [DISPOSITION-DETECTION] No disposition detected`)
+          }
+        } catch (dispositionError) {
+          console.log(`❌ [DISPOSITION-DETECTION] Error detecting disposition: ${dispositionError.message}`)
+        }
+      } else {
+        console.log(`⚠️ [DISPOSITION-DETECTION] No depositions configured for agent`)
+      }
+
       if (this.isCallLogCreated && this.callLogId) {
         // Update existing call log with final data
         const finalUpdateData = {
           transcript: this.generateFullTranscript(),
           duration: this.totalDuration,
           leadStatus: leadStatus,
+          disposition: disposition,
+          subDisposition: subDisposition,
           streamSid: this.streamSid,
           callSid: this.callSid,
           'metadata.userTranscriptCount': this.transcripts.length,
@@ -999,6 +1026,8 @@ class EnhancedCallLogger {
           transcript: this.generateFullTranscript(),
           duration: this.totalDuration,
           leadStatus: leadStatus,
+          disposition: disposition,
+          subDisposition: subDisposition,
           streamSid: this.streamSid,
           callSid: this.callSid,
           metadata: {
@@ -1022,6 +1051,18 @@ class EnhancedCallLogger {
       console.log(`❌ [FINAL-CALL-LOG-SAVE] ${timer.end()}ms - Error: ${error.message}`)
       throw error
     }
+  }
+
+  // Generate conversation history for disposition analysis
+  generateConversationHistory() {
+    const allEntries = [...this.transcripts, ...this.responses].sort(
+      (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+    )
+
+    return allEntries.map((entry) => ({
+      role: entry.type === "user" ? "user" : "assistant",
+      content: entry.text
+    }))
   }
 
   // Cleanup method
@@ -1356,6 +1397,130 @@ Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if n
   } catch (error) {
     console.log(`❌ [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
     return "NO_REQUEST" // Default to no request on error
+  }
+}
+
+/**
+ * Intelligent disposition detection using OpenAI based on agent's depositions
+ * 
+ * This function analyzes the conversation history and automatically selects the most
+ * appropriate disposition and sub-disposition from the agent's configured depositions.
+ * 
+ * @param {Array} conversationHistory - Array of conversation messages with role and content
+ * @param {Array} agentDepositions - Array of disposition objects from agent config
+ * @param {String} detectedLanguage - Current language for context
+ * @returns {Object} - { disposition: string, subDisposition: string }
+ * 
+ * Example agentDepositions:
+ * [
+ *   {
+ *     title: "Interested",
+ *     sub: ["Very Interested", "Somewhat Interested", "Needs Follow-up"]
+ *   },
+ *   {
+ *     title: "Not Interested", 
+ *     sub: ["Not Required", "Wrong Number", "Already Enrolled"]
+ *   }
+ * ]
+ */
+const detectDispositionWithOpenAI = async (conversationHistory, agentDepositions, detectedLanguage) => {
+  const timer = createTimer("DISPOSITION_DETECTION")
+  try {
+    if (!agentDepositions || !Array.isArray(agentDepositions) || agentDepositions.length === 0) {
+      console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - No depositions configured for agent`)
+      return { disposition: null, subDisposition: null }
+    }
+
+    // Build depositions list for the prompt
+    const depositionsList = agentDepositions.map((dep, index) => {
+      const subDeps = dep.sub && Array.isArray(dep.sub) && dep.sub.length > 0 
+        ? dep.sub.map((sub, subIndex) => `${subIndex + 1}. ${sub}`).join('\n        ')
+        : 'No sub-dispositions'
+      return `${index + 1}. ${dep.title}:
+        Sub-dispositions:
+        ${subDeps}`
+    }).join('\n\n')
+
+    const conversationText = conversationHistory
+      .slice(-10) // Last 10 messages for context
+      .map(msg => `${msg.role === 'user' ? 'User' : 'AI'}: ${msg.content}`)
+      .join('\n')
+
+    const dispositionPrompt = `Analyze the conversation history and determine the most appropriate disposition and sub-disposition based on the user's responses and conversation outcome.
+
+Available Dispositions:
+${depositionsList}
+
+Conversation History:
+${conversationText}
+
+Instructions:
+1. Analyze the user's interest level, responses, and conversation outcome
+2. Select the most appropriate disposition from the list above
+3. If the selected disposition has sub-dispositions, choose the most relevant one
+4. If no sub-dispositions are available, return "N/A" for sub-disposition
+5. If the conversation doesn't clearly fit any disposition, return "General Inquiry" as disposition and "N/A" as sub-disposition
+
+Return your response in this exact format:
+DISPOSITION: [exact title from the list]
+SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: dispositionPrompt },
+        ],
+        max_tokens: 100,
+        temperature: 0.1,
+      }),
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [DISPOSITION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return { disposition: null, subDisposition: null }
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim()
+
+    // Parse the response
+    const dispositionMatch = result.match(/DISPOSITION:\s*(.+)/i)
+    const subDispositionMatch = result.match(/SUB_DISPOSITION:\s*(.+)/i)
+
+    const disposition = dispositionMatch ? dispositionMatch[1].trim() : null
+    const subDisposition = subDispositionMatch ? subDispositionMatch[1].trim() : null
+
+    // Validate disposition exists in agent's depositions
+    const validDisposition = agentDepositions.find(dep => dep.title === disposition)
+    if (!validDisposition) {
+      console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid disposition detected: ${disposition}`)
+      return { disposition: null, subDisposition: null }
+    }
+
+    // Validate sub-disposition if provided
+    let validSubDisposition = null
+    if (subDisposition && subDisposition !== "N/A" && validDisposition.sub && Array.isArray(validDisposition.sub)) {
+      validSubDisposition = validDisposition.sub.find(sub => sub === subDisposition)
+      if (!validSubDisposition) {
+        console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid sub-disposition detected: ${subDisposition}`)
+        validSubDisposition = null
+      }
+    }
+
+    console.log(`🕒 [DISPOSITION-DETECTION] ${timer.end()}ms - Detected: ${disposition} | ${validSubDisposition || 'N/A'}`)
+    return { 
+      disposition: disposition, 
+      subDisposition: validSubDisposition || null 
+    }
+  } catch (error) {
+    console.log(`❌ [DISPOSITION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return { disposition: null, subDisposition: null }
   }
 }
 
@@ -1734,6 +1899,10 @@ const setupUnifiedVoiceServer = (wss) => {
         if (detectedLanguage !== currentLanguage) {
           console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
           currentLanguage = detectedLanguage
+          // Update call logger's current language
+          if (callLogger) {
+            callLogger.currentLanguage = detectedLanguage
+          }
         }
 
         // Run all AI detections in parallel for efficiency
@@ -1969,6 +2138,18 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("✅ [SIP-AGENT-LOOKUP] First Message:", agentConfig.firstMessage)
               console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp Enabled:", agentConfig.whatsappEnabled)
               console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp API URL:", agentConfig.whatsapplink)
+              console.log("✅ [SIP-AGENT-LOOKUP] Depositions:", agentConfig.depositions ? `${agentConfig.depositions.length} configured` : "None configured")
+              if (agentConfig.depositions && agentConfig.depositions.length > 0) {
+                console.log("✅ [SIP-AGENT-LOOKUP] Disposition Categories:")
+                agentConfig.depositions.forEach((dep, index) => {
+                  console.log(`  ${index + 1}. ${dep.title}`)
+                  if (dep.sub && dep.sub.length > 0) {
+                    dep.sub.forEach((sub, subIndex) => {
+                      console.log(`     ${subIndex + 1}. ${sub}`)
+                    })
+                  }
+                })
+              }
               console.log("✅ [SIP-AGENT-LOOKUP] ======================================")
 
               if (!agentConfig) {
@@ -2048,6 +2229,7 @@ const setupUnifiedVoiceServer = (wss) => {
             callLogger.accountSid = accountSid;
             callLogger.ws = ws; // Store WebSocket reference
             callLogger.uniqueid = uniqueid; // Store uniqueid for outbound calls
+            callLogger.currentLanguage = currentLanguage; // Set initial language
 
             // Create initial call log entry immediately
             try {
@@ -2177,7 +2359,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log("💾 [SIP-STOP] Saving final call log to database...")
                 const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
                 console.log("📊 [SIP-STOP] Final lead status:", finalLeadStatus)
-                const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
+                const savedLog = await callLogger.saveToDatabase(finalLeadStatus, agentConfig)
                 console.log("✅ [SIP-STOP] Final call log saved with ID:", savedLog._id)
               } catch (error) {
                 console.log("❌ [SIP-STOP] Error saving final call log:", error.message)
@@ -2266,7 +2448,7 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("💾 [SIP-CLOSE] Saving call log due to connection close...")
           const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
           console.log("📊 [SIP-CLOSE] Final lead status:", finalLeadStatus)
-          const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
+          const savedLog = await callLogger.saveToDatabase(finalLeadStatus, agentConfig)
           console.log("✅ [SIP-CLOSE] Call log saved with ID:", savedLog._id)
         } catch (error) {
           console.log("❌ [SIP-CLOSE] Error saving call log:", error.message)
