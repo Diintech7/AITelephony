@@ -2592,6 +2592,10 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           // Intelligent WhatsApp send based on lead status and user requests
           try {
+            // Recompute WhatsApp request at end-of-call using full history
+            if (callLogger && agentConfig?.whatsappEnabled) {
+              try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
+            }
             if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
               const waLink = getAgentWhatsappLink(agentConfig)
               const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
@@ -2764,6 +2768,10 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     // Safety: Intelligent WhatsApp send on close if conditions are met
     try {
+      // Recompute at end-of-call using full history
+      if (callLogger && agentConfig?.whatsappEnabled) {
+        try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
+      }
       if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
         const waLink = getAgentWhatsappLink(agentConfig)
         const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
@@ -2875,6 +2883,27 @@ const setupSanPbxWebSocketServer = (ws) => {
   ws.on("error", (error) => {
     console.error("[SANPBX] WebSocket error:", error.message)
   })
+
+  // Determine at end of call if WhatsApp was requested by scanning the conversation
+  const detectWhatsAppRequestedAtEnd = async () => {
+    try {
+      // If already flagged during call, respect it
+      if (whatsappRequested) return true
+      const history = [...userTranscripts, ...aiResponses]
+        .sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp))
+        .map(e=>({ role: e.type === 'user' ? 'user' : 'assistant', content: e.text }))
+      const combinedUserText = userTranscripts.map(u => u.text).join(' \n ')
+      const result = await detectWhatsAppRequest(combinedUserText || ' ', history, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+      if (result === 'WHATSAPP_REQUEST') {
+        whatsappRequested = true
+        if (callLogger) callLogger.markWhatsAppRequested()
+        return true
+      }
+      return false
+    } catch (_) {
+      return whatsappRequested === true
+    }
+  }
 }
 
 /**
