@@ -5,17 +5,6 @@ const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 const Credit = require("../models/Credit")
 
-// Import franc with fallback for different versions
-let franc;
-try {
-  franc = require("franc").franc;
-  if (!franc) {
-    franc = require("franc");
-  }
-} catch (error) {
-  franc = () => 'und';
-}
-
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
@@ -147,57 +136,11 @@ function last10Digits(value) {
   return digits.slice(-10)
 }
 
-// Enhanced language mappings with Marathi support
-const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
-  en: "en-IN",
-  bn: "bn-IN",
-  te: "te-IN",
-  ta: "ta-IN",
-  mr: "mr-IN",
-  gu: "gu-IN",
-  kn: "kn-IN",
-  ml: "ml-IN",
-  pa: "pa-IN",
-  or: "or-IN",
-  as: "as-IN",
-  ur: "ur-IN",
-}
-
-// Enhanced Franc language code mapping to our supported languages
-const FRANC_TO_SUPPORTED = {
-  'hin': 'hi',
-  'eng': 'en',
-  'ben': 'bn',
-  'tel': 'te',
-  'tam': 'ta',
-  'mar': 'mr',
-  'guj': 'gu',
-  'kan': 'kn',
-  'mal': 'ml',
-  'pan': 'pa',
-  'ori': 'or',
-  'asm': 'as',
-  'urd': 'ur',
-  'src': 'en',
-  'und': 'en',
-  'lat': 'en',
-  'sco': 'en',
-  'fra': 'en',
-  'deu': 'en',
-  'nld': 'en',
-  'spa': 'en',
-  'ita': 'en',
-  'por': 'en',
-}
-
-const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
-  return LANGUAGE_MAPPING[lang] || "hi-IN"
-}
-
-const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
+// Language mapping helpers (agent-configured language only)
+const LANGUAGE_MAPPING = { hi: "hi-IN", en: "en-IN", bn: "bn-IN", te: "te-IN", ta: "ta-IN", mr: "mr-IN", gu: "gu-IN", kn: "kn-IN", ml: "ml-IN", pa: "pa-IN", or: "or-IN", as: "as-IN", ur: "ur-IN" }
+const getSarvamLanguage = (language = "hi") => LANGUAGE_MAPPING[(language || "hi").toLowerCase()] || "hi-IN"
+const getDeepgramLanguage = (language = "hi") => {
+  const lang = (language || "hi").toLowerCase()
   if (lang === "hi") return "hi"
   if (lang === "en") return "en-IN"
   if (lang === "mr") return "mr"
@@ -855,7 +798,7 @@ class EnhancedCallLogger {
   }
 
   // Final save with complete call data
-  async saveToDatabase(leadStatusInput = 'maybe') {
+  async saveToDatabase(leadStatusInput = 'maybe', agentConfig = null) {
     const timer = createTimer("FINAL_CALL_LOG_SAVE")
     try {
       const callEndTime = new Date()
@@ -870,12 +813,44 @@ class EnhancedCallLogger {
 
       const leadStatus = normalizeLeadStatus(leadStatusInput, 'maybe')
 
+      // Detect disposition if agent has depositions configured
+      let disposition = null
+      let subDisposition = null
+      let dispositionId = null
+      let subDispositionId = null
+      try {
+        const agentDepositions = agentConfig?.depositions
+        if (Array.isArray(agentDepositions) && agentDepositions.length > 0) {
+          console.log("🔍 [DISPOSITION-DETECTION] Analyzing conversation for disposition...")
+          const conversation = this.generateFullTranscript()
+          const history = [...this.transcripts, ...this.responses]
+            .sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp))
+            .map(e=>({ role: e.type === 'user' ? 'user' : 'assistant', content: e.text }))
+          const result = await detectDispositionWithOpenAI(history, agentDepositions)
+          disposition = result.disposition
+          subDisposition = result.subDisposition
+          dispositionId = result.dispositionId
+          subDispositionId = result.subDispositionId
+          if (disposition) {
+            console.log(`📊 [DISPOSITION-DETECTION] Detected disposition: ${disposition} (ID: ${dispositionId}) | ${subDisposition || 'N/A'} (ID: ${subDispositionId || 'N/A'})`)
+          }
+        } else {
+          console.log("⚠️ [DISPOSITION-DETECTION] No agent depositions configured")
+        }
+      } catch (e) {
+        console.log(`⚠️ [DISPOSITION-DETECTION] Error: ${e.message}`)
+      }
+
       if (this.isCallLogCreated && this.callLogId) {
         // Update existing call log with final data
         const finalUpdateData = {
           transcript: this.generateFullTranscript(),
           duration: this.totalDuration,
           leadStatus: leadStatus,
+          disposition: disposition,
+          subDisposition: subDisposition,
+          dispositionId: dispositionId,
+          subDispositionId: subDispositionId,
           streamSid: this.streamSid,
           callSid: this.callSid,
           'metadata.userTranscriptCount': this.transcripts.length,
@@ -907,6 +882,10 @@ class EnhancedCallLogger {
           transcript: this.generateFullTranscript(),
           duration: this.totalDuration,
           leadStatus: leadStatus,
+          disposition: disposition,
+          subDisposition: subDisposition,
+          dispositionId: dispositionId,
+          subDispositionId: subDispositionId,
           streamSid: this.streamSid,
           callSid: this.callSid,
           metadata: {
@@ -1259,6 +1238,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         "End with a brief follow-up question.",
         "Keep reply under 100 tokens.",
         "dont give any fornts or styles in it or symbols in it",
+        "in which language you get the transcript in same language give response in same language"
       ].join(" ")
       const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
       const personalizationMessage = userName && userName.trim()
@@ -1707,8 +1687,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
           if (callLogger && transcript.trim()) {
-            const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
-            callLogger.logUserTranscript(transcript.trim(), detectedLang)
+            callLogger.logUserTranscript(transcript.trim(), (agentConfig?.language || 'en').toLowerCase())
           }
 
           await processUserUtterance(userUtteranceBuffer)
@@ -1723,8 +1702,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       if (userUtteranceBuffer.trim()) {
         if (callLogger && userUtteranceBuffer.trim()) {
-          const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
-          callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
+          callLogger.logUserTranscript(userUtteranceBuffer.trim(), (agentConfig?.language || 'en').toLowerCase())
         }
 
         await processUserUtterance(userUtteranceBuffer)
@@ -1821,7 +1799,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         // Save the complete AI response as a single entry
         try {
           if (callLogger && aiResponse && aiResponse.trim()) {
-            callLogger.logAIResponse(aiResponse.trim(), (currentLanguage || 'en').toLowerCase())
+            callLogger.logAIResponse(aiResponse.trim(), (agentConfig?.language || 'en').toLowerCase())
           }
         } catch (_) {}
 
@@ -2680,7 +2658,7 @@ const setupSanPbxWebSocketServer = (ws) => {
               console.log("💾 [SANPBX-STOP] Saving final call log to database...")
               const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
               console.log("📊 [SANPBX-STOP] Final lead status:", finalLeadStatus)
-              const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
+              const savedLog = await callLogger.saveToDatabase(finalLeadStatus, agentConfig)
               console.log("✅ [SANPBX-STOP] Final call log saved with ID:", savedLog._id)
             } catch (error) {
               console.log("❌ [SANPBX-STOP] Error saving final call log:", error.message)
@@ -2852,7 +2830,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         console.log("💾 [SANPBX-CLOSE] Saving call log due to connection close...")
         const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
         console.log("📊 [SANPBX-CLOSE] Final lead status:", finalLeadStatus)
-        const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
+        const savedLog = await callLogger.saveToDatabase(finalLeadStatus, agentConfig)
         console.log("✅ [SANPBX-CLOSE] Call log saved with ID:", savedLog._id)
       } catch (error) {
         console.log("❌ [SANPBX-CLOSE] Error saving call log:", error.message)
@@ -2937,7 +2915,7 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
         }
       }
       
-      await callLogger.saveToDatabase(callLogger.currentLeadStatus || "maybe")
+      await callLogger.saveToDatabase(callLogger.currentLeadStatus || "maybe", agentConfig)
       return {
         success: true,
         message: 'Call terminated successfully',
@@ -3065,6 +3043,98 @@ const disconnectCallByCallId = async (callId, reason = 'manual_disconnect') => {
   }
 }
 
+// Disposition detection using OpenAI based on agent's depositions
+const detectDispositionWithOpenAI = async (conversationHistory, agentDepositions) => {
+  const timer = createTimer("DISPOSITION_DETECTION")
+  try {
+    if (!agentDepositions || !Array.isArray(agentDepositions) || agentDepositions.length === 0) {
+      console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - No depositions configured for agent`)
+      return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
+    }
+
+    const depositionsList = agentDepositions.map((dep, index) => {
+      const subDeps = dep.sub && Array.isArray(dep.sub) && dep.sub.length > 0 
+        ? dep.sub.map((sub, subIndex) => `${subIndex + 1}. ${sub}`).join('\n        ')
+        : 'No sub-dispositions'
+      return `${index + 1}. ${dep.title}:
+        Sub-dispositions:
+        ${subDeps}`
+    }).join('\n\n')
+
+    const conversationText = conversationHistory
+      .slice(-10)
+      .map(msg => `${msg.role === 'user' ? 'User' : 'AI'}: ${msg.content}`)
+      .join('\n')
+
+    const dispositionPrompt = `Analyze the conversation history and determine the most appropriate disposition and sub-disposition based on the user's responses and conversation outcome.
+
+Available Dispositions:
+${depositionsList}
+
+Conversation History:
+${conversationText}
+
+Instructions:
+1. Analyze the user's interest level, responses, and conversation outcome
+2. Select the most appropriate disposition from the list above
+3. If the selected disposition has sub-dispositions, choose the most relevant one
+4. If no sub-dispositions are available, return "N/A" for sub-disposition
+5. If the conversation doesn't clearly fit any disposition, return "General Inquiry" as disposition and "N/A" as sub-disposition
+
+Return your response in this exact format:
+DISPOSITION: [exact title from the list]
+SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${API_KEYS.openai}` },
+      body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "system", content: dispositionPrompt }], max_tokens: 100, temperature: 0.1 })
+    })
+
+    if (!response.ok) {
+      console.log(`❌ [DISPOSITION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
+    }
+
+    const data = await response.json()
+    const result = data.choices[0]?.message?.content?.trim()
+    const dispositionMatch = result?.match(/DISPOSITION:\s*(.+)/i)
+    const subDispositionMatch = result?.match(/SUB_DISPOSITION:\s*(.+)/i)
+    const dispositionTitle = dispositionMatch ? dispositionMatch[1].trim() : null
+    const subDispositionTitle = subDispositionMatch ? subDispositionMatch[1].trim() : null
+
+    const validDisposition = agentDepositions.find(dep => dep.title === dispositionTitle)
+    if (!validDisposition) {
+      console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid disposition detected: ${dispositionTitle}`)
+      return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
+    }
+
+    let validSubDisposition = null
+    let subDispositionId = null
+    if (subDispositionTitle && subDispositionTitle !== "N/A" && Array.isArray(validDisposition.sub)) {
+      validSubDisposition = validDisposition.sub.find(sub => sub === subDispositionTitle)
+      if (!validSubDisposition) {
+        validSubDisposition = validDisposition.sub.find(sub => sub.toLowerCase() === subDispositionTitle.toLowerCase())
+      }
+      if (!validSubDisposition) {
+        validSubDisposition = validDisposition.sub.find(sub => sub.toLowerCase().includes(subDispositionTitle.toLowerCase()) || subDispositionTitle.toLowerCase().includes(sub.toLowerCase()))
+      }
+      if (validSubDisposition) {
+        subDispositionId = validSubDisposition
+        console.log(`✅ [DISPOSITION-DETECTION] Matched sub-disposition: ${subDispositionTitle} -> ${validSubDisposition}`)
+      } else {
+        console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid sub-disposition detected: ${subDispositionTitle}`)
+      }
+    }
+
+    console.log(`🕒 [DISPOSITION-DETECTION] ${timer.end()}ms - Detected: ${dispositionTitle} (ID: ${validDisposition._id}) | ${validSubDisposition || 'N/A'}`)
+    return { disposition: dispositionTitle, subDisposition: validSubDisposition || null, dispositionId: validDisposition._id, subDispositionId }
+  } catch (error) {
+    console.log(`❌ [DISPOSITION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    return { disposition: null, subDisposition: null, dispositionId: null, subDispositionId: null }
+  }
+}
+
 module.exports = { 
   setupSanPbxWebSocketServer, 
   terminateCallByStreamSid,
@@ -3072,8 +3142,8 @@ module.exports = {
   disconnectCallViaAPI,
   // Export termination methods for external use
   terminationMethods: {
-    graceful: (callLogger, message, language) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe"),
-    fast: (callLogger, reason) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe"),
-    ultraFast: (callLogger, message, language, reason) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe")
+    graceful: (callLogger, message, language) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe", null),
+    fast: (callLogger, reason) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe", null),
+    ultraFast: (callLogger, message, language, reason) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe", null)
   }
 }
