@@ -403,12 +403,12 @@ class EnhancedCallLogger {
   }
 
   // Method to gracefully end call with goodbye message - PARALLEL EXECUTION
-  async gracefulCallEnd(goodbyeMessage = "Thank you for your time. Have a great day!", language = "en") {
+  async gracefulCallEnd(goodbyeMessage = "Thank you for your time. Have a great day!") {
     try {
       console.log("👋 [GRACEFUL-END] Ending call gracefully with goodbye message")
       
       // Log the goodbye message
-      this.logAIResponse(goodbyeMessage, language)
+      this.logAIResponse(goodbyeMessage)
       
       // Update call log immediately (non-blocking)
       const callLogUpdate = CallLog.findByIdAndUpdate(this.callLogId, {
@@ -416,7 +416,7 @@ class EnhancedCallLogger {
       }).catch(err => console.log(`⚠️ [GRACEFUL-END] Call log update error: ${err.message}`))
       
       // Start TTS synthesis for goodbye message (non-blocking)
-      const ttsPromise = this.synthesizeGoodbyeMessage(goodbyeMessage, language)
+      const ttsPromise = this.synthesizeGoodbyeMessage(goodbyeMessage)
       
       // Start disconnection process in parallel (non-blocking)
       const disconnectPromise = this.disconnectCall('graceful_termination')
@@ -437,12 +437,12 @@ class EnhancedCallLogger {
   }
 
   // Synthesize goodbye message without waiting for completion
-  async synthesizeGoodbyeMessage(message, language) {
+  async synthesizeGoodbyeMessage(message) {
     try {
       console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
       
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedSarvamTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS synthesis but don't wait for completion
         tts.synthesizeAndStream(message).catch(err => 
@@ -532,7 +532,7 @@ class EnhancedCallLogger {
       const allPromises = []
       
       // 1. Log the goodbye message (non-blocking)
-      this.logAIResponse(goodbyeMessage, language)
+      this.logAIResponse(goodbyeMessage)
       
       // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
       let ttsStarted = false
@@ -612,7 +612,7 @@ class EnhancedCallLogger {
       console.log(`⏱️ [CONTROLLED-TERMINATE] Controlled termination with message: ${reason}, delay: ${delayMs}ms`)
       
       // 1. Log the goodbye message
-      this.logAIResponse(goodbyeMessage, language)
+      this.logAIResponse(goodbyeMessage)
       
       // 2. Start TTS synthesis and wait for completion
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
