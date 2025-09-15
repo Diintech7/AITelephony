@@ -5,16 +5,7 @@ const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 const Credit = require("../models/Credit")
 
-// Import franc with fallback for different versions
-let franc;
-try {
-  franc = require("franc").franc;
-  if (!franc) {
-    franc = require("franc");
-  }
-} catch (error) {
-  franc = () => 'und';
-}
+// Language detection removed - using default language from agent config
 
 // Load API keys from environment variables
 const API_KEYS = {
@@ -109,7 +100,7 @@ const createTimer = (label) => {
   }
 }
 
-// Enhanced language mappings with Marathi support
+// Language mapping for TTS and STT services
 const LANGUAGE_MAPPING = {
   hi: "hi-IN",
   en: "en-IN",
@@ -126,40 +117,13 @@ const LANGUAGE_MAPPING = {
   ur: "ur-IN",
 }
 
-// Enhanced Franc language code mapping to our supported languages
-const FRANC_TO_SUPPORTED = {
-  'hin': 'hi',
-  'eng': 'en',
-  'ben': 'bn',
-  'tel': 'te',
-  'tam': 'ta',
-  'mar': 'mr',
-  'guj': 'gu',
-  'kan': 'kn',
-  'mal': 'ml',
-  'pan': 'pa',
-  'ori': 'or',
-  'asm': 'as',
-  'urd': 'ur',
-  'src': 'en',
-  'und': 'en',
-  'lat': 'en',
-  'sco': 'en',
-  'fra': 'en',
-  'deu': 'en',
-  'nld': 'en',
-  'spa': 'en',
-  'ita': 'en',
-  'por': 'en',
-}
-
-const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
+const getSarvamLanguage = (language = "hi") => {
+  const lang = language?.toLowerCase() || "hi"
   return LANGUAGE_MAPPING[lang] || "hi-IN"
 }
 
-const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang
+const getDeepgramLanguage = (language = "hi") => {
+  const lang = language?.toLowerCase() || "hi"
   if (lang === "hi") return "hi"
   if (lang === "en") return "en-IN"
   if (lang === "mr") return "mr"
@@ -239,165 +203,7 @@ const decodeCzdata = (czdataBase64) => {
   }
 };
 
-// Enhanced language detection with better fallback logic
-const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
-  try {
-    const cleanText = text.trim()
-    
-    if (cleanText.length < 10) {
-      const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
-      const hindiPatterns = /[\u0900-\u097F]/
-      const englishWords = /^[a-zA-Z\s\?\!\.\,\'\"]+$/
-      
-      if (hindiPatterns.test(cleanText)) {
-        return "hi"
-      } else if (englishPatterns.test(cleanText) || englishWords.test(cleanText)) {
-        return "en"
-      } else {
-        return fallbackLanguage
-      }
-    }
-
-    if (typeof franc !== 'function') {
-      return fallbackLanguage
-    }
-
-    const detected = franc(cleanText)
-
-    if (detected === 'und' || !detected) {
-      const hindiPatterns = /[\u0900-\u097F]/
-      if (hindiPatterns.test(cleanText)) {
-        return "hi"
-      }
-      
-      const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
-      if (latinScript.test(cleanText)) {
-        return "en"
-      }
-      
-      return fallbackLanguage
-    }
-
-    const mappedLang = FRANC_TO_SUPPORTED[detected]
-    
-    if (mappedLang) {
-      return mappedLang
-    } else {
-      const hindiPatterns = /[\u0900-\u097F]/
-      if (hindiPatterns.test(cleanText)) {
-        return "hi"
-      }
-      
-      const tamilScript = /[\u0B80-\u0BFF]/
-      const teluguScript = /[\u0C00-\u0C7F]/
-      const kannadaScript = /[\u0C80-\u0CFF]/
-      const malayalamScript = /[\u0D00-\u0D7F]/
-      const gujaratiScript = /[\u0A80-\u0AFF]/
-      const bengaliScript = /[\u0980-\u09FF]/
-      
-      if (tamilScript.test(cleanText)) return "ta"
-      if (teluguScript.test(cleanText)) return "te"
-      if (kannadaScript.test(cleanText)) return "kn"
-      if (malayalamScript.test(cleanText)) return "ml"
-      if (gujaratiScript.test(cleanText)) return "gu"
-      if (bengaliScript.test(cleanText)) return "bn"
-      
-      const latinScript = /^[a-zA-Z\s\?\!\.\,\'\"0-9\-\(\)]+$/
-      if (latinScript.test(cleanText)) {
-        return "en"
-      }
-      
-      return fallbackLanguage
-    }
-    
-  } catch (error) {
-    return fallbackLanguage
-  }
-}
-
-// Fallback to OpenAI for uncertain cases
-const detectLanguageWithOpenAI = async (text) => {
-  const timer = createTimer("LLM_LANGUAGE_DETECTION")
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content: `You are a language detection expert. Analyze the given text and return ONLY the 2-letter language code (hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur). 
-
-Examples:
-- "Hello, how are you?" → en
-- "What's our name?" → en
-- "नमस्ते, आप कैसे हैं?" → hi
-- "আপনি কেমন আছেন?" → bn
-- "நீங்கள் எப்படி இருக்கிறீர்கள்?" → ta
-- "तुम्ही कसे आहात?" → mr
-- "તમે કેમ છો?" → gu
-
-Return only the language code, nothing else.`,
-          },
-          {
-            role: "user",
-            content: text,
-          },
-        ],
-        max_tokens: 10,
-        temperature: 0.1,
-      }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`Language detection failed: ${response.status}`)
-    }
-
-    const data = await response.json()
-    const detectedLang = data.choices[0]?.message?.content?.trim().toLowerCase()
-
-    const validLanguages = Object.keys(LANGUAGE_MAPPING)
-    if (validLanguages.includes(detectedLang)) {
-      console.log(`🕒 [LLM-LANG-DETECT] ${timer.end()}ms - Detected: ${detectedLang}`)
-      return detectedLang
-    }
-
-    return "en"
-  } catch (error) {
-    console.log(`❌ [LLM-LANG-DETECT] ${timer.end()}ms - Error: ${error.message}`)
-    return "en"
-  }
-}
-
-// Enhanced hybrid language detection
-const detectLanguageHybrid = async (text, useOpenAIFallback = false) => {
-  const francResult = detectLanguageWithFranc(text)
-  
-  if (text.trim().length < 20) {
-    const englishPatterns = /^(what|how|why|when|where|who|can|do|does|did|is|are|am|was|were|have|has|had|will|would|could|should|may|might|hello|hi|hey|yes|no|ok|okay|thank|thanks|please|sorry|our|your|my|name|help)\b/i
-    const hindiPatterns = /[\u0900-\u097F]/
-    
-    if (hindiPatterns.test(text)) {
-      return "hi"
-    } else if (englishPatterns.test(text)) {
-      return "en"
-    }
-  }
-  
-  if (francResult === 'hi' || francResult === 'en') {
-    return francResult
-  }
-  
-  if (useOpenAIFallback && !['hi', 'en'].includes(francResult)) {
-    return await detectLanguageWithOpenAI(text)
-  }
-  
-  return francResult
-}
+// Language detection removed - using agent's configured language
 
 // Allowed lead statuses based on CallLog model
 const ALLOWED_LEAD_STATUSES = new Set([
@@ -439,7 +245,7 @@ class EnhancedCallLogger {
     this.currentLeadStatus = 'not_connected' // Track current lead status
     this.whatsappSent = false // Track if WhatsApp was already sent
     this.whatsappRequested = false // Track if user requested WhatsApp
-    this.currentLanguage = 'en' // Track current language for disposition analysis
+    this.currentLanguage = 'en' // Track current language from agent config
   }
 
   // Create initial call log entry immediately when call starts
@@ -836,11 +642,11 @@ class EnhancedCallLogger {
   }
 
   // Add transcript with batched live saving
-  logUserTranscript(transcript, language, timestamp = new Date()) {
+  logUserTranscript(transcript, timestamp = new Date()) {
     const entry = {
       type: "user",
       text: transcript,
-      language: language,
+      language: this.currentLanguage,
       timestamp: timestamp,
       source: "deepgram",
     }
@@ -853,11 +659,11 @@ class EnhancedCallLogger {
   }
 
   // Add AI response with batched live saving
-  logAIResponse(response, language, timestamp = new Date()) {
+  logAIResponse(response, timestamp = new Date()) {
     const entry = {
       type: "ai",
       text: response,
-      language: language,
+      language: this.currentLanguage,
       timestamp: timestamp,
       source: "sarvam",
     }
@@ -1150,7 +956,7 @@ class EnhancedCallLogger {
 const processWithOpenAI = async (
   userMessage,
   conversationHistory,
-  detectedLanguage,
+  language,
   callLogger,
   agentConfig,
   userName = null,
@@ -1171,6 +977,7 @@ const processWithOpenAI = async (
       "If the information is not present, reply briefly that you don't have that information.",
       "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
       "Keep the entire reply under 100 tokens.",
+      "Use the language of the user's message in the same language give the response.",
     ].join(" ")
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
@@ -1223,13 +1030,13 @@ const processWithOpenAI = async (
           mr: "आणखी काही मदत हवी आहे का?",
           gu: "શું બીજી કોઈ મદદ કરી શકું?",
         }
-        const fu = followUps[detectedLanguage] || followUps.en
+        const fu = followUps[language] || followUps.en
         fullResponse = `${fullResponse} ${fu}`.trim()
       }
     }
 
     if (callLogger && fullResponse) {
-      callLogger.logAIResponse(fullResponse, detectedLanguage)
+      callLogger.logAIResponse(fullResponse)
     }
 
     return fullResponse
@@ -1240,7 +1047,7 @@ const processWithOpenAI = async (
 }
 
 // Intelligent lead status detection using OpenAI
-const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory, detectedLanguage) => {
+const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory, language) => {
   const timer = createTimer("LEAD_STATUS_DETECTION")
   try {
     const leadStatusPrompt = `Analyze the user's interest level and conversation context to determine the appropriate lead status.
@@ -1306,7 +1113,7 @@ Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on th
 }
 
 // Intelligent call disconnection detection using OpenAI
-const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
+const detectCallDisconnectionIntent = async (userMessage, conversationHistory, language) => {
   const timer = createTimer("DISCONNECTION_DETECTION")
   try {
     const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
@@ -1357,7 +1164,7 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
 }
 
 // Intelligent WhatsApp request detection using OpenAI
-const detectWhatsAppRequest = async (userMessage, conversationHistory, detectedLanguage) => {
+const detectWhatsAppRequest = async (userMessage, conversationHistory, language) => {
   const timer = createTimer("WHATSAPP_REQUEST_DETECTION")
   try {
     const whatsappPrompt = `Analyze if the user is asking for WhatsApp information, link, or contact details. Look for:
@@ -1582,11 +1389,11 @@ class SimplifiedSarvamTTSProcessor {
     }
   }
 
-  reset(newLanguage) {
+  reset(language) {
     this.interrupt()
-    if (newLanguage) {
-      this.language = newLanguage
-      this.sarvamLanguage = getSarvamLanguage(newLanguage)
+    if (language) {
+      this.language = language
+      this.sarvamLanguage = getSarvamLanguage(language)
     }
     this.isInterrupted = false
     this.totalAudioBytes = 0
@@ -1887,8 +1694,7 @@ const setupUnifiedVoiceServer = (wss) => {
             userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
 
             if (callLogger && transcript.trim()) {
-              const detectedLang = detectLanguageWithFranc(transcript.trim(), currentLanguage || "en")
-              callLogger.logUserTranscript(transcript.trim(), detectedLang)
+              callLogger.logUserTranscript(transcript.trim())
             }
 
             await processUserUtterance(userUtteranceBuffer)
@@ -1903,8 +1709,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (userUtteranceBuffer.trim()) {
           if (callLogger && userUtteranceBuffer.trim()) {
-            const detectedLang = detectLanguageWithFranc(userUtteranceBuffer.trim(), currentLanguage || "en")
-            callLogger.logUserTranscript(userUtteranceBuffer.trim(), detectedLang)
+            callLogger.logUserTranscript(userUtteranceBuffer.trim())
           }
 
           await processUserUtterance(userUtteranceBuffer)
@@ -1930,18 +1735,6 @@ const setupUnifiedVoiceServer = (wss) => {
       const currentRequestId = ++processingRequestId
 
       try {
-        const detectedLanguage = detectLanguageWithFranc(text, currentLanguage || "en")
-        console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
-
-        if (detectedLanguage !== currentLanguage) {
-          console.log("🔄 [USER-UTTERANCE] Language changed from", currentLanguage, "to", detectedLanguage)
-          currentLanguage = detectedLanguage
-          // Update call logger's current language
-          if (callLogger) {
-            callLogger.currentLanguage = detectedLanguage
-          }
-        }
-
         // Run all AI detections in parallel for efficiency
         console.log("🔍 [USER-UTTERANCE] Running AI detections...")
         
@@ -1951,10 +1744,10 @@ const setupUnifiedVoiceServer = (wss) => {
           whatsappRequest, 
           aiResponse
         ] = await Promise.all([
-          detectCallDisconnectionIntent(text, conversationHistory, detectedLanguage),
-          detectLeadStatusWithOpenAI(text, conversationHistory, detectedLanguage),
-          detectWhatsAppRequest(text, conversationHistory, detectedLanguage),
-          processWithOpenAI(text, conversationHistory, detectedLanguage, callLogger, agentConfig)
+          detectCallDisconnectionIntent(text, conversationHistory, currentLanguage),
+          detectLeadStatusWithOpenAI(text, conversationHistory, currentLanguage),
+          detectWhatsAppRequest(text, conversationHistory, currentLanguage),
+          processWithOpenAI(text, conversationHistory, currentLanguage, callLogger, agentConfig)
         ])
 
         // Update call logger with detected information
@@ -1972,7 +1765,7 @@ const setupUnifiedVoiceServer = (wss) => {
           setTimeout(async () => {
             if (callLogger) {
               try {
-                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", detectedLanguage, 'user_requested_disconnect')
+                await callLogger.ultraFastTerminateWithMessage("Thank you for your time. Have a great day!", currentLanguage, 'user_requested_disconnect')
                 console.log("✅ [USER-UTTERANCE] Call terminated after 2 second delay")
               } catch (err) {
                 console.log(`⚠️ [USER-UTTERANCE] Termination error: ${err.message}`)
@@ -1987,7 +1780,7 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("🤖 [USER-UTTERANCE] AI Response:", aiResponse)
           console.log("🎤 [USER-UTTERANCE] Starting TTS...")
           
-          currentTTS = new SimplifiedSarvamTTSProcessor(detectedLanguage, ws, streamSid, callLogger)
+          currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
           await currentTTS.synthesizeAndStream(aiResponse)
 
           conversationHistory.push(
@@ -2293,7 +2086,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🎯 [SIP-CALL-SETUP] ======================================")
 
             if (callLogger) {
-              callLogger.logAIResponse(greeting, currentLanguage)
+              callLogger.logAIResponse(greeting)
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
