@@ -975,7 +975,7 @@ class EnhancedCallLogger {
         try {
           console.log("🔍 [DISPOSITION-DETECTION] Analyzing conversation for disposition...")
           const conversationHistory = this.generateConversationHistory()
-          const dispositionResult = await detectDispositionWithOpenAI(conversationHistory, agentConfig.depositions, this.currentLanguage || 'en')
+          const dispositionResult = await detectDispositionWithOpenAI(conversationHistory, agentConfig.depositions)
           disposition = dispositionResult.disposition
           subDisposition = dispositionResult.subDisposition
           dispositionId = dispositionResult.dispositionId
@@ -1433,7 +1433,7 @@ Return ONLY: "WHATSAPP_REQUEST" if they want WhatsApp info, or "NO_REQUEST" if n
  *   }
  * ]
  */
-const detectDispositionWithOpenAI = async (conversationHistory, agentDepositions, detectedLanguage) => {
+const detectDispositionWithOpenAI = async (conversationHistory, agentDepositions) => {
   const timer = createTimer("DISPOSITION_DETECTION")
   try {
     if (!agentDepositions || !Array.isArray(agentDepositions) || agentDepositions.length === 0) {
@@ -1518,13 +1518,32 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
     let subDispositionId = null
     
     if (subDispositionTitle && subDispositionTitle !== "N/A" && validDisposition.sub && Array.isArray(validDisposition.sub)) {
+      // Try exact match first
       validSubDisposition = validDisposition.sub.find(sub => sub === subDispositionTitle)
+      
+      // If no exact match, try case-insensitive match
+      if (!validSubDisposition) {
+        validSubDisposition = validDisposition.sub.find(sub => 
+          sub.toLowerCase() === subDispositionTitle.toLowerCase()
+        )
+      }
+      
+      // If still no match, try partial match
+      if (!validSubDisposition) {
+        validSubDisposition = validDisposition.sub.find(sub => 
+          sub.toLowerCase().includes(subDispositionTitle.toLowerCase()) ||
+          subDispositionTitle.toLowerCase().includes(sub.toLowerCase())
+        )
+      }
+      
       if (!validSubDisposition) {
         console.log(`⚠️ [DISPOSITION-DETECTION] ${timer.end()}ms - Invalid sub-disposition detected: ${subDispositionTitle}`)
+        console.log(`Available sub-dispositions: ${validDisposition.sub.join(', ')}`)
         validSubDisposition = null
       } else {
         // For sub-dispositions, we'll use the title as the ID since they don't have separate _id fields
-        subDispositionId = subDispositionTitle
+        subDispositionId = validSubDisposition
+        console.log(`✅ [DISPOSITION-DETECTION] Matched sub-disposition: ${subDispositionTitle} -> ${validSubDisposition}`)
       }
     }
 
