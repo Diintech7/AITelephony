@@ -1647,6 +1647,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       deepgramWs.onmessage = async (event) => {
         const data = JSON.parse(event.data)
+        console.log(data)
         await handleDeepgramResponse(data)
       }
 
