@@ -1592,7 +1592,7 @@ class SimplifiedElevenLabsTTSProcessor {
         headers: {
           "Content-Type": "application/json",
           "xi-api-key": API_KEYS.elevenlabs,
-          "Accept": "audio/pcm",
+          
         },
         body: JSON.stringify({
           text: text,
@@ -1645,7 +1645,7 @@ class SimplifiedElevenLabsTTSProcessor {
         headers: {
           "Content-Type": "application/json",
           "xi-api-key": API_KEYS.elevenlabs,
-          "Accept": "audio/pcm",
+          
         },
         body: JSON.stringify({
           text: text,
