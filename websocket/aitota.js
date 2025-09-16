@@ -1470,7 +1470,7 @@ class SimplifiedElevenLabsTTSProcessor {
             style: 0.0,
             use_speaker_boost: true
           },
-          output_format: "pcm_8000"  // Return raw PCM 8kHz; headerless for SIP
+          output_format: "wav_16000"  // Force WAV 16k; we'll extract PCM and resample to 8kHz
         }),
       })
 
@@ -1482,32 +1482,17 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns PCM 8kHz; verify headerless and guard against ID3/RIFF
+      // ElevenLabs returns WAV 16k; extract PCM and resample to 8kHz
       const audioBuffer = await response.arrayBuffer()
-      let pcmBase64 = Buffer.from(audioBuffer).toString('base64')
+      const wavBase64Primary = Buffer.from(audioBuffer).toString('base64')
+      let pcmBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64Primary)
       try {
-        const b = Buffer.from(pcmBase64, 'base64')
-        const sig4 = b.slice(0,4).toString('ascii')
-        if (sig4 === 'RIFF') {
-          console.log('🧪 [TTS-SYNTHESIS] Unexpected WAV header in PCM response; extracting data chunk')
-          pcmBase64 = this.extractPcmLinear16Mono8kBase64(pcmBase64)
-        } else if (sig4.startsWith('ID3')) {
-          console.log('⚠️ [TTS-SYNTHESIS] MP3 detected in pcm_8000 response; retrying with wav_8000 fallback')
-          const retry = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voice}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'xi-api-key': API_KEYS.elevenlabs },
-            body: JSON.stringify({
-              text,
-              model_id: 'eleven_multilingual_v2',
-              voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
-              output_format: 'wav_8000'
-            })
-          })
-          if (!retry.ok) throw new Error(`fallback wav_8000 failed: ${retry.status}`)
-          const retryBuf = await retry.arrayBuffer()
-          const retryWavB64 = Buffer.from(retryBuf).toString('base64')
-          pcmBase64 = this.extractPcmLinear16Mono8kBase64(retryWavB64)
-          console.log('✅ [TTS-SYNTHESIS] Fallback wav_8000 succeeded; extracted PCM for SIP')
+        const meta = this.parseWavHeaderFromBase64(wavBase64Primary)
+        if (meta && meta.sampleRate && meta.sampleRate !== 8000) {
+          const pcmBuf = Buffer.from(pcmBase64, 'base64')
+          const resampled = this.resamplePcm16Mono(pcmBuf, meta.sampleRate, 8000)
+          pcmBase64 = resampled.toString('base64')
+          console.log(`🧪 [TTS-SYNTHESIS] Resampled ${meta.sampleRate}Hz → 8000Hz for SIP`)
         }
       } catch (_) {}
 
@@ -1552,7 +1537,7 @@ class SimplifiedElevenLabsTTSProcessor {
           style: 0.0,
           use_speaker_boost: true
         },
-        output_format: "pcm_8000"  // Return raw PCM 8kHz; headerless for SIP
+        output_format: "wav_16000"  // Force WAV 16k; we'll extract PCM and resample to 8kHz
       }),
     })
     if (!response.ok) {
@@ -1560,16 +1545,16 @@ class SimplifiedElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const audioBuffer = await response.arrayBuffer()
-    // PCM 8kHz expected; guard against headers
-    let audioBase64 = Buffer.from(audioBuffer).toString('base64')
+    // Extract PCM and resample to 8kHz from WAV
+    const wavBase64 = Buffer.from(audioBuffer).toString('base64')
+    let audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
     try {
-      const b = Buffer.from(audioBase64, 'base64')
-      const sig4 = b.slice(0,4).toString('ascii')
-      if (sig4 === 'RIFF') {
-        console.log('🧪 [TTS-PREPARE] Unexpected WAV header in PCM response; extracting data chunk')
-        audioBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
-      } else if (sig4.startsWith('ID3')) {
-        console.log('❌ [TTS-PREPARE] Unexpected MP3 (ID3) in PCM response; using raw buffer but audio may distort')
+      const meta = this.parseWavHeaderFromBase64(wavBase64)
+      if (meta && meta.sampleRate && meta.sampleRate !== 8000) {
+        const pcmBuf = Buffer.from(audioBase64, 'base64')
+        const resampled = this.resamplePcm16Mono(pcmBuf, meta.sampleRate, 8000)
+        audioBase64 = resampled.toString('base64')
+        console.log(`🧪 [TTS-PREPARE] Resampled ${meta.sampleRate}Hz → 8000Hz for SIP`)
       }
     } catch (_) {}
     if (!audioBase64) {
