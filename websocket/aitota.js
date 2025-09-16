@@ -1482,15 +1482,20 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns WAV 8kHz; extract clean PCM s16le base64
+      // ElevenLabs returns WAV; extract PCM and resample to 8kHz if needed
       const audioBuffer = await response.arrayBuffer()
       const wavBase64 = Buffer.from(audioBuffer).toString('base64')
-      const audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
-      // Confirm WAV was detected
+      let pcmBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
       try {
-        const b = Buffer.from(wavBase64, 'base64')
-        const sig4 = b.slice(0,4).toString('ascii')
-        if (sig4 === 'RIFF') console.log('🧪 [TTS-SYNTHESIS] WAV header detected; extracted PCM for streaming')
+        const meta = this.parseWavHeaderFromBase64(wavBase64)
+        if (meta && meta.sampleRate && meta.sampleRate !== 8000) {
+          console.log(`🧪 [TTS-SYNTHESIS] WAV ${meta.sampleRate}Hz detected; resampling to 8000Hz`)
+          const pcmBuf = Buffer.from(pcmBase64, 'base64')
+          const resampled = this.resamplePcm16Mono(pcmBuf, meta.sampleRate, 8000)
+          pcmBase64 = resampled.toString('base64')
+        } else if (meta && meta.sampleRate === 8000) {
+          console.log('🧪 [TTS-SYNTHESIS] WAV 8000Hz detected; streaming as-is')
+        }
       } catch (_) {}
 
       if (!audioBase64 || this.isInterrupted) {
@@ -1505,8 +1510,8 @@ class SimplifiedElevenLabsTTSProcessor {
 
       if (!this.isInterrupted) {
         // Stream clean PCM s16le 8kHz
-        await this.streamAudioOptimizedForSIP(audioBase64)
-        const sentBuffer = Buffer.from(audioBase64, "base64")
+        await this.streamAudioOptimizedForSIP(pcmBase64)
+        const sentBuffer = Buffer.from(pcmBase64, "base64")
         this.totalAudioBytes += sentBuffer.length
       }
     } catch (error) {
@@ -1542,13 +1547,19 @@ class SimplifiedElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const audioBuffer = await response.arrayBuffer()
-    // Extract PCM from WAV for clean PCM s16le base64
+    // Extract PCM and resample if needed
     const wavBase64 = Buffer.from(audioBuffer).toString('base64')
-    const audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
+    let audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
     try {
-      const b = Buffer.from(wavBase64, 'base64')
-      const sig4 = b.slice(0,4).toString('ascii')
-      if (sig4 === 'RIFF') console.log('🧪 [TTS-PREPARE] WAV header detected; extracted PCM for streaming')
+      const meta = this.parseWavHeaderFromBase64(wavBase64)
+      if (meta && meta.sampleRate && meta.sampleRate !== 8000) {
+        console.log(`🧪 [TTS-PREPARE] WAV ${meta.sampleRate}Hz detected; resampling to 8000Hz`)
+        const pcmBuf = Buffer.from(audioBase64, 'base64')
+        const resampled = this.resamplePcm16Mono(pcmBuf, meta.sampleRate, 8000)
+        audioBase64 = resampled.toString('base64')
+      } else if (meta && meta.sampleRate === 8000) {
+        console.log('🧪 [TTS-PREPARE] WAV 8000Hz detected; using as-is')
+      }
     } catch (_) {}
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
@@ -1823,6 +1834,65 @@ class SimplifiedElevenLabsTTSProcessor {
     } catch (error) {
       console.log(`❌ [AUDIO-RESAMPLING] Error resampling audio: ${error.message}`)
       return audioBuffer
+    }
+  }
+
+  // Parse WAV header from base64, return minimal metadata
+  parseWavHeaderFromBase64(wavBase64) {
+    try {
+      const buf = Buffer.from(wavBase64, 'base64')
+      if (buf.length < 44) return null
+      if (buf.toString('ascii', 0, 4) !== 'RIFF') return null
+      if (buf.toString('ascii', 8, 12) !== 'WAVE') return null
+      const fmtOffset = 12
+      // Find 'fmt ' chunk
+      let offset = fmtOffset
+      let sampleRate = null
+      let channels = null
+      let bitsPerSample = null
+      while (offset + 8 <= buf.length) {
+        const id = buf.toString('ascii', offset, offset + 4)
+        const size = buf.readUInt32LE(offset + 4)
+        const next = offset + 8 + size
+        if (id === 'fmt ') {
+          channels = buf.readUInt16LE(offset + 10)
+          sampleRate = buf.readUInt32LE(offset + 12)
+          bitsPerSample = buf.readUInt16LE(offset + 22)
+          break
+        }
+        offset = next
+      }
+      return { sampleRate, channels, bitsPerSample }
+    } catch (_) {
+      return null
+    }
+  }
+
+  // Resample PCM s16le mono buffer from originalSampleRate → targetSampleRate using linear interpolation
+  resamplePcm16Mono(pcmBuffer, originalSampleRate, targetSampleRate) {
+    try {
+      if (!originalSampleRate || !targetSampleRate || originalSampleRate === targetSampleRate) return pcmBuffer
+      const samples = pcmBuffer.length / 2
+      const src = new Int16Array(samples)
+      for (let i = 0; i < samples; i++) src[i] = pcmBuffer.readInt16LE(i * 2)
+      const durationSec = samples / originalSampleRate
+      const targetSamples = Math.max(1, Math.round(durationSec * targetSampleRate))
+      const dst = new Int16Array(targetSamples)
+      const ratio = (samples - 1) / (targetSamples - 1)
+      for (let i = 0; i < targetSamples; i++) {
+        const pos = i * ratio
+        const idx = Math.floor(pos)
+        const frac = pos - idx
+        const s1 = src[idx]
+        const s2 = src[Math.min(idx + 1, samples - 1)]
+        const value = s1 + (s2 - s1) * frac
+        dst[i] = Math.max(-32768, Math.min(32767, Math.round(value)))
+      }
+      const out = Buffer.alloc(targetSamples * 2)
+      for (let i = 0; i < targetSamples; i++) out.writeInt16LE(dst[i], i * 2)
+      return out
+    } catch (_) {
+      return pcmBuffer
     }
   }
 
