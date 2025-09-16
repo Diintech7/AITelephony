@@ -1470,7 +1470,7 @@ class SimplifiedElevenLabsTTSProcessor {
             style: 0.0,
             use_speaker_boost: true
           },
-          output_format: "pcm_8000"  // Raw PCM 8kHz for SIP (no container)
+          output_format: "ulaw_8000"  // G711 μ-law 8kHz for SIP
         }),
       })
 
@@ -1482,20 +1482,10 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns raw PCM 8kHz; convert to base64 and guard
+      // ElevenLabs returns μ-law 8kHz; convert μ-law → PCM16 for our streaming path
       const audioBuffer = await response.arrayBuffer()
-      let pcmBase64 = Buffer.from(audioBuffer).toString('base64')
-      try {
-        const b = Buffer.from(pcmBase64, 'base64')
-        const sig4 = b.slice(0,4).toString('ascii')
-        if (sig4 === 'RIFF') {
-          console.log('🧪 [TTS-SYNTHESIS] Unexpected WAV header in PCM response; extracting data chunk')
-          pcmBase64 = this.extractPcmLinear16Mono8kBase64(pcmBase64)
-        } else if (sig4.startsWith('ID3')) {
-          console.log('❌ [TTS-SYNTHESIS] MP3 (ID3) detected in pcm_8000 response; aborting to avoid distortion')
-          throw new Error('MP3 detected in pcm_8000 response')
-        }
-      } catch (_) {}
+      const ulawBase64 = Buffer.from(audioBuffer).toString('base64')
+      let pcmBase64 = this.convertUlawBase64ToPcm16Base64(ulawBase64)
 
       if (!pcmBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
@@ -1538,7 +1528,7 @@ class SimplifiedElevenLabsTTSProcessor {
           style: 0.0,
           use_speaker_boost: true
         },
-        output_format: "pcm_8000"  // Raw PCM 8kHz for SIP (no container)
+        output_format: "ulaw_8000"  // G711 μ-law 8kHz for SIP
       }),
     })
     if (!response.ok) {
@@ -1546,18 +1536,9 @@ class SimplifiedElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const audioBuffer = await response.arrayBuffer()
-    // Raw PCM 8kHz; guard against container headers just in case
-    let audioBase64 = Buffer.from(audioBuffer).toString('base64')
-    try {
-      const b = Buffer.from(audioBase64, 'base64')
-      const sig4 = b.slice(0,4).toString('ascii')
-      if (sig4 === 'RIFF') {
-        console.log('🧪 [TTS-PREPARE] Unexpected WAV header in PCM response; extracting data chunk')
-        audioBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
-      } else if (sig4.startsWith('ID3')) {
-        console.log('❌ [TTS-PREPARE] MP3 (ID3) detected in pcm_8000 response; using raw buffer may distort')
-      }
-    } catch (_) {}
+    // μ-law 8kHz; convert μ-law → PCM16 8kHz base64 for streaming
+    const ulawBase64 = Buffer.from(audioBuffer).toString('base64')
+    let audioBase64 = this.convertUlawBase64ToPcm16Base64(ulawBase64)
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
       throw new Error("No audio data received from ElevenLabs API")
