@@ -1498,7 +1498,7 @@ class SimplifiedElevenLabsTTSProcessor {
         }
       } catch (_) {}
 
-      if (!audioBase64 || this.isInterrupted) {
+      if (!pcmBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
           throw new Error("No audio data received from ElevenLabs API")
