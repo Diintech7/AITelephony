@@ -1647,7 +1647,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       deepgramWs.onmessage = async (event) => {
         const data = JSON.parse(event.data)
-        console.log(data)
         await handleDeepgramResponse(data)
       }
 
@@ -2569,6 +2568,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
             if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
               deepgramWs.send(audioBuffer)
+              console.log(audioBuffer)
             } else {
               deepgramAudioQueue.push(audioBuffer)
               if (deepgramAudioQueue.length % 100 === 0) {
