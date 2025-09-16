@@ -1471,7 +1471,7 @@ class SimplifiedElevenLabsTTSProcessor {
             style: 0.0,
             use_speaker_boost: true
           },
-          output_format: "pcm_16000"  // Return PCM s16le 8kHz bytes directly for SIP
+          output_format: "pcm_8000"  // Return PCM s16le 8kHz bytes directly for SIP
         }),
       })
 
@@ -1483,7 +1483,7 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns raw PCM s16le bytes (8kHz) with pcm_16000 → base64
+      // ElevenLabs returns raw PCM s16le bytes (8kHz) with pcm_8000 → base64
       const audioBuffer = await response.arrayBuffer()
       const audioBase64 = Buffer.from(audioBuffer).toString('base64')
 
@@ -1528,7 +1528,7 @@ class SimplifiedElevenLabsTTSProcessor {
           style: 0.0,
           use_speaker_boost: true
         },
-        output_format: "pcm_16000"  // Return PCM s16le 8kHz bytes directly for SIP
+        output_format: "pcm_8000"  // Return PCM s16le 8kHz bytes directly for SIP
       }),
     })
     if (!response.ok) {
@@ -1605,6 +1605,15 @@ class SimplifiedElevenLabsTTSProcessor {
     let chunkIndex = 0
     let successfulChunks = 0
 
+    // One-time stream header log to confirm format and base64 preview
+    try {
+      const estimatedMs = Math.floor(audioBuffer.length / BYTES_PER_MS)
+      console.log(`🎧 [SIP-STREAM] Format=PCM s16le, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
+      const previewChunk = audioBuffer.slice(0, Math.min(OPTIMAL_CHUNK_SIZE, audioBuffer.length))
+      const previewB64 = previewChunk.toString("base64")
+      console.log(`🎧 [SIP-STREAM] FirstChunk Base64 (preview ${Math.min(previewB64.length, 120)} chars): ${previewB64.slice(0, 120)}${previewB64.length > 120 ? '…' : ''}`)
+    } catch (_) {}
+
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
       const remaining = audioBuffer.length - position
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
@@ -1620,6 +1629,10 @@ class SimplifiedElevenLabsTTSProcessor {
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
+          if (chunkIndex === 0) {
+            // Extra detail for the very first SEND
+            console.log(`📤 [SIP-STREAM] Sending first chunk: bytes=${chunk.length}, base64Len=${mediaMessage.media.payload.length}`)
+          }
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
         } catch (error) {
@@ -1640,6 +1653,7 @@ class SimplifiedElevenLabsTTSProcessor {
     }
 
     this.currentAudioStreaming = null
+    console.log(`✅ [SIP-STREAM] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
   }
 
   // Convert MP3 to μ-law format for optimal SIP telephony performance
