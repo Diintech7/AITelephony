@@ -1470,7 +1470,7 @@ class SimplifiedElevenLabsTTSProcessor {
             style: 0.0,
             use_speaker_boost: true
           },
-          output_format: "wav_8000"  // Return WAV 8kHz; we'll extract clean PCM
+          output_format: "pcm_8000"  // Return raw PCM 8kHz; headerless for SIP
         }),
       })
 
@@ -1482,19 +1482,18 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns WAV; extract PCM and resample to 8kHz if needed
+      // ElevenLabs returns PCM 8kHz; verify headerless and guard against ID3/RIFF
       const audioBuffer = await response.arrayBuffer()
-      const wavBase64 = Buffer.from(audioBuffer).toString('base64')
-      let pcmBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
+      let pcmBase64 = Buffer.from(audioBuffer).toString('base64')
       try {
-        const meta = this.parseWavHeaderFromBase64(wavBase64)
-        if (meta && meta.sampleRate && meta.sampleRate !== 8000) {
-          console.log(`🧪 [TTS-SYNTHESIS] WAV ${meta.sampleRate}Hz detected; resampling to 8000Hz`)
-          const pcmBuf = Buffer.from(pcmBase64, 'base64')
-          const resampled = this.resamplePcm16Mono(pcmBuf, meta.sampleRate, 8000)
-          pcmBase64 = resampled.toString('base64')
-        } else if (meta && meta.sampleRate === 8000) {
-          console.log('🧪 [TTS-SYNTHESIS] WAV 8000Hz detected; streaming as-is')
+        const b = Buffer.from(pcmBase64, 'base64')
+        const sig4 = b.slice(0,4).toString('ascii')
+        if (sig4 === 'RIFF') {
+          console.log('🧪 [TTS-SYNTHESIS] Unexpected WAV header in PCM response; extracting data chunk')
+          pcmBase64 = this.extractPcmLinear16Mono8kBase64(pcmBase64)
+        } else if (sig4.startsWith('ID3')) {
+          console.log('❌ [TTS-SYNTHESIS] Unexpected MP3 (ID3) in PCM response; aborting playback to avoid distortion')
+          throw new Error('ElevenLabs returned MP3 despite pcm_8000 request')
         }
       } catch (_) {}
 
@@ -1539,7 +1538,7 @@ class SimplifiedElevenLabsTTSProcessor {
           style: 0.0,
           use_speaker_boost: true
         },
-        output_format: "wav_8000"  // Return WAV 8kHz; we'll extract clean PCM
+        output_format: "pcm_8000"  // Return raw PCM 8kHz; headerless for SIP
       }),
     })
     if (!response.ok) {
@@ -1547,18 +1546,16 @@ class SimplifiedElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const audioBuffer = await response.arrayBuffer()
-    // Extract PCM and resample if needed
-    const wavBase64 = Buffer.from(audioBuffer).toString('base64')
-    let audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
+    // PCM 8kHz expected; guard against headers
+    let audioBase64 = Buffer.from(audioBuffer).toString('base64')
     try {
-      const meta = this.parseWavHeaderFromBase64(wavBase64)
-      if (meta && meta.sampleRate && meta.sampleRate !== 8000) {
-        console.log(`🧪 [TTS-PREPARE] WAV ${meta.sampleRate}Hz detected; resampling to 8000Hz`)
-        const pcmBuf = Buffer.from(audioBase64, 'base64')
-        const resampled = this.resamplePcm16Mono(pcmBuf, meta.sampleRate, 8000)
-        audioBase64 = resampled.toString('base64')
-      } else if (meta && meta.sampleRate === 8000) {
-        console.log('🧪 [TTS-PREPARE] WAV 8000Hz detected; using as-is')
+      const b = Buffer.from(audioBase64, 'base64')
+      const sig4 = b.slice(0,4).toString('ascii')
+      if (sig4 === 'RIFF') {
+        console.log('🧪 [TTS-PREPARE] Unexpected WAV header in PCM response; extracting data chunk')
+        audioBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+      } else if (sig4.startsWith('ID3')) {
+        console.log('❌ [TTS-PREPARE] Unexpected MP3 (ID3) in PCM response; using raw buffer but audio may distort')
       }
     } catch (_) {}
     if (!audioBase64) {
