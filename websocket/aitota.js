@@ -1498,9 +1498,10 @@ class SimplifiedElevenLabsTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        // Already μ-law 8kHz base64; stream as-is
-        await this.streamAudioOptimizedForSIP(audioBase64)
-        const sentBuffer = Buffer.from(audioBase64, "base64")
+        // Decode μ-law → PCM s16le 8kHz for SIP streaming
+        const pcmBase64 = this.convertUlawBase64ToPcm16Base64(audioBase64)
+        await this.streamAudioOptimizedForSIP(pcmBase64)
+        const sentBuffer = Buffer.from(pcmBase64, "base64")
         this.totalAudioBytes += sentBuffer.length
       }
     } catch (error) {
@@ -1536,7 +1537,9 @@ class SimplifiedElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const audioBuffer = await response.arrayBuffer()
-    const audioBase64 = Buffer.from(audioBuffer).toString('base64')
+    const ulawBase64 = Buffer.from(audioBuffer).toString('base64')
+    // Convert μ-law → PCM 16-bit 8kHz base64
+    const audioBase64 = this.convertUlawBase64ToPcm16Base64(ulawBase64)
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
       throw new Error("No audio data received from ElevenLabs API")
@@ -1574,9 +1577,8 @@ class SimplifiedElevenLabsTTSProcessor {
         const audioBase64 = item.audioBase64
         this.pendingQueue.shift()
         if (audioBase64) {
-          const ulawBase64 = this.convertMp3ToPcmLinear16Mono8k(audioBase64)
-          await this.streamAudioOptimizedForSIP(ulawBase64)
-          await new Promise(r => setTimeout(r, 20))  // Reduced delay for lower latency
+          await this.streamAudioOptimizedForSIP(audioBase64)
+          await new Promise(r => setTimeout(r, 10))  // minimal pacing
         }
       }
     } finally {
@@ -1587,18 +1589,18 @@ class SimplifiedElevenLabsTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
-    // audioBase64 should be μ-law (G.711) 8kHz when using ulaw_8000
+    // Expecting PCM s16le 8kHz base64 payload
     const audioBuffer = Buffer.from(audioBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    // SIP Audio Requirements: 8kHz sample rate, Mono, μ-law format
+    // SIP Audio Requirements: 8kHz sample rate, Mono, PCM s16le format
     // Optimized for telephony with minimal latency and disturbance
 
     const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 1  // μ-law uses 1 byte per sample
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000  // 8 bytes per ms
-    const OPTIMAL_CHUNK_SIZE = 160  // 20ms of G.711 μ-law at 8kHz (160 bytes)
+    const BYTES_PER_SAMPLE = 2  // PCM16 uses 2 bytes per sample
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000  // 16 bytes per ms
+    const OPTIMAL_CHUNK_SIZE = 320  // 20ms of PCM16 at 8kHz (320 bytes)
 
     let position = 0
     let chunkIndex = 0
@@ -1630,7 +1632,7 @@ class SimplifiedElevenLabsTTSProcessor {
 
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 1, 5)  // Reduced delay for lower latency
+        const delayMs = Math.max(chunkDurationMs - 2, 5)
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
@@ -1704,6 +1706,33 @@ class SimplifiedElevenLabsTTSProcessor {
       console.log(`❌ [PCM-TO-ULAW] Error converting to μ-law: ${error.message}`)
       return pcmBuffer
     }
+  }
+
+  // Convert μ-law base64 → PCM s16le 8kHz base64
+  convertUlawBase64ToPcm16Base64(ulawBase64) {
+    try {
+      const ulaw = Buffer.from(ulawBase64, 'base64')
+      const pcm = Buffer.alloc(ulaw.length * 2)
+      for (let i = 0; i < ulaw.length; i++) {
+        const s = this.ulawToLinear(ulaw[i])
+        pcm.writeInt16LE(s, i * 2)
+      }
+      return pcm.toString('base64')
+    } catch (e) {
+      return ulawBase64
+    }
+  }
+
+  // μ-law byte → linear PCM sample (16-bit)
+  ulawToLinear(uVal) {
+    uVal = ~uVal & 0xff
+    const BIAS = 0x84
+    const SIGN = (uVal & 0x80)
+    let exponent = (uVal >> 4) & 0x07
+    let mantissa = uVal & 0x0f
+    let sample = (((mantissa << 1) + 1) << (exponent + 2)) - BIAS
+    if (SIGN !== 0) sample = -sample
+    return sample
   }
 
   // Convert linear PCM to μ-law encoding
@@ -2020,25 +2049,14 @@ const setupUnifiedVoiceServer = (wss) => {
         const MIN_TOKENS = 8
         const MAX_TOKENS = 10
 
-        aiResponse = await processWithOpenAIStream(
+        // Fallback to non-streaming generation to avoid runtime error
+        aiResponse = await processWithOpenAI(
           text,
           conversationHistory,
+          currentLanguage,
+          callLogger,
           agentConfig,
-          userName,
-          async (partial) => {
-            if (processingRequestId !== currentRequestId) return
-            if (!partial || partial.length <= sentIndex) return
-            let pending = partial.slice(sentIndex)
-            while (pending.trim()) {
-              const tokens = pending.trim().split(/\s+/)
-              if (tokens.length < MIN_TOKENS) break
-              const take = Math.min(MAX_TOKENS, tokens.length)
-              const chunkText = tokens.slice(0, take).join(' ')
-              sentIndex += pending.indexOf(chunkText) + chunkText.length
-              try { await tts.enqueueText(chunkText) } catch (_) {}
-              pending = partial.slice(sentIndex)
-            }
-          }
+          userName
         )
 
         // Final flush for short tail
