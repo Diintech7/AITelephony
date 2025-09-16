@@ -1604,6 +1604,7 @@ class SimplifiedElevenLabsTTSProcessor {
           output_format: "pcm_16000"
         }),
       })
+      console.log('Response Content-Type:', response.headers.get('content-type'));
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
@@ -1657,7 +1658,7 @@ class SimplifiedElevenLabsTTSProcessor {
           output_format: "pcm_16000"
         }),
       })
-
+      console.log('Response Content-Type:', response.headers.get('content-type'));
       if (!response.ok) {
         console.log(`⚠ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
         throw new Error(`ElevenLabs API error: ${response.status}`)
