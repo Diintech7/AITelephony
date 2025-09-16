@@ -1492,8 +1492,22 @@ class SimplifiedElevenLabsTTSProcessor {
           console.log('🧪 [TTS-SYNTHESIS] Unexpected WAV header in PCM response; extracting data chunk')
           pcmBase64 = this.extractPcmLinear16Mono8kBase64(pcmBase64)
         } else if (sig4.startsWith('ID3')) {
-          console.log('❌ [TTS-SYNTHESIS] Unexpected MP3 (ID3) in PCM response; aborting playback to avoid distortion')
-          throw new Error('ElevenLabs returned MP3 despite pcm_8000 request')
+          console.log('⚠️ [TTS-SYNTHESIS] MP3 detected in pcm_8000 response; retrying with wav_8000 fallback')
+          const retry = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voice}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'xi-api-key': API_KEYS.elevenlabs },
+            body: JSON.stringify({
+              text,
+              model_id: 'eleven_multilingual_v2',
+              voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
+              output_format: 'wav_8000'
+            })
+          })
+          if (!retry.ok) throw new Error(`fallback wav_8000 failed: ${retry.status}`)
+          const retryBuf = await retry.arrayBuffer()
+          const retryWavB64 = Buffer.from(retryBuf).toString('base64')
+          pcmBase64 = this.extractPcmLinear16Mono8kBase64(retryWavB64)
+          console.log('✅ [TTS-SYNTHESIS] Fallback wav_8000 succeeded; extracted PCM for SIP')
         }
       } catch (_) {}
 
@@ -1612,12 +1626,16 @@ class SimplifiedElevenLabsTTSProcessor {
     let workingBase64 = audioBase64
     try {
       const probe = Buffer.from(audioBase64, 'base64')
-      if (probe.length >= 12) {
-        const isRIFF = probe.toString('ascii', 0, 4) === 'RIFF'
-        const isWAVE = probe.toString('ascii', 8, 12) === 'WAVE'
-        if (isRIFF && isWAVE) {
+      if (probe.length >= 4) {
+        const sig4 = probe.slice(0,4).toString('ascii')
+        const isRIFF = sig4 === 'RIFF'
+        const isWAVE = probe.length >= 12 && probe.toString('ascii', 8, 12) === 'WAVE'
+        if (isRIFF || isWAVE) {
           console.log('🧪 [SIP-STREAM] Detected WAV header in payload; extracting PCM before streaming')
           workingBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+        } else if (sig4.startsWith('ID3')) {
+          console.log('❌ [SIP-STREAM] MP3 (ID3) payload blocked from streaming to avoid distortion')
+          return
         }
       }
     } catch (_) {}
