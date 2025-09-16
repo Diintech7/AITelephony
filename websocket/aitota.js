@@ -1471,7 +1471,7 @@ class SimplifiedElevenLabsTTSProcessor {
             style: 0.0,
             use_speaker_boost: true
           },
-          output_format: "mp3_22050_32"  // Lower sample rate and bitrate for telephony
+          output_format: "ulaw_8000"  // Return μ-law 8kHz bytes directly for SIP
         }),
       })
 
@@ -1483,6 +1483,7 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
+      // ElevenLabs returns raw μ-law bytes (8kHz) with ulaw_8000 → convert to base64
       const audioBuffer = await response.arrayBuffer()
       const audioBase64 = Buffer.from(audioBuffer).toString('base64')
 
@@ -1497,10 +1498,10 @@ class SimplifiedElevenLabsTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        const ulawBase64 = this.convertMp3ToPcmLinear16Mono8k(audioBase64)
-        await this.streamAudioOptimizedForSIP(ulawBase64)
-        const audioBuffer = Buffer.from(ulawBase64, "base64")
-        this.totalAudioBytes += audioBuffer.length
+        // Already μ-law 8kHz base64; stream as-is
+        await this.streamAudioOptimizedForSIP(audioBase64)
+        const sentBuffer = Buffer.from(audioBase64, "base64")
+        this.totalAudioBytes += sentBuffer.length
       }
     } catch (error) {
       if (!this.isInterrupted) {
@@ -1527,7 +1528,7 @@ class SimplifiedElevenLabsTTSProcessor {
           style: 0.0,
           use_speaker_boost: true
         },
-        output_format: "mp3_22050_32"  // Lower sample rate and bitrate for telephony
+        output_format: "ulaw_8000"  // Return μ-law 8kHz bytes directly for SIP
       }),
     })
     if (!response.ok) {
@@ -1586,6 +1587,7 @@ class SimplifiedElevenLabsTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
+    // audioBase64 should be μ-law (G.711) 8kHz when using ulaw_8000
     const audioBuffer = Buffer.from(audioBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
@@ -1593,10 +1595,10 @@ class SimplifiedElevenLabsTTSProcessor {
     // SIP Audio Requirements: 8kHz sample rate, Mono, μ-law format
     // Optimized for telephony with minimal latency and disturbance
 
-    const SAMPLE_RATE = SIP_AUDIO_CONFIG.SAMPLE_RATE
+    const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 1  // μ-law uses 1 byte per sample
-    const BYTES_PER_MS = SIP_AUDIO_CONFIG.SAMPLE_RATE * BYTES_PER_SAMPLE / 1000  // 8 bytes per ms
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS)  // 20ms chunks for lower latency
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000  // 8 bytes per ms
+    const OPTIMAL_CHUNK_SIZE = 160  // 20ms of G.711 μ-law at 8kHz (160 bytes)
 
     let position = 0
     let chunkIndex = 0
