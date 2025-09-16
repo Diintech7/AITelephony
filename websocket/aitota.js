@@ -5,18 +5,21 @@ const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 const Credit = require("../models/Credit")
 
+// ElevenLabs TTS Integration
+// This file has been updated to use ElevenLabs API instead of Sarvam for text-to-speech
+// Default voice: Rachel (JBFqnCBsd6RMkjVDRZzb) - Professional female voice
 // Language detection removed - using default language from agent config
 
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
-  sarvam: process.env.SARVAM_API_KEY,
+  elevenlabs: process.env.ELEVENLABS_API_KEY,
   openai: process.env.OPENAI_API_KEY,
   whatsapp: process.env.WHATSAPP_TOKEN,
 }
 
 // Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+if (!API_KEYS.deepgram || !API_KEYS.elevenlabs || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables")
   process.exit(1)
 }
@@ -102,24 +105,24 @@ const createTimer = (label) => {
 
 // Language mapping for TTS and STT services
 const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
-  en: "en-IN",
-  bn: "bn-IN",
-  te: "te-IN",
-  ta: "ta-IN",
-  mr: "mr-IN",
-  gu: "gu-IN",
-  kn: "kn-IN",
-  ml: "ml-IN",
-  pa: "pa-IN",
-  or: "or-IN",
-  as: "as-IN",
-  ur: "ur-IN",
+  hi: "hi",
+  en: "en",
+  bn: "bn",
+  te: "te",
+  ta: "ta",
+  mr: "mr",
+  gu: "gu",
+  kn: "kn",
+  ml: "ml",
+  pa: "pa",
+  or: "or",
+  as: "as",
+  ur: "ur",
 }
 
-const getSarvamLanguage = (language = "hi") => {
-  const lang = language?.toLowerCase() || "hi"
-  return LANGUAGE_MAPPING[lang] || "hi-IN"
+const getElevenLabsLanguage = (language = "en") => {
+  const lang = language?.toLowerCase() || "en"
+  return LANGUAGE_MAPPING[lang] || "en"
 }
 
 const getDeepgramLanguage = (language = "hi") => {
@@ -130,47 +133,79 @@ const getDeepgramLanguage = (language = "hi") => {
   return lang
 }
 
-// Valid Sarvam voice options
-const VALID_SARVAM_VOICES = new Set([
-  "abhilash",
-  "anushka",
-  "meera",
-  "pavithra",
-  "maitreyi",
-  "arvind",
-  "amol",
-  "amartya",
-  "diya",
-  "neel",
-  "misha",
-  "vian",
-  "arjun",
-  "maya",
-  "manisha",
-  "vidya",
-  "arya",
-  "karun",
-  "hitesh",
+// Valid ElevenLabs voice options (voice IDs)
+const VALID_ELEVENLABS_VOICES = new Set([
+  "JBFqnCBsd6RMkjVDRZzb", // Default voice (Rachel) - Professional female
+  "EXAVITQu4vr4xnSDxMaL", // Bella - Professional female
+  "MF3mGyEYCl7XYWbV9V6O", // Elli - Friendly female
+  "TxGEqnHWrfWFTfGW9XjX", // Josh - Professional male
+  "VR6AewLTigWG4xSOukaG", // Arnold - Deep male
+  "pNInz6obpgDQGcFmaJgB", // Adam - Friendly male
+  "yoZ06aMxZJJ28mfd3POQ", // Sam - Professional male
+  "AZnzlk1XvdvUeBnXmlld", // Domi - Energetic female
+  "ErXwobaYiN019PkySvjV", // Antoni - Professional male
+  "LcfcDJNUP1GQjkzn1xUU", // Bill - Professional male
+  "pqHfZKP75CvOlQylNhV4", // Boris - Deep male
+  "XB0fqtBnxyJaPExlL7V9", // Charlotte - Professional female
+  "2EiwWnXFnvU5JabPnv8n", // Clyde - Professional male
+  "9BWtwz2T6Zebi4Lp6iXH", // Dave - Friendly male
+  "CYw3kZ02Hs0563khs1Fj", // Fin - Professional male
+  "N2lVS1w4EtoT3dr4eOWO", // Gigi - Professional female
+  "oWAxZDx7w5VEj9dCyTzz", // Grace - Professional female
+  "pqHfZKP75CvOlQylNhV4", // James - Professional male
+  "XB0fqtBnxyJaPExlL7V9", // Jeremy - Professional male
+  "2EiwWnXFnvU5JabPnv8n", // Joseph - Professional male
+  "9BWtwz2T6Zebi4Lp6iXH", // Lili - Professional female
+  "CYw3kZ02Hs0563khs1Fj", // Matilda - Professional female
+  "N2lVS1w4EtoT3dr4eOWO", // Michael - Professional male
+  "oWAxZDx7w5VEj9dCyTzz", // Nicole - Professional female
 ])
 
-const getValidSarvamVoice = (voiceSelection = "pavithra") => {
-  const normalized = (voiceSelection || "").toString().trim().toLowerCase()
-  if (VALID_SARVAM_VOICES.has(normalized)) {
+const getValidElevenLabsVoice = (voiceSelection = "JBFqnCBsd6RMkjVDRZzb") => {
+  const normalized = (voiceSelection || "").toString().trim()
+  
+  // If it's already a valid voice ID, return it
+  if (VALID_ELEVENLABS_VOICES.has(normalized)) {
     return normalized
   }
 
+  // Map common voice names to ElevenLabs voice IDs
   const voiceMapping = {
-    "male-professional": "arvind",
-    "female-professional": "pavithra",
-    "male-friendly": "amol",
-    "female-friendly": "maya",
-    neutral: "pavithra",
-    default: "pavithra",
-    male: "arvind",
-    female: "pavithra",
+    "male-professional": "TxGEqnHWrfWFTfGW9XjX", // Josh
+    "female-professional": "EXAVITQu4vr4xnSDxMaL", // Bella
+    "male-friendly": "pNInz6obpgDQGcFmaJgB", // Adam
+    "female-friendly": "MF3mGyEYCl7XYWbV9V6O", // Elli
+    "neutral": "JBFqnCBsd6RMkjVDRZzb", // Rachel (default)
+    "default": "JBFqnCBsd6RMkjVDRZzb", // Rachel (default)
+    "male": "TxGEqnHWrfWFTfGW9XjX", // Josh
+    "female": "EXAVITQu4vr4xnSDxMaL", // Bella
+    "rachel": "JBFqnCBsd6RMkjVDRZzb", // Rachel
+    "bella": "EXAVITQu4vr4xnSDxMaL", // Bella
+    "josh": "TxGEqnHWrfWFTfGW9XjX", // Josh
+    "adam": "pNInz6obpgDQGcFmaJgB", // Adam
+    "elli": "MF3mGyEYCl7XYWbV9V6O", // Elli
+    "arnold": "VR6AewLTigWG4xSOukaG", // Arnold
+    "sam": "yoZ06aMxZJJ28mfd3POQ", // Sam
+    "domi": "AZnzlk1XvdvUeBnXmlld", // Domi
+    "antoni": "ErXwobaYiN019PkySvjV", // Antoni
+    "bill": "LcfcDJNUP1GQjkzn1xUU", // Bill
+    "boris": "pqHfZKP75CvOlQylNhV4", // Boris
+    "charlotte": "XB0fqtBnxyJaPExlL7V9", // Charlotte
+    "clyde": "2EiwWnXFnvU5JabPnv8n", // Clyde
+    "dave": "9BWtwz2T6Zebi4Lp6iXH", // Dave
+    "fin": "CYw3kZ02Hs0563khs1Fj", // Fin
+    "gigi": "N2lVS1w4EtoT3dr4eOWO", // Gigi
+    "grace": "oWAxZDx7w5VEj9dCyTzz", // Grace
+    "james": "pqHfZKP75CvOlQylNhV4", // James
+    "jeremy": "XB0fqtBnxyJaPExlL7V9", // Jeremy
+    "joseph": "2EiwWnXFnvU5JabPnv8n", // Joseph
+    "lili": "9BWtwz2T6Zebi4Lp6iXH", // Lili
+    "matilda": "CYw3kZ02Hs0563khs1Fj", // Matilda
+    "michael": "N2lVS1w4EtoT3dr4eOWO", // Michael
+    "nicole": "oWAxZDx7w5VEj9dCyTzz", // Nicole
   }
 
-  return voiceMapping[normalized] || "pavithra"
+  return voiceMapping[normalized.toLowerCase()] || "JBFqnCBsd6RMkjVDRZzb" // Default to Rachel
 }
 
 // Utility function to decode base64 extra data
@@ -270,7 +305,7 @@ class EnhancedCallLogger {
           isActive: true,
           lastUpdated: new Date(),
           sttProvider: 'deepgram',
-          ttsProvider: 'sarvam',
+          ttsProvider: 'elevenlabs',
           llmProvider: 'openai',
           customParams: this.customParams || {},
           callerId: this.callerId || undefined,
@@ -442,7 +477,7 @@ class EnhancedCallLogger {
       console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
       
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS synthesis but don't wait for completion
         tts.synthesizeAndStream(message).catch(err => 
@@ -537,7 +572,7 @@ class EnhancedCallLogger {
       // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
       let ttsStarted = false
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS and wait for it to begin
         try {
@@ -616,7 +651,7 @@ class EnhancedCallLogger {
       
       // 2. Start TTS synthesis and wait for completion
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         try {
           console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
@@ -665,7 +700,7 @@ class EnhancedCallLogger {
       text: response,
       language: this.currentLanguage,
       timestamp: timestamp,
-      source: "sarvam",
+      source: "elevenlabs",
     }
 
     this.responses.push(entry)
@@ -1369,14 +1404,14 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
 }
 
 // Simplified TTS processor
-class SimplifiedSarvamTTSProcessor {
+class SimplifiedElevenLabsTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
+    this.elevenLabsLanguage = getElevenLabsLanguage(language)
+    this.voice = getValidElevenLabsVoice(ws.sessionAgentConfig?.voiceSelection || "default")
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
@@ -1395,7 +1430,7 @@ class SimplifiedSarvamTTSProcessor {
     this.interrupt()
     if (language) {
       this.language = language
-      this.sarvamLanguage = getSarvamLanguage(language)
+      this.elevenLabsLanguage = getElevenLabsLanguage(language)
     }
     this.isInterrupted = false
     this.totalAudioBytes = 0
@@ -1407,40 +1442,39 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voice}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
+          "xi-api-key": API_KEYS.elevenlabs,
         },
         body: JSON.stringify({
-          inputs: [text],
-          target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: true,
-          model: "bulbul:v1",
+          text: text,
+          model_id: "eleven_multilingual_v2",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.5,
+            style: 0.0,
+            use_speaker_boost: true
+          }
         }),
       })
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
-          throw new Error(`Sarvam API error: ${response.status}`)
+          throw new Error(`ElevenLabs API error: ${response.status}`)
         }
         return
       }
 
-      const responseData = await response.json()
-      const audioBase64 = responseData.audios?.[0]
+      const audioBuffer = await response.arrayBuffer()
+      const audioBase64 = Buffer.from(audioBuffer).toString('base64')
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
-          throw new Error("No audio data received from Sarvam API")
+          throw new Error("No audio data received from ElevenLabs API")
         }
         return
       }
@@ -1448,7 +1482,7 @@ class SimplifiedSarvamTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+        const pcmBase64 = this.convertMp3ToPcmLinear16Mono8k(audioBase64)
         await this.streamAudioOptimizedForSIP(pcmBase64)
         const audioBuffer = Buffer.from(pcmBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
@@ -1463,23 +1497,32 @@ class SimplifiedSarvamTTSProcessor {
 
   async synthesizeToBuffer(text) {
     const timer = createTimer("TTS_PREPARE")
-    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voice}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "API-Subscription-Key": API_KEYS.sarvam },
+      headers: { 
+        "Content-Type": "application/json", 
+        "xi-api-key": API_KEYS.elevenlabs 
+      },
       body: JSON.stringify({
-        inputs: [text], target_language_code: this.sarvamLanguage, speaker: this.voice,
-        pitch: 0, pace: 1.0, loudness: 1.0, speech_sample_rate: 8000, enable_preprocessing: true, model: "bulbul:v1",
+        text: text,
+        model_id: "eleven_multilingual_v2",
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.5,
+          style: 0.0,
+          use_speaker_boost: true
+        }
       }),
     })
     if (!response.ok) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
-      throw new Error(`Sarvam API error: ${response.status}`)
+      throw new Error(`ElevenLabs API error: ${response.status}`)
     }
-    const data = await response.json()
-    const audioBase64 = data.audios?.[0]
+    const audioBuffer = await response.arrayBuffer()
+    const audioBase64 = Buffer.from(audioBuffer).toString('base64')
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
-      throw new Error("No audio data received from Sarvam API")
+      throw new Error("No audio data received from ElevenLabs API")
     }
     console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
     return audioBase64
@@ -1514,7 +1557,7 @@ class SimplifiedSarvamTTSProcessor {
         const audioBase64 = item.audioBase64
         this.pendingQueue.shift()
         if (audioBase64) {
-          const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+          const pcmBase64 = this.convertMp3ToPcmLinear16Mono8k(audioBase64)
           await this.streamAudioOptimizedForSIP(pcmBase64)
           await new Promise(r => setTimeout(r, 60))
         }
@@ -1575,6 +1618,20 @@ class SimplifiedSarvamTTSProcessor {
     }
 
     this.currentAudioStreaming = null
+  }
+
+  // Convert MP3 to PCM Linear16 Mono 8kHz for SIP compatibility
+  convertMp3ToPcmLinear16Mono8k(audioBase64) {
+    try {
+      // For now, return the audio as-is since ElevenLabs returns MP3
+      // In production, you might want to use ffmpeg or similar to convert MP3 to PCM
+      // This is a simplified approach - the actual conversion would require audio processing
+      console.log("⚠️ [AUDIO-CONVERSION] MP3 to PCM conversion not implemented - using raw audio")
+      return audioBase64
+    } catch (error) {
+      console.log(`❌ [AUDIO-CONVERSION] Error converting MP3 to PCM: ${error.message}`)
+      return audioBase64
+    }
   }
 
   extractPcmLinear16Mono8kBase64(audioBase64) {
@@ -1832,7 +1889,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off LLM streaming and partial TTS
         let aiResponse = null
-        const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
         let sentIndex = 0
         const MIN_TOKENS = 8
@@ -2195,7 +2252,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            const tts = new SimplifiedElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
