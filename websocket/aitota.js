@@ -1471,7 +1471,7 @@ class SimplifiedElevenLabsTTSProcessor {
             style: 0.0,
             use_speaker_boost: true
           },
-          output_format: "wav_8000"  // Return WAV 8kHz; we'll extract PCM for SIP
+          output_format: "pcm_16000"  // Return PCM s16le 8kHz bytes directly for SIP
         }),
       })
 
@@ -1483,10 +1483,9 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns WAV 8kHz; extract clean PCM s16le base64
+      // ElevenLabs returns raw PCM s16le bytes (8kHz) with pcm_16000 → base64
       const audioBuffer = await response.arrayBuffer()
-      const wavBase64 = Buffer.from(audioBuffer).toString('base64')
-      const audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
+      const audioBase64 = Buffer.from(audioBuffer).toString('base64')
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
@@ -1499,7 +1498,7 @@ class SimplifiedElevenLabsTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        // Stream clean PCM s16le 8kHz
+        // Already PCM s16le 8kHz base64; stream as-is
         await this.streamAudioOptimizedForSIP(audioBase64)
         const sentBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += sentBuffer.length
@@ -1529,7 +1528,7 @@ class SimplifiedElevenLabsTTSProcessor {
           style: 0.0,
           use_speaker_boost: true
         },
-        output_format: "wav_8000"  // Return WAV 8kHz; we'll extract PCM for SIP
+        output_format: "pcm_16000"  // Return PCM s16le 8kHz bytes directly for SIP
       }),
     })
     if (!response.ok) {
@@ -1595,12 +1594,12 @@ class SimplifiedElevenLabsTTSProcessor {
     this.currentAudioStreaming = streamingSession
 
     // SIP Audio Requirements: 8kHz sample rate, Mono, PCM s16le format
-    // Use 20ms chunks (320 bytes) for crisper timing and less blur
+    // Match testing3.js behavior: 40ms chunks (640 bytes) and pacing
 
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2  // PCM16 uses 2 bytes per sample
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000  // 16 bytes per ms
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS)  // 20ms of PCM16 at 8kHz (320 bytes)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)  // 40ms of PCM16 at 8kHz (640 bytes)
 
     let position = 0
     let chunkIndex = 0
@@ -1608,9 +1607,7 @@ class SimplifiedElevenLabsTTSProcessor {
 
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
       const remaining = audioBuffer.length - position
-      // Ensure chunkSize is even (sample-aligned: 2 bytes per sample)
-      let chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
-      if (chunkSize % 2 !== 0) chunkSize -= 1
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
       const chunk = audioBuffer.slice(position, position + chunkSize)
 
       const mediaMessage = {
@@ -1634,7 +1631,7 @@ class SimplifiedElevenLabsTTSProcessor {
 
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 5) // slightly tighter pacing for clarity
+        const delayMs = Math.max(chunkDurationMs - 2, 10) // align with testing3 pacing
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
