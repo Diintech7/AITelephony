@@ -1430,6 +1430,7 @@ class SimplifiedElevenLabsTTSProcessor {
     this.totalAudioBytes = 0
     this.pendingQueue = [] // { text, audioBase64, preparing }
     this.isProcessingQueue = false
+    this.currentCodec = 'pcm' // 'pcm' | 'ulaw'
   }
 
   interrupt() {
@@ -1482,12 +1483,13 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns μ-law 8kHz; convert μ-law → PCM16 for our streaming path
+      // ElevenLabs returns μ-law 8kHz; stream μ-law directly for SIP
       const audioBuffer = await response.arrayBuffer()
       const ulawBase64 = Buffer.from(audioBuffer).toString('base64')
-      let pcmBase64 = this.convertUlawBase64ToPcm16Base64(ulawBase64)
+      this.currentCodec = 'ulaw'
+      const codecBase64 = ulawBase64
 
-      if (!pcmBase64 || this.isInterrupted) {
+      if (!codecBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
           throw new Error("No audio data received from ElevenLabs API")
@@ -1498,9 +1500,9 @@ class SimplifiedElevenLabsTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        // Stream clean PCM s16le 8kHz
-        await this.streamAudioOptimizedForSIP(pcmBase64)
-        const sentBuffer = Buffer.from(pcmBase64, "base64")
+        // Stream μ-law 8kHz directly
+        await this.streamAudioOptimizedForSIP(codecBase64)
+        const sentBuffer = Buffer.from(codecBase64, "base64")
         this.totalAudioBytes += sentBuffer.length
       }
     } catch (error) {
@@ -1536,9 +1538,10 @@ class SimplifiedElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const audioBuffer = await response.arrayBuffer()
-    // μ-law 8kHz; convert μ-law → PCM16 8kHz base64 for streaming
+    // μ-law 8kHz; return μ-law base64 and mark codec
     const ulawBase64 = Buffer.from(audioBuffer).toString('base64')
-    let audioBase64 = this.convertUlawBase64ToPcm16Base64(ulawBase64)
+    this.currentCodec = 'ulaw'
+    let audioBase64 = ulawBase64
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
       throw new Error("No audio data received from ElevenLabs API")
@@ -1589,35 +1592,19 @@ class SimplifiedElevenLabsTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
-    // Ensure we have PCM s16le 8kHz base64; strip WAV header if present
-    let workingBase64 = audioBase64
-    try {
-      const probe = Buffer.from(audioBase64, 'base64')
-      if (probe.length >= 4) {
-        const sig4 = probe.slice(0,4).toString('ascii')
-        const isRIFF = sig4 === 'RIFF'
-        const isWAVE = probe.length >= 12 && probe.toString('ascii', 8, 12) === 'WAVE'
-        if (isRIFF || isWAVE) {
-          console.log('🧪 [SIP-STREAM] Detected WAV header in payload; extracting PCM before streaming')
-          workingBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
-        } else if (sig4.startsWith('ID3')) {
-          console.log('❌ [SIP-STREAM] MP3 (ID3) payload blocked from streaming to avoid distortion')
-          return
-        }
-      }
-    } catch (_) {}
-
-    const audioBuffer = Buffer.from(workingBase64, "base64")
+    const isUlaw = this.currentCodec === 'ulaw'
+    const audioBuffer = Buffer.from(audioBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    // SIP Audio Requirements: 8kHz sample rate, Mono, PCM s16le format
-    // Match testing3.js behavior: 40ms chunks (640 bytes) and pacing
+    // SIP Audio Requirements: 8kHz sample rate, Mono
+    // PCM16: 40ms chunks (640 bytes)
+    // μ-law: 40ms chunks (320 bytes)
 
     const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2  // PCM16 uses 2 bytes per sample
+    const BYTES_PER_SAMPLE = isUlaw ? 1 : 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000  // 16 bytes per ms
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)  // 40ms of PCM16 at 8kHz (640 bytes)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)  // 40ms of audio at 8kHz
 
     let position = 0
     let chunkIndex = 0
@@ -1626,7 +1613,8 @@ class SimplifiedElevenLabsTTSProcessor {
     // One-time stream header log to confirm format and base64 preview
     try {
       const estimatedMs = Math.floor(audioBuffer.length / BYTES_PER_MS)
-      console.log(`🎧 [SIP-STREAM] Format=PCM s16le, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
+      const fmt = isUlaw ? 'G711 μ-law' : 'PCM s16le'
+      console.log(`🎧 [SIP-STREAM] Format=${fmt}, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
       const previewChunk = audioBuffer.slice(0, Math.min(OPTIMAL_CHUNK_SIZE, audioBuffer.length))
       const previewB64 = previewChunk.toString("base64")
       console.log(`🎧 [SIP-STREAM] FirstChunk Base64 (preview ${Math.min(previewB64.length, 120)} chars): ${previewB64.slice(0, 120)}${previewB64.length > 120 ? '…' : ''}`)
