@@ -1630,7 +1630,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       deepgramUrl.searchParams.append("model", "nova-2")
       deepgramUrl.searchParams.append("language", deepgramLanguage)
       deepgramUrl.searchParams.append("interim_results", "true")
-      deepgramUrl.searchParams.append("endpointing", "200")
+      deepgramUrl.searchParams.append("endpointing", "300")
       deepgramUrl.searchParams.append("smart_format", "true")
 
       deepgramWs = new WebSocket(deepgramUrl.toString(), {
@@ -2568,7 +2568,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
             if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
               deepgramWs.send(audioBuffer)
-              console.log(audioBuffer)
             } else {
               deepgramAudioQueue.push(audioBuffer)
               if (deepgramAudioQueue.length % 100 === 0) {
