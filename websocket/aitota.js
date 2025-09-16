@@ -1046,6 +1046,105 @@ const processWithOpenAI = async (
   }
 }
 
+// Streaming OpenAI completion that emits partials via callback (reference: sanpbx-server.js)
+const processWithOpenAIStream = async (
+  userMessage,
+  conversationHistory,
+  agentConfig,
+  userName = null,
+  onPartial = null,
+) => {
+  const timer = createTimer("LLM_STREAMING")
+  let accumulated = ""
+  try {
+    if (!API_KEYS.openai) {
+      console.warn("⚠️ [LLM-STREAM] OPENAI_API_KEY not set; skipping generation")
+      return null
+    }
+
+    const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
+    const firstMessage = (agentConfig?.firstMessage || "").trim()
+    const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+    const policyBlock = [
+      "Answer strictly using the information provided above.",
+      "If specifics (address/phone/timings) are missing, say you don't have that info.",
+      "End with a brief follow-up question.",
+      "Keep reply under 100 tokens.",
+      "dont give any fornts or styles in it or symbols in it",
+      "in which language you get the transcript in same language give response in same language"
+    ].join(" ")
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+    const personalizationMessage = userName && userName.trim()
+      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
+      : null
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...(personalizationMessage ? [personalizationMessage] : []),
+      ...conversationHistory.slice(-6),
+      { role: "user", content: userMessage },
+    ]
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        max_tokens: 120,
+        temperature: 0.3,
+        stream: true,
+      }),
+    })
+
+    if (!response.ok || !response.body) {
+      console.error(`❌ [LLM-STREAM] ${timer.end()}ms - HTTP ${response.status}`)
+      return null
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder("utf-8")
+    let buffer = ""
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() || ""
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        if (trimmed === "data: [DONE]") {
+          break
+        }
+        if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.slice(5).trim()
+          try {
+            const chunk = JSON.parse(jsonStr)
+            const delta = chunk.choices?.[0]?.delta?.content || ""
+            if (delta) {
+              accumulated += delta
+              if (typeof onPartial === "function") {
+                try { await onPartial(accumulated) } catch (_) {}
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
+    console.log(`🕒 [LLM-STREAM] ${timer.end()}ms - Streaming completed (${accumulated.length} chars)`) 
+    return accumulated || null
+  } catch (error) {
+    console.error(`❌ [LLM-STREAM] ${timer.end()}ms - Error: ${error.message}`)
+    return accumulated || null
+  }
+}
+
 // Intelligent lead status detection using OpenAI
 const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory, language) => {
   const timer = createTimer("LEAD_STATUS_DETECTION")
