@@ -35,8 +35,8 @@ const SIP_AUDIO_CONFIG = {
   BYTES_PER_SAMPLE: 2,      // 2 bytes per sample for PCM
   BYTES_PER_MS: 16,         // (8000 * 2) / 1000 = 16 bytes per millisecond
   OPTIMAL_CHUNK_SIZE: 640,  // 40ms chunks: 40 * 16 = 640 bytes
-  AUDIO_FORMAT: 'ulaw',     // μ-law format for telephony optimization
-  BITRATE: 64000            // 64kbps for μ-law (8kHz * 8 bits)
+  AUDIO_FORMAT: 'pcm_s16le',// PCM 16-bit little-endian
+  BITRATE: 128000           // 8kHz * 16 bits
 }
 
 // WhatsApp send-info API config (will be retrieved from agent config)
