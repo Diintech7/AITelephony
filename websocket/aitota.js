@@ -1729,7 +1729,7 @@ class SimplifiedElevenLabsTTSProcessor {
     this.currentAudioStreaming = streamingSession
 
     const SAMPLE_RATE = 24000 // ElevenLabs sample rate
-    const TARGET_SAMPLE_RATE = 16000 // Target sample rate for SIP
+    const TARGET_SAMPLE_RATE = 8000 // Target sample rate for SIP
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (TARGET_SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
