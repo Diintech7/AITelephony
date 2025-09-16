@@ -1470,7 +1470,7 @@ class SimplifiedElevenLabsTTSProcessor {
             style: 0.0,
             use_speaker_boost: true
           },
-          output_format: "pcm_8000"  // Return PCM s16le 8kHz bytes directly for SIP
+          output_format: "wav_8000"  // Return WAV 8kHz; we'll extract clean PCM
         }),
       })
 
@@ -1482,9 +1482,10 @@ class SimplifiedElevenLabsTTSProcessor {
         return
       }
 
-      // ElevenLabs returns raw PCM s16le bytes (8kHz) with pcm_8000 → base64
+      // ElevenLabs returns WAV 8kHz; extract clean PCM s16le base64
       const audioBuffer = await response.arrayBuffer()
-      const audioBase64 = Buffer.from(audioBuffer).toString('base64')
+      const wavBase64 = Buffer.from(audioBuffer).toString('base64')
+      const audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
@@ -1497,7 +1498,7 @@ class SimplifiedElevenLabsTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        // Already PCM s16le 8kHz base64; stream as-is
+        // Stream clean PCM s16le 8kHz
         await this.streamAudioOptimizedForSIP(audioBase64)
         const sentBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += sentBuffer.length
@@ -1527,7 +1528,7 @@ class SimplifiedElevenLabsTTSProcessor {
           style: 0.0,
           use_speaker_boost: true
         },
-        output_format: "pcm_8000"  // Return PCM s16le 8kHz bytes directly for SIP
+        output_format: "wav_8000"  // Return WAV 8kHz; we'll extract clean PCM
       }),
     })
     if (!response.ok) {
@@ -1535,8 +1536,9 @@ class SimplifiedElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const audioBuffer = await response.arrayBuffer()
-    // Already PCM s16le 8kHz; keep as-is
-    const audioBase64 = Buffer.from(audioBuffer).toString('base64')
+    // Extract PCM from WAV for clean PCM s16le base64
+    const wavBase64 = Buffer.from(audioBuffer).toString('base64')
+    const audioBase64 = this.extractPcmLinear16Mono8kBase64(wavBase64)
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
       throw new Error("No audio data received from ElevenLabs API")
@@ -1587,8 +1589,21 @@ class SimplifiedElevenLabsTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
-    // Expecting PCM s16le 8kHz base64 payload
-    const audioBuffer = Buffer.from(audioBase64, "base64")
+    // Ensure we have PCM s16le 8kHz base64; strip WAV header if present
+    let workingBase64 = audioBase64
+    try {
+      const probe = Buffer.from(audioBase64, 'base64')
+      if (probe.length >= 12) {
+        const isRIFF = probe.toString('ascii', 0, 4) === 'RIFF'
+        const isWAVE = probe.toString('ascii', 8, 12) === 'WAVE'
+        if (isRIFF && isWAVE) {
+          console.log('🧪 [SIP-STREAM] Detected WAV header in payload; extracting PCM before streaming')
+          workingBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+        }
+      }
+    } catch (_) {}
+
+    const audioBuffer = Buffer.from(workingBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
