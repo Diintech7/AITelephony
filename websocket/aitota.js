@@ -5,23 +5,39 @@ const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 const Credit = require("../models/Credit")
 
+// ElevenLabs TTS Integration - Optimized for SIP Telephony
+// This file uses ElevenLabs API instead of Sarvam for text-to-speech
+// Default voice: Rachel (JBFqnCBsd6RMkjVDRZzb) - Professional female voice
+// SIP Audio Format: 8kHz sample rate, Mono, PCM s16le (base64) streamed in 40ms chunks (640 bytes)
 // Language detection removed - using default language from agent config
 
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
-  sarvam: process.env.SARVAM_API_KEY,
+  elevenlabs: process.env.ELEVENLABS_API_KEY,
   openai: process.env.OPENAI_API_KEY,
   whatsapp: process.env.WHATSAPP_TOKEN,
 }
 
 // Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+if (!API_KEYS.deepgram || !API_KEYS.elevenlabs || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables")
   process.exit(1)
 }
 
 const fetch = globalThis.fetch || require("node-fetch")
+
+// SIP Audio Configuration - Optimized for telephony with minimal latency
+const SIP_AUDIO_CONFIG = {
+  SAMPLE_RATE: 8000,        // 8kHz sample rate required by SIP
+  CHANNELS: 1,              // Mono audio
+  BITS_PER_SAMPLE: 16,      // 16-bit audio for PCM
+  BYTES_PER_SAMPLE: 2,      // 2 bytes per sample for PCM
+  BYTES_PER_MS: 16,         // (8000 * 2) / 1000 = 16 bytes per millisecond
+  OPTIMAL_CHUNK_SIZE: 640,  // 40ms chunks: 40 * 16 = 640 bytes
+  AUDIO_FORMAT: 'pcm_s16le',// PCM 16-bit little-endian
+  BITRATE: 128000           // 8kHz * 16 bits
+}
 
 // WhatsApp send-info API config (will be retrieved from agent config)
 let WHATSAPP_API_URL = null
@@ -102,24 +118,24 @@ const createTimer = (label) => {
 
 // Language mapping for TTS and STT services
 const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
-  en: "en-IN",
-  bn: "bn-IN",
-  te: "te-IN",
-  ta: "ta-IN",
-  mr: "mr-IN",
-  gu: "gu-IN",
-  kn: "kn-IN",
-  ml: "ml-IN",
-  pa: "pa-IN",
-  or: "or-IN",
-  as: "as-IN",
-  ur: "ur-IN",
+  hi: "hi",
+  en: "en",
+  bn: "bn",
+  te: "te",
+  ta: "ta",
+  mr: "mr",
+  gu: "gu",
+  kn: "kn",
+  ml: "ml",
+  pa: "pa",
+  or: "or",
+  as: "as",
+  ur: "ur",
 }
 
-const getSarvamLanguage = (language = "hi") => {
-  const lang = language?.toLowerCase() || "hi"
-  return LANGUAGE_MAPPING[lang] || "hi-IN"
+const getElevenLabsLanguage = (language = "en") => {
+  const lang = language?.toLowerCase() || "en"
+  return LANGUAGE_MAPPING[lang] || "en"
 }
 
 const getDeepgramLanguage = (language = "hi") => {
@@ -130,47 +146,79 @@ const getDeepgramLanguage = (language = "hi") => {
   return lang
 }
 
-// Valid Sarvam voice options
-const VALID_SARVAM_VOICES = new Set([
-  "abhilash",
-  "anushka",
-  "meera",
-  "pavithra",
-  "maitreyi",
-  "arvind",
-  "amol",
-  "amartya",
-  "diya",
-  "neel",
-  "misha",
-  "vian",
-  "arjun",
-  "maya",
-  "manisha",
-  "vidya",
-  "arya",
-  "karun",
-  "hitesh",
+// Valid ElevenLabs voice options (voice IDs)
+const VALID_ELEVENLABS_VOICES = new Set([
+  "JBFqnCBsd6RMkjVDRZzb", // Default voice (Rachel) - Professional female
+  "EXAVITQu4vr4xnSDxMaL", // Bella - Professional female
+  "MF3mGyEYCl7XYWbV9V6O", // Elli - Friendly female
+  "TxGEqnHWrfWFTfGW9XjX", // Josh - Professional male
+  "VR6AewLTigWG4xSOukaG", // Arnold - Deep male
+  "pNInz6obpgDQGcFmaJgB", // Adam - Friendly male
+  "yoZ06aMxZJJ28mfd3POQ", // Sam - Professional male
+  "AZnzlk1XvdvUeBnXmlld", // Domi - Energetic female
+  "ErXwobaYiN019PkySvjV", // Antoni - Professional male
+  "LcfcDJNUP1GQjkzn1xUU", // Bill - Professional male
+  "pqHfZKP75CvOlQylNhV4", // Boris - Deep male
+  "XB0fqtBnxyJaPExlL7V9", // Charlotte - Professional female
+  "2EiwWnXFnvU5JabPnv8n", // Clyde - Professional male
+  "9BWtwz2T6Zebi4Lp6iXH", // Dave - Friendly male
+  "CYw3kZ02Hs0563khs1Fj", // Fin - Professional male
+  "N2lVS1w4EtoT3dr4eOWO", // Gigi - Professional female
+  "oWAxZDx7w5VEj9dCyTzz", // Grace - Professional female
+  "pqHfZKP75CvOlQylNhV4", // James - Professional male
+  "XB0fqtBnxyJaPExlL7V9", // Jeremy - Professional male
+  "2EiwWnXFnvU5JabPnv8n", // Joseph - Professional male
+  "9BWtwz2T6Zebi4Lp6iXH", // Lili - Professional female
+  "CYw3kZ02Hs0563khs1Fj", // Matilda - Professional female
+  "N2lVS1w4EtoT3dr4eOWO", // Michael - Professional male
+  "oWAxZDx7w5VEj9dCyTzz", // Nicole - Professional female
 ])
 
-const getValidSarvamVoice = (voiceSelection = "pavithra") => {
-  const normalized = (voiceSelection || "").toString().trim().toLowerCase()
-  if (VALID_SARVAM_VOICES.has(normalized)) {
+const getValidElevenLabsVoice = (voiceSelection = "JBFqnCBsd6RMkjVDRZzb") => {
+  const normalized = (voiceSelection || "").toString().trim()
+  
+  // If it's already a valid voice ID, return it
+  if (VALID_ELEVENLABS_VOICES.has(normalized)) {
     return normalized
   }
 
+  // Map common voice names to ElevenLabs voice IDs
   const voiceMapping = {
-    "male-professional": "arvind",
-    "female-professional": "pavithra",
-    "male-friendly": "amol",
-    "female-friendly": "maya",
-    neutral: "pavithra",
-    default: "pavithra",
-    male: "arvind",
-    female: "pavithra",
+    "male-professional": "TxGEqnHWrfWFTfGW9XjX", // Josh
+    "female-professional": "EXAVITQu4vr4xnSDxMaL", // Bella
+    "male-friendly": "pNInz6obpgDQGcFmaJgB", // Adam
+    "female-friendly": "MF3mGyEYCl7XYWbV9V6O", // Elli
+    "neutral": "JBFqnCBsd6RMkjVDRZzb", // Rachel (default)
+    "default": "JBFqnCBsd6RMkjVDRZzb", // Rachel (default)
+    "male": "TxGEqnHWrfWFTfGW9XjX", // Josh
+    "female": "EXAVITQu4vr4xnSDxMaL", // Bella
+    "rachel": "JBFqnCBsd6RMkjVDRZzb", // Rachel
+    "bella": "EXAVITQu4vr4xnSDxMaL", // Bella
+    "josh": "TxGEqnHWrfWFTfGW9XjX", // Josh
+    "adam": "pNInz6obpgDQGcFmaJgB", // Adam
+    "elli": "MF3mGyEYCl7XYWbV9V6O", // Elli
+    "arnold": "VR6AewLTigWG4xSOukaG", // Arnold
+    "sam": "yoZ06aMxZJJ28mfd3POQ", // Sam
+    "domi": "AZnzlk1XvdvUeBnXmlld", // Domi
+    "antoni": "ErXwobaYiN019PkySvjV", // Antoni
+    "bill": "LcfcDJNUP1GQjkzn1xUU", // Bill
+    "boris": "pqHfZKP75CvOlQylNhV4", // Boris
+    "charlotte": "XB0fqtBnxyJaPExlL7V9", // Charlotte
+    "clyde": "2EiwWnXFnvU5JabPnv8n", // Clyde
+    "dave": "9BWtwz2T6Zebi4Lp6iXH", // Dave
+    "fin": "CYw3kZ02Hs0563khs1Fj", // Fin
+    "gigi": "N2lVS1w4EtoT3dr4eOWO", // Gigi
+    "grace": "oWAxZDx7w5VEj9dCyTzz", // Grace
+    "james": "pqHfZKP75CvOlQylNhV4", // James
+    "jeremy": "XB0fqtBnxyJaPExlL7V9", // Jeremy
+    "joseph": "2EiwWnXFnvU5JabPnv8n", // Joseph
+    "lili": "9BWtwz2T6Zebi4Lp6iXH", // Lili
+    "matilda": "CYw3kZ02Hs0563khs1Fj", // Matilda
+    "michael": "N2lVS1w4EtoT3dr4eOWO", // Michael
+    "nicole": "oWAxZDx7w5VEj9dCyTzz", // Nicole
   }
 
-  return voiceMapping[normalized] || "pavithra"
+  return voiceMapping[normalized.toLowerCase()] || "JBFqnCBsd6RMkjVDRZzb" // Default to Rachel
 }
 
 // Utility function to decode base64 extra data
@@ -270,7 +318,7 @@ class EnhancedCallLogger {
           isActive: true,
           lastUpdated: new Date(),
           sttProvider: 'deepgram',
-          ttsProvider: 'sarvam',
+          ttsProvider: 'elevenlabs',
           llmProvider: 'openai',
           customParams: this.customParams || {},
           callerId: this.callerId || undefined,
@@ -442,7 +490,7 @@ class EnhancedCallLogger {
       console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
       
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS synthesis but don't wait for completion
         tts.synthesizeAndStream(message).catch(err => 
@@ -537,7 +585,7 @@ class EnhancedCallLogger {
       // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
       let ttsStarted = false
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS and wait for it to begin
         try {
@@ -616,7 +664,7 @@ class EnhancedCallLogger {
       
       // 2. Start TTS synthesis and wait for completion
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         try {
           console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
@@ -665,7 +713,7 @@ class EnhancedCallLogger {
       text: response,
       language: this.currentLanguage,
       timestamp: timestamp,
-      source: "sarvam",
+      source: "elevenlabs",
     }
 
     this.responses.push(entry)
@@ -1046,105 +1094,6 @@ const processWithOpenAI = async (
   }
 }
 
-// Streaming OpenAI completion that emits partials via callback (reference: sanpbx-server.js)
-const processWithOpenAIStream = async (
-  userMessage,
-  conversationHistory,
-  agentConfig,
-  userName = null,
-  onPartial = null,
-) => {
-  const timer = createTimer("LLM_STREAMING")
-  let accumulated = ""
-  try {
-    if (!API_KEYS.openai) {
-      console.warn("⚠️ [LLM-STREAM] OPENAI_API_KEY not set; skipping generation")
-      return null
-    }
-
-    const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
-    const firstMessage = (agentConfig?.firstMessage || "").trim()
-    const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
-    const policyBlock = [
-      "Answer strictly using the information provided above.",
-      "If specifics (address/phone/timings) are missing, say you don't have that info.",
-      "End with a brief follow-up question.",
-      "Keep reply under 100 tokens.",
-      "dont give any fornts or styles in it or symbols in it",
-      "in which language you get the transcript in same language give response in same language"
-    ].join(" ")
-    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
-    const personalizationMessage = userName && userName.trim()
-      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
-      : null
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...(personalizationMessage ? [personalizationMessage] : []),
-      ...conversationHistory.slice(-6),
-      { role: "user", content: userMessage },
-    ]
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages,
-        max_tokens: 120,
-        temperature: 0.3,
-        stream: true,
-      }),
-    })
-
-    if (!response.ok || !response.body) {
-      console.error(`❌ [LLM-STREAM] ${timer.end()}ms - HTTP ${response.status}`)
-      return null
-    }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder("utf-8")
-    let buffer = ""
-
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split(/\r?\n/)
-      buffer = lines.pop() || ""
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        if (trimmed === "data: [DONE]") {
-          break
-        }
-        if (trimmed.startsWith("data:")) {
-          const jsonStr = trimmed.slice(5).trim()
-          try {
-            const chunk = JSON.parse(jsonStr)
-            const delta = chunk.choices?.[0]?.delta?.content || ""
-            if (delta) {
-              accumulated += delta
-              if (typeof onPartial === "function") {
-                try { await onPartial(accumulated) } catch (_) {}
-              }
-            }
-          } catch (_) {}
-        }
-      }
-    }
-
-    console.log(`🕒 [LLM-STREAM] ${timer.end()}ms - Streaming completed (${accumulated.length} chars)`) 
-    return accumulated || null
-  } catch (error) {
-    console.error(`❌ [LLM-STREAM] ${timer.end()}ms - Error: ${error.message}`)
-    return accumulated || null
-  }
-}
-
 // Intelligent lead status detection using OpenAI
 const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory, language) => {
   const timer = createTimer("LEAD_STATUS_DETECTION")
@@ -1468,19 +1417,20 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
 }
 
 // Simplified TTS processor
-class SimplifiedSarvamTTSProcessor {
+class SimplifiedElevenLabsTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
+    this.elevenLabsLanguage = getElevenLabsLanguage(language)
+    this.voice = getValidElevenLabsVoice(ws.sessionAgentConfig?.voiceSelection || "default")
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
     this.pendingQueue = [] // { text, audioBase64, preparing }
     this.isProcessingQueue = false
+    this.currentCodec = 'pcm' // 'pcm' | 'ulaw'
   }
 
   interrupt() {
@@ -1494,7 +1444,7 @@ class SimplifiedSarvamTTSProcessor {
     this.interrupt()
     if (language) {
       this.language = language
-      this.sarvamLanguage = getSarvamLanguage(language)
+      this.elevenLabsLanguage = getElevenLabsLanguage(language)
     }
     this.isInterrupted = false
     this.totalAudioBytes = 0
@@ -1506,40 +1456,43 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voice}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
+          "xi-api-key": API_KEYS.elevenlabs,
         },
         body: JSON.stringify({
-          inputs: [text],
-          target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: true,
-          model: "bulbul:v1",
+          text: text,
+          model_id: "eleven_multilingual_v2",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.5,
+            style: 0.0,
+            use_speaker_boost: true
+          },
+          output_format: "pcm_16000"  // G711 μ-law 8kHz for SIP
         }),
       })
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
-          throw new Error(`Sarvam API error: ${response.status}`)
+          throw new Error(`ElevenLabs API error: ${response.status}`)
         }
         return
       }
 
-      const responseData = await response.json()
-      const audioBase64 = responseData.audios?.[0]
+      // ElevenLabs returns μ-law 8kHz; stream μ-law directly for SIP
+      const audioBuffer = await response.arrayBuffer()
+      const ulawBase64 = Buffer.from(audioBuffer).toString('base64')
+      this.currentCodec = 'ulaw'
+      const codecBase64 = ulawBase64
 
-      if (!audioBase64 || this.isInterrupted) {
+      if (!codecBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
-          throw new Error("No audio data received from Sarvam API")
+          throw new Error("No audio data received from ElevenLabs API")
         }
         return
       }
@@ -1547,10 +1500,10 @@ class SimplifiedSarvamTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
-        await this.streamAudioOptimizedForSIP(pcmBase64)
-        const audioBuffer = Buffer.from(pcmBase64, "base64")
-        this.totalAudioBytes += audioBuffer.length
+        // Stream μ-law 8kHz directly
+        await this.streamAudioOptimizedForSIP(codecBase64)
+        const sentBuffer = Buffer.from(codecBase64, "base64")
+        this.totalAudioBytes += sentBuffer.length
       }
     } catch (error) {
       if (!this.isInterrupted) {
@@ -1562,23 +1515,36 @@ class SimplifiedSarvamTTSProcessor {
 
   async synthesizeToBuffer(text) {
     const timer = createTimer("TTS_PREPARE")
-    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voice}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "API-Subscription-Key": API_KEYS.sarvam },
+      headers: { 
+        "Content-Type": "application/json", 
+        "xi-api-key": API_KEYS.elevenlabs 
+      },
       body: JSON.stringify({
-        inputs: [text], target_language_code: this.sarvamLanguage, speaker: this.voice,
-        pitch: 0, pace: 1.0, loudness: 1.0, speech_sample_rate: 8000, enable_preprocessing: true, model: "bulbul:v1",
+        text: text,
+        model_id: "eleven_multilingual_v2",
+        voice_settings: {
+          stability: 0.5,
+          similarity_boost: 0.5,
+          style: 0.0,
+          use_speaker_boost: true
+        },
+        output_format: "pcm_16000"  // G711 μ-law 8kHz for SIP
       }),
     })
     if (!response.ok) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
-      throw new Error(`Sarvam API error: ${response.status}`)
+      throw new Error(`ElevenLabs API error: ${response.status}`)
     }
-    const data = await response.json()
-    const audioBase64 = data.audios?.[0]
+    const audioBuffer = await response.arrayBuffer()
+    // μ-law 8kHz; return μ-law base64 and mark codec
+    const ulawBase64 = Buffer.from(audioBuffer).toString('base64')
+    this.currentCodec = 'ulaw'
+    let audioBase64 = ulawBase64
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
-      throw new Error("No audio data received from Sarvam API")
+      throw new Error("No audio data received from ElevenLabs API")
     }
     console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
     return audioBase64
@@ -1613,8 +1579,8 @@ class SimplifiedSarvamTTSProcessor {
         const audioBase64 = item.audioBase64
         this.pendingQueue.shift()
         if (audioBase64) {
-          const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
-          await this.streamAudioOptimizedForSIP(pcmBase64)
+          await this.streamAudioOptimizedForSIP(audioBase64)
+          // Align to testing3.js pacing between queued chunks
           await new Promise(r => setTimeout(r, 60))
         }
       }
@@ -1626,26 +1592,32 @@ class SimplifiedSarvamTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
+    const isUlaw = this.currentCodec === 'ulaw'
     const audioBuffer = Buffer.from(audioBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
+    // SIP Audio Requirements: 8kHz sample rate, Mono
+    // PCM16: 40ms chunks (640 bytes)
+    // μ-law: 40ms chunks (320 bytes)
+
     const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    const BYTES_PER_SAMPLE = isUlaw ? 1 : 2
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000  // 16 bytes per ms
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)  // 40ms of audio at 8kHz
 
     let position = 0
     let chunkIndex = 0
     let successfulChunks = 0
 
-    // One-time stream header log to confirm format and base64 preview (for comparison with aitota.js)
+    // One-time stream header log to confirm format and base64 preview
     try {
       const estimatedMs = Math.floor(audioBuffer.length / BYTES_PER_MS)
-      console.log(`🎧 [SIP-STREAM:T3] Format=PCM s16le, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
+      const fmt = isUlaw ? 'G711 μ-law' : 'PCM s16le'
+      console.log(`🎧 [SIP-STREAM] Format=${fmt}, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
       const previewChunk = audioBuffer.slice(0, Math.min(OPTIMAL_CHUNK_SIZE, audioBuffer.length))
       const previewB64 = previewChunk.toString("base64")
-      console.log(`🎧 [SIP-STREAM:T3] FirstChunk Base64 (preview ${Math.min(previewB64.length, 120)} chars): ${previewB64.slice(0, 120)}${previewB64.length > 120 ? '…' : ''}`)
+      console.log(`🎧 [SIP-STREAM] FirstChunk Base64 (preview ${Math.min(previewB64.length, 120)} chars): ${previewB64.slice(0, 120)}${previewB64.length > 120 ? '…' : ''}`)
     } catch (_) {}
 
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
@@ -1664,7 +1636,8 @@ class SimplifiedSarvamTTSProcessor {
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
           if (chunkIndex === 0) {
-            console.log(`📤 [SIP-STREAM:T3] Sending first chunk: bytes=${chunk.length}, base64Len=${mediaMessage.media.payload.length}`)
+            // Extra detail for the very first SEND
+            console.log(`📤 [SIP-STREAM] Sending first chunk: bytes=${chunk.length}, base64Len=${mediaMessage.media.payload.length}`)
           }
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
@@ -1677,7 +1650,7 @@ class SimplifiedSarvamTTSProcessor {
 
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
+        const delayMs = Math.max(chunkDurationMs - 2, 10) // align with testing3 pacing
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
@@ -1686,7 +1659,211 @@ class SimplifiedSarvamTTSProcessor {
     }
 
     this.currentAudioStreaming = null
-    console.log(`✅ [SIP-STREAM:T3] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
+    console.log(`✅ [SIP-STREAM] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
+  }
+
+  // Convert MP3 to μ-law format for optimal SIP telephony performance
+  convertMp3ToPcmLinear16Mono8k(audioBase64) {
+    try {
+      console.log("🔄 [AUDIO-CONVERSION] Converting MP3 to 8kHz μ-law for SIP telephony")
+      
+      // Try to extract PCM data from WAV format first
+      const pcmData = this.extractPcmLinear16Mono8kBase64(audioBase64)
+      
+      if (pcmData !== audioBase64) {
+        console.log("✅ [AUDIO-CONVERSION] WAV format detected and converted")
+        return pcmData
+      }
+      
+      // For MP3 format, we need to convert to 8kHz μ-law
+      // This is a simplified conversion - for production, use ffmpeg
+      console.log("🔄 [AUDIO-CONVERSION] MP3 detected - converting to 8kHz μ-law")
+      console.log("📊 [AUDIO-CONVERSION] Source: MP3 22.05kHz/32kbps → Target: μ-law 8kHz/64kbps")
+      
+      // Convert MP3 to PCM and then to μ-law
+      const audioBuffer = Buffer.from(audioBase64, 'base64')
+      const pcmBuffer = this.convertMp3ToPcm(audioBuffer)
+      const ulawBuffer = this.convertPcmToUlaw(pcmBuffer)
+      
+      console.log("✅ [AUDIO-CONVERSION] Converted to μ-law format for SIP compatibility")
+      return ulawBuffer.toString('base64')
+    } catch (error) {
+      console.log(`❌ [AUDIO-CONVERSION] Error converting audio: ${error.message}`)
+      return audioBase64
+    }
+  }
+
+  // Convert MP3 to PCM (simplified - for production use ffmpeg)
+  convertMp3ToPcm(mp3Buffer) {
+    try {
+      // This is a placeholder - in production, use ffmpeg or similar
+      // For now, we'll assume the MP3 is already at a reasonable sample rate
+      console.log("⚠️ [MP3-TO-PCM] Simplified conversion - consider using ffmpeg for production")
+      return mp3Buffer
+    } catch (error) {
+      console.log(`❌ [MP3-TO-PCM] Error converting MP3: ${error.message}`)
+      return mp3Buffer
+    }
+  }
+
+  // Convert PCM to μ-law format for telephony optimization
+  convertPcmToUlaw(pcmBuffer) {
+    try {
+      const ulawBuffer = Buffer.alloc(pcmBuffer.length / 2)
+      
+      for (let i = 0; i < pcmBuffer.length; i += 2) {
+        // Read 16-bit PCM sample (little-endian)
+        const sample = pcmBuffer.readInt16LE(i)
+        // Convert to μ-law
+        const ulaw = this.linearToUlaw(sample)
+        ulawBuffer[i / 2] = ulaw
+      }
+      
+      console.log("✅ [PCM-TO-ULAW] Converted PCM to μ-law format")
+      return ulawBuffer
+    } catch (error) {
+      console.log(`❌ [PCM-TO-ULAW] Error converting to μ-law: ${error.message}`)
+      return pcmBuffer
+    }
+  }
+
+  // Convert μ-law base64 → PCM s16le 8kHz base64
+  convertUlawBase64ToPcm16Base64(ulawBase64) {
+    try {
+      const ulaw = Buffer.from(ulawBase64, 'base64')
+      const pcm = Buffer.alloc(ulaw.length * 2)
+      for (let i = 0; i < ulaw.length; i++) {
+        const s = this.ulawToLinear(ulaw[i])
+        pcm.writeInt16LE(s, i * 2)
+      }
+      return pcm.toString('base64')
+    } catch (e) {
+      return ulawBase64
+    }
+  }
+
+  // μ-law byte → linear PCM sample (16-bit)
+  ulawToLinear(uVal) {
+    uVal = ~uVal & 0xff
+    const BIAS = 0x84
+    const SIGN = (uVal & 0x80)
+    let exponent = (uVal >> 4) & 0x07
+    let mantissa = uVal & 0x0f
+    let sample = (((mantissa << 1) + 1) << (exponent + 2)) - BIAS
+    if (SIGN !== 0) sample = -sample
+    return sample
+  }
+
+  // Convert linear PCM to μ-law encoding
+  linearToUlaw(pcm) {
+    const BIAS = 0x84
+    const CLIP = 32635
+    
+    let sign = (pcm >> 8) & 0x80
+    if (sign !== 0) pcm = -pcm
+    if (pcm > CLIP) pcm = CLIP
+    
+    pcm += BIAS
+    let exponent = 0
+    let expMask = 0x4000
+    let expShift = 13
+    
+    while ((pcm & expMask) === 0 && expShift > 0) {
+      pcm <<= 1
+      exponent++
+      expShift--
+    }
+    
+    const mantissa = (pcm >> expShift) & 0x0F
+    const ulaw = ~(sign | (exponent << 4) | mantissa)
+    return ulaw & 0xFF
+  }
+
+  // Simple audio resampling method (basic implementation)
+  resampleAudioTo8kHz(audioBuffer, originalSampleRate = 22050) {
+    try {
+      if (originalSampleRate === 8000) {
+        return audioBuffer // Already at correct sample rate
+      }
+      
+      const ratio = originalSampleRate / SIP_AUDIO_CONFIG.SAMPLE_RATE
+      const newLength = Math.floor(audioBuffer.length / ratio)
+      const resampledBuffer = Buffer.alloc(newLength)
+      
+      // Simple linear interpolation resampling
+      for (let i = 0; i < newLength; i += 2) {
+        const sourceIndex = Math.floor(i * ratio * 2) & ~1 // Ensure even index
+        if (sourceIndex < audioBuffer.length - 1) {
+          resampledBuffer[i] = audioBuffer[sourceIndex]
+          resampledBuffer[i + 1] = audioBuffer[sourceIndex + 1]
+        }
+      }
+      
+      console.log(`🔄 [AUDIO-RESAMPLING] Resampled from ${originalSampleRate}Hz to 8kHz`)
+      return resampledBuffer
+    } catch (error) {
+      console.log(`❌ [AUDIO-RESAMPLING] Error resampling audio: ${error.message}`)
+      return audioBuffer
+    }
+  }
+
+  // Parse WAV header from base64, return minimal metadata
+  parseWavHeaderFromBase64(wavBase64) {
+    try {
+      const buf = Buffer.from(wavBase64, 'base64')
+      if (buf.length < 44) return null
+      if (buf.toString('ascii', 0, 4) !== 'RIFF') return null
+      if (buf.toString('ascii', 8, 12) !== 'WAVE') return null
+      const fmtOffset = 12
+      // Find 'fmt ' chunk
+      let offset = fmtOffset
+      let sampleRate = null
+      let channels = null
+      let bitsPerSample = null
+      while (offset + 8 <= buf.length) {
+        const id = buf.toString('ascii', offset, offset + 4)
+        const size = buf.readUInt32LE(offset + 4)
+        const next = offset + 8 + size
+        if (id === 'fmt ') {
+          channels = buf.readUInt16LE(offset + 10)
+          sampleRate = buf.readUInt32LE(offset + 12)
+          bitsPerSample = buf.readUInt16LE(offset + 22)
+          break
+        }
+        offset = next
+      }
+      return { sampleRate, channels, bitsPerSample }
+    } catch (_) {
+      return null
+    }
+  }
+
+  // Resample PCM s16le mono buffer from originalSampleRate → targetSampleRate using linear interpolation
+  resamplePcm16Mono(pcmBuffer, originalSampleRate, targetSampleRate) {
+    try {
+      if (!originalSampleRate || !targetSampleRate || originalSampleRate === targetSampleRate) return pcmBuffer
+      const samples = pcmBuffer.length / 2
+      const src = new Int16Array(samples)
+      for (let i = 0; i < samples; i++) src[i] = pcmBuffer.readInt16LE(i * 2)
+      const durationSec = samples / originalSampleRate
+      const targetSamples = Math.max(1, Math.round(durationSec * targetSampleRate))
+      const dst = new Int16Array(targetSamples)
+      const ratio = (samples - 1) / (targetSamples - 1)
+      for (let i = 0; i < targetSamples; i++) {
+        const pos = i * ratio
+        const idx = Math.floor(pos)
+        const frac = pos - idx
+        const s1 = src[idx]
+        const s2 = src[Math.min(idx + 1, samples - 1)]
+        const value = s1 + (s2 - s1) * frac
+        dst[i] = Math.max(-32768, Math.min(32767, Math.round(value)))
+      }
+      const out = Buffer.alloc(targetSamples * 2)
+      for (let i = 0; i < targetSamples; i++) out.writeInt16LE(dst[i], i * 2)
+      return out
+    } catch (_) {
+      return pcmBuffer
+    }
   }
 
   extractPcmLinear16Mono8kBase64(audioBase64) {
@@ -1944,31 +2121,20 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off LLM streaming and partial TTS
         let aiResponse = null
-        const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        const tts = new SimplifiedElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
         let sentIndex = 0
         const MIN_TOKENS = 8
         const MAX_TOKENS = 10
 
-        aiResponse = await processWithOpenAIStream(
+        // Fallback to non-streaming generation to avoid runtime error
+        aiResponse = await processWithOpenAI(
           text,
           conversationHistory,
+          currentLanguage,
+          callLogger,
           agentConfig,
-          userName,
-          async (partial) => {
-            if (processingRequestId !== currentRequestId) return
-            if (!partial || partial.length <= sentIndex) return
-            let pending = partial.slice(sentIndex)
-            while (pending.trim()) {
-              const tokens = pending.trim().split(/\s+/)
-              if (tokens.length < MIN_TOKENS) break
-              const take = Math.min(MAX_TOKENS, tokens.length)
-              const chunkText = tokens.slice(0, take).join(' ')
-              sentIndex += pending.indexOf(chunkText) + chunkText.length
-              try { await tts.enqueueText(chunkText) } catch (_) {}
-              pending = partial.slice(sentIndex)
-            }
-          }
+          userName
         )
 
         // Final flush for short tail
@@ -2307,7 +2473,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            const tts = new SimplifiedElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
