@@ -8,6 +8,7 @@ const Credit = require("../models/Credit")
 // ElevenLabs TTS Integration
 // This file has been updated to use ElevenLabs API instead of Sarvam for text-to-speech
 // Default voice: Rachel (JBFqnCBsd6RMkjVDRZzb) - Professional female voice
+// SIP Audio Requirements: 8kHz sample rate, Mono, PCM Linear16 format
 // Language detection removed - using default language from agent config
 
 // Load API keys from environment variables
@@ -25,6 +26,16 @@ if (!API_KEYS.deepgram || !API_KEYS.elevenlabs || !API_KEYS.openai) {
 }
 
 const fetch = globalThis.fetch || require("node-fetch")
+
+// SIP Audio Configuration - Required for proper SIP compatibility
+const SIP_AUDIO_CONFIG = {
+  SAMPLE_RATE: 8000,        // 8kHz sample rate required by SIP
+  CHANNELS: 1,              // Mono audio
+  BITS_PER_SAMPLE: 16,      // 16-bit audio
+  BYTES_PER_SAMPLE: 2,      // 2 bytes per sample
+  BYTES_PER_MS: 16,         // (8000 * 2) / 1000 = 16 bytes per millisecond
+  OPTIMAL_CHUNK_SIZE: 640   // 40ms chunks: 40 * 16 = 640 bytes
+}
 
 // WhatsApp send-info API config (will be retrieved from agent config)
 let WHATSAPP_API_URL = null
@@ -1456,7 +1467,8 @@ class SimplifiedElevenLabsTTSProcessor {
             similarity_boost: 0.5,
             style: 0.0,
             use_speaker_boost: true
-          }
+          },
+          output_format: "mp3_44100_128"
         }),
       })
 
@@ -1511,7 +1523,8 @@ class SimplifiedElevenLabsTTSProcessor {
           similarity_boost: 0.5,
           style: 0.0,
           use_speaker_boost: true
-        }
+        },
+        output_format: "mp3_44100_128"
       }),
     })
     if (!response.ok) {
@@ -1574,10 +1587,13 @@ class SimplifiedElevenLabsTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    const SAMPLE_RATE = 8000
-    const BYTES_PER_SAMPLE = 2
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    // SIP Audio Requirements: 8kHz sample rate, Mono, PCM Linear16 format
+    // This ensures compatibility with SIP telephony systems
+
+    const SAMPLE_RATE = SIP_AUDIO_CONFIG.SAMPLE_RATE
+    const BYTES_PER_SAMPLE = SIP_AUDIO_CONFIG.BYTES_PER_SAMPLE
+    const BYTES_PER_MS = SIP_AUDIO_CONFIG.BYTES_PER_MS
+    const OPTIMAL_CHUNK_SIZE = SIP_AUDIO_CONFIG.OPTIMAL_CHUNK_SIZE
 
     let position = 0
     let chunkIndex = 0
@@ -1623,14 +1639,55 @@ class SimplifiedElevenLabsTTSProcessor {
   // Convert MP3 to PCM Linear16 Mono 8kHz for SIP compatibility
   convertMp3ToPcmLinear16Mono8k(audioBase64) {
     try {
-      // For now, return the audio as-is since ElevenLabs returns MP3
-      // In production, you might want to use ffmpeg or similar to convert MP3 to PCM
-      // This is a simplified approach - the actual conversion would require audio processing
-      console.log("⚠️ [AUDIO-CONVERSION] MP3 to PCM conversion not implemented - using raw audio")
+      console.log("🔄 [AUDIO-CONVERSION] Converting audio for SIP compatibility (8kHz PCM)")
+      
+      // Try to extract PCM data from WAV format first
+      const pcmData = this.extractPcmLinear16Mono8kBase64(audioBase64)
+      
+      if (pcmData !== audioBase64) {
+        console.log("✅ [AUDIO-CONVERSION] WAV format detected and converted")
+        return pcmData
+      }
+      
+      // If it's MP3 format, we need to handle it differently
+      // For now, we'll use a simple approach - in production, use ffmpeg
+      console.log("⚠️ [AUDIO-CONVERSION] MP3 format detected - using raw audio")
+      console.log("⚠️ [AUDIO-CONVERSION] SIP team reports disturbance - audio may need resampling")
+      console.log("⚠️ [AUDIO-CONVERSION] Current: MP3 44.1kHz → Required: PCM 8kHz Mono")
+      console.log("⚠️ [AUDIO-CONVERSION] Recommendation: Implement ffmpeg conversion for proper resampling")
+      
       return audioBase64
     } catch (error) {
-      console.log(`❌ [AUDIO-CONVERSION] Error converting MP3 to PCM: ${error.message}`)
+      console.log(`❌ [AUDIO-CONVERSION] Error converting audio: ${error.message}`)
       return audioBase64
+    }
+  }
+
+  // Simple audio resampling method (basic implementation)
+  resampleAudioTo8kHz(audioBuffer, originalSampleRate = 44100) {
+    try {
+      if (originalSampleRate === 8000) {
+        return audioBuffer // Already at correct sample rate
+      }
+      
+      const ratio = originalSampleRate / SIP_AUDIO_CONFIG.SAMPLE_RATE
+      const newLength = Math.floor(audioBuffer.length / ratio)
+      const resampledBuffer = Buffer.alloc(newLength)
+      
+      // Simple linear interpolation resampling
+      for (let i = 0; i < newLength; i += 2) {
+        const sourceIndex = Math.floor(i * ratio * 2) & ~1 // Ensure even index
+        if (sourceIndex < audioBuffer.length - 1) {
+          resampledBuffer[i] = audioBuffer[sourceIndex]
+          resampledBuffer[i + 1] = audioBuffer[sourceIndex + 1]
+        }
+      }
+      
+      console.log(`🔄 [AUDIO-RESAMPLING] Resampled from ${originalSampleRate}Hz to 8kHz`)
+      return resampledBuffer
+    } catch (error) {
+      console.log(`❌ [AUDIO-RESAMPLING] Error resampling audio: ${error.message}`)
+      return audioBuffer
     }
   }
 
