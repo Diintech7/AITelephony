@@ -1740,8 +1740,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
       currentTTS = tts
       let sentIndex = 0
-      const MIN_TOKENS = 10
-      const MAX_TOKENS = 15
+      const MIN_TOKENS = 15
+      const MAX_TOKENS = 20
       aiResponse = await processWithOpenAIStream(
         text,
         conversationHistory,
