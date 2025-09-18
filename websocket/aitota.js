@@ -1583,7 +1583,7 @@ class ElevenLabsTTSProcessor {
           text: text,
           model_id: "eleven_multilingual_v2",
           voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
-          output_format: "pcm_16000"
+          output_format: "pcm_22050"
         }),
       })
 
@@ -1639,7 +1639,7 @@ class ElevenLabsTTSProcessor {
       method: "POST",
       headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/mpeg" },
       body: JSON.stringify({
-        text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "pcm_16000"
+        text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "pcm_22050"
       }),
     })
     if (!response.ok) {
