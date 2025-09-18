@@ -130,6 +130,47 @@ const getDeepgramLanguage = (language = "hi") => {
   return lang
 }
 
+// --- Audio format helpers for ElevenLabs responses ---
+const isMp3Buffer = (buf) => {
+  if (!Buffer.isBuffer(buf) || buf.length < 3) return false
+  // ID3 header
+  if (buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33) return true
+  // MPEG frame sync (very naive check)
+  if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return true
+  return false
+}
+
+const isWavBuffer = (buf) => {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return false
+  return buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE'
+}
+
+const extractPcmFromWav = (buf) => {
+  try {
+    if (!isWavBuffer(buf)) return buf
+    let offset = 12
+    let dataOffset = null
+    let dataSize = null
+    while (offset + 8 <= buf.length) {
+      const chunkId = buf.toString('ascii', offset, offset + 4)
+      const chunkSize = buf.readUInt32LE(offset + 4)
+      const next = offset + 8 + chunkSize
+      if (chunkId === 'data') {
+        dataOffset = offset + 8
+        dataSize = chunkSize
+        break
+      }
+      offset = next
+    }
+    if (dataOffset != null && dataSize != null) {
+      return buf.slice(dataOffset, dataOffset + dataSize)
+    }
+    return buf
+  } catch (_) {
+    return buf
+  }
+}
+
 // Valid Sarvam voice options
 const VALID_SARVAM_VOICES = new Set([
   "abhilash",
@@ -1536,6 +1577,7 @@ class ElevenLabsTTSProcessor {
         headers: {
           "Content-Type": "application/json",
           "xi-api-key": API_KEYS.elevenlabs,
+          "Accept": "audio/pcm",
         },
         body: JSON.stringify({
           text: text,
@@ -1554,7 +1596,16 @@ class ElevenLabsTTSProcessor {
       }
 
       const arrayBuffer = await response.arrayBuffer()
-      const audioBufferRaw = Buffer.from(arrayBuffer)
+      let audioBufferRaw = Buffer.from(arrayBuffer)
+      // Guard: if MP3 or WAV returned despite request, convert to raw PCM or abort
+      if (isMp3Buffer(audioBufferRaw)) {
+        console.log("❌ [TTS-SYNTHESIS] MP3 (ID3/MPEG) detected in ElevenLabs response; attempting to abort to avoid distortion")
+        throw new Error("Unexpected MP3 payload from ElevenLabs when PCM requested")
+      }
+      if (isWavBuffer(audioBufferRaw)) {
+        console.log("⚠️ [TTS-SYNTHESIS] WAV detected; stripping header to raw PCM for SIP streaming")
+        audioBufferRaw = extractPcmFromWav(audioBufferRaw)
+      }
       const audioBase64 = audioBufferRaw.toString("base64")
 
       if (!audioBase64 || this.isInterrupted) {
@@ -1586,7 +1637,7 @@ class ElevenLabsTTSProcessor {
     const timer = createTimer("TTS_PREPARE")
     const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs },
+      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/pcm" },
       body: JSON.stringify({
         text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "pcm_16000"
       }),
@@ -1596,7 +1647,12 @@ class ElevenLabsTTSProcessor {
       throw new Error(`ElevenLabs API error: ${response.status}`)
     }
     const arrayBuffer = await response.arrayBuffer()
-    const audioBase64 = Buffer.from(arrayBuffer).toString("base64")
+    let raw = Buffer.from(arrayBuffer)
+    if (isMp3Buffer(raw)) {
+      throw new Error("Unexpected MP3 payload from ElevenLabs when PCM requested")
+    }
+    if (isWavBuffer(raw)) raw = extractPcmFromWav(raw)
+    const audioBase64 = raw.toString("base64")
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
       throw new Error("No audio data received from ElevenLabs API")
