@@ -1572,7 +1572,7 @@ class ElevenLabsTTSProcessor {
     const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_16000`, {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_8000`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1634,7 +1634,7 @@ class ElevenLabsTTSProcessor {
 
   async synthesizeToBuffer(text) {
     const timer = createTimer("TTS_PREPARE")
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_16000`, {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_8000`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/pcm" },
       body: JSON.stringify({
@@ -1706,7 +1706,7 @@ class ElevenLabsTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    const SAMPLE_RATE = 16000
+    const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
