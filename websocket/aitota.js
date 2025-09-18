@@ -10,13 +10,13 @@ const Credit = require("../models/Credit")
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
-  sarvam: process.env.SARVAM_API_KEY,
+  elevenlabs: process.env.ELEVENLABS_API_KEY,
   openai: process.env.OPENAI_API_KEY,
   whatsapp: process.env.WHATSAPP_TOKEN,
 }
 
 // Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+if (!API_KEYS.deepgram || !API_KEYS.elevenlabs || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables")
   process.exit(1)
 }
@@ -270,7 +270,7 @@ class EnhancedCallLogger {
           isActive: true,
           lastUpdated: new Date(),
           sttProvider: 'deepgram',
-          ttsProvider: 'sarvam',
+          ttsProvider: 'elevenlabs',
           llmProvider: 'openai',
           customParams: this.customParams || {},
           callerId: this.callerId || undefined,
@@ -442,7 +442,7 @@ class EnhancedCallLogger {
       console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
       
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
+        const tts = new ElevenLabsTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS synthesis but don't wait for completion
         tts.synthesizeAndStream(message).catch(err => 
@@ -537,7 +537,7 @@ class EnhancedCallLogger {
       // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
       let ttsStarted = false
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new ElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS and wait for it to begin
         try {
@@ -616,7 +616,7 @@ class EnhancedCallLogger {
       
       // 2. Start TTS synthesis and wait for completion
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new ElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         try {
           console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
@@ -665,7 +665,7 @@ class EnhancedCallLogger {
       text: response,
       language: this.currentLanguage,
       timestamp: timestamp,
-      source: "sarvam",
+      source: "elevenlabs",
     }
 
     this.responses.push(entry)
@@ -1468,14 +1468,13 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
 }
 
 // Simplified TTS processor
-class SimplifiedSarvamTTSProcessor {
+class ElevenLabsTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
+    this.voiceId = (ws.sessionAgentConfig?.elevenlabsVoiceId || ws.sessionAgentConfig?.voiceSelection || "21m00Tcm4TlvDq8ikWAM").toString()
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
@@ -1494,7 +1493,6 @@ class SimplifiedSarvamTTSProcessor {
     this.interrupt()
     if (language) {
       this.language = language
-      this.sarvamLanguage = getSarvamLanguage(language)
     }
     this.isInterrupted = false
     this.totalAudioBytes = 0
@@ -1506,40 +1504,36 @@ class SimplifiedSarvamTTSProcessor {
     const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
+          "xi-api-key": API_KEYS.elevenlabs,
         },
         body: JSON.stringify({
-          inputs: [text],
-          target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: true,
-          model: "bulbul:v1",
+          text: text,
+          model_id: "eleven_multilingual_v2",
+          voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
+          output_format: "pcm_16000"
         }),
       })
 
       if (!response.ok || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
-          throw new Error(`Sarvam API error: ${response.status}`)
+          throw new Error(`ElevenLabs API error: ${response.status}`)
         }
         return
       }
 
-      const responseData = await response.json()
-      const audioBase64 = responseData.audios?.[0]
+      const arrayBuffer = await response.arrayBuffer()
+      const audioBufferRaw = Buffer.from(arrayBuffer)
+      const audioBase64 = audioBufferRaw.toString("base64")
 
       if (!audioBase64 || this.isInterrupted) {
         if (!this.isInterrupted) {
           console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
-          throw new Error("No audio data received from Sarvam API")
+          throw new Error("No audio data received from ElevenLabs API")
         }
         return
       }
@@ -1547,7 +1541,8 @@ class SimplifiedSarvamTTSProcessor {
       console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
 
       if (!this.isInterrupted) {
-        const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+        // ElevenLabs returned headerless PCM 16k (per output_format)
+        const pcmBase64 = audioBase64
         await this.streamAudioOptimizedForSIP(pcmBase64)
         const audioBuffer = Buffer.from(pcmBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
@@ -1562,23 +1557,22 @@ class SimplifiedSarvamTTSProcessor {
 
   async synthesizeToBuffer(text) {
     const timer = createTimer("TTS_PREPARE")
-    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "API-Subscription-Key": API_KEYS.sarvam },
+      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs },
       body: JSON.stringify({
-        inputs: [text], target_language_code: this.sarvamLanguage, speaker: this.voice,
-        pitch: 0, pace: 1.0, loudness: 1.0, speech_sample_rate: 8000, enable_preprocessing: true, model: "bulbul:v1",
+        text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "pcm_16000"
       }),
     })
     if (!response.ok) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
-      throw new Error(`Sarvam API error: ${response.status}`)
+      throw new Error(`ElevenLabs API error: ${response.status}`)
     }
-    const data = await response.json()
-    const audioBase64 = data.audios?.[0]
+    const arrayBuffer = await response.arrayBuffer()
+    const audioBase64 = Buffer.from(arrayBuffer).toString("base64")
     if (!audioBase64) {
       console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
-      throw new Error("No audio data received from Sarvam API")
+      throw new Error("No audio data received from ElevenLabs API")
     }
     console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
     return audioBase64
@@ -1630,7 +1624,7 @@ class SimplifiedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    const SAMPLE_RATE = 8000
+    const SAMPLE_RATE = 16000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
@@ -1944,11 +1938,11 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off LLM streaming and partial TTS
         let aiResponse = null
-        const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        const tts = new ElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
         let sentIndex = 0
-        const MIN_TOKENS = 8
-        const MAX_TOKENS = 10
+        const MIN_TOKENS = 10
+        const MAX_TOKENS = 15
 
         aiResponse = await processWithOpenAIStream(
           text,
@@ -2307,7 +2301,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            const tts = new ElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
