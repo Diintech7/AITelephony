@@ -1637,7 +1637,7 @@ class ElevenLabsTTSProcessor {
     const timer = createTimer("TTS_PREPARE")
     const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/mpeg" },
+      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs},
       body: JSON.stringify({
         text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "pcm_22050"
       }),
