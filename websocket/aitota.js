@@ -173,6 +173,33 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return voiceMapping[normalized] || "pavithra"
 }
 
+// Resolve a safe ElevenLabs voice id from agent config or fallback
+const DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM" // Rachel
+const getValidElevenLabsVoiceId = (voiceSelection) => {
+  try {
+    const raw = (voiceSelection || "").toString().trim()
+    // If looks like a valid ElevenLabs voice id (alphanumeric, length >= 20), accept
+    if (/^[A-Za-z0-9]{20,}$/.test(raw)) return raw
+    // Map common labels to a default or known ids (extendable)
+    const mapping = {
+      rachel: DEFAULT_ELEVENLABS_VOICE_ID,
+      female: DEFAULT_ELEVENLABS_VOICE_ID,
+      female_professional: DEFAULT_ELEVENLABS_VOICE_ID,
+      "female-professional": DEFAULT_ELEVENLABS_VOICE_ID,
+      neutral: DEFAULT_ELEVENLABS_VOICE_ID,
+      default: DEFAULT_ELEVENLABS_VOICE_ID,
+      pavithra: DEFAULT_ELEVENLABS_VOICE_ID,
+      arvind: DEFAULT_ELEVENLABS_VOICE_ID,
+      male: DEFAULT_ELEVENLABS_VOICE_ID,
+      "male-professional": DEFAULT_ELEVENLABS_VOICE_ID,
+    }
+    const key = raw.toLowerCase()
+    return mapping[key] || DEFAULT_ELEVENLABS_VOICE_ID
+  } catch (_) {
+    return DEFAULT_ELEVENLABS_VOICE_ID
+  }
+}
+
 // Utility function to decode base64 extra data
 const decodeExtraData = (extraBase64) => {
   try {
@@ -1474,7 +1501,7 @@ class ElevenLabsTTSProcessor {
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.voiceId = (ws.sessionAgentConfig?.elevenlabsVoiceId || ws.sessionAgentConfig?.voiceSelection || "21m00Tcm4TlvDq8ikWAM").toString()
+    this.voiceId = getValidElevenLabsVoiceId(ws.sessionAgentConfig?.elevenlabsVoiceId || ws.sessionAgentConfig?.voiceSelection)
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
