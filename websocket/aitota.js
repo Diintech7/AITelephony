@@ -1577,7 +1577,7 @@ class ElevenLabsTTSProcessor {
         headers: {
           "Content-Type": "application/json",
           "xi-api-key": API_KEYS.elevenlabs,
-          "Accept": "audio/pcm",
+          "Accept": "audio/mpeg",
         },
         body: JSON.stringify({
           text: text,
@@ -1597,28 +1597,10 @@ class ElevenLabsTTSProcessor {
 
       const arrayBuffer = await response.arrayBuffer()
       let audioBufferRaw = Buffer.from(arrayBuffer)
-      // Guard: if MP3 or WAV returned despite request, convert or retry as WAV
+      // Guard: if MP3 or WAV returned despite request, convert to raw PCM or abort
       if (isMp3Buffer(audioBufferRaw)) {
-        console.log("⚠️ [TTS-SYNTHESIS] MP3 detected when PCM requested; retrying as WAV 16k to strip header")
-        const wavRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "xi-api-key": API_KEYS.elevenlabs,
-            "Accept": "audio/wav",
-          },
-          body: JSON.stringify({
-            text: text,
-            model_id: "eleven_multilingual_v2",
-            voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
-            output_format: "wav_16000"
-          }),
-        })
-        if (!wavRes.ok) {
-          throw new Error(`ElevenLabs WAV fallback error: ${wavRes.status}`)
-        }
-        const wavBuf = Buffer.from(await wavRes.arrayBuffer())
-        audioBufferRaw = extractPcmFromWav(wavBuf)
+        console.log("❌ [TTS-SYNTHESIS] MP3 (ID3/MPEG) detected in ElevenLabs response; attempting to abort to avoid distortion")
+        throw new Error("Unexpected MP3 payload from ElevenLabs when PCM requested")
       }
       if (isWavBuffer(audioBufferRaw)) {
         console.log("⚠️ [TTS-SYNTHESIS] WAV detected; stripping header to raw PCM for SIP streaming")
@@ -1655,7 +1637,7 @@ class ElevenLabsTTSProcessor {
     const timer = createTimer("TTS_PREPARE")
     const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/pcm" },
+      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/mpeg" },
       body: JSON.stringify({
         text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "pcm_16000"
       }),
@@ -1667,14 +1649,7 @@ class ElevenLabsTTSProcessor {
     const arrayBuffer = await response.arrayBuffer()
     let raw = Buffer.from(arrayBuffer)
     if (isMp3Buffer(raw)) {
-      // Fallback fetch as WAV and strip header
-      const wavRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/wav" },
-        body: JSON.stringify({ text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "wav_16000" })
-      })
-      if (!wavRes.ok) throw new Error(`ElevenLabs WAV fallback error: ${wavRes.status}`)
-      raw = Buffer.from(await wavRes.arrayBuffer())
+      throw new Error("Unexpected MP3 payload from ElevenLabs when PCM requested")
     }
     if (isWavBuffer(raw)) raw = extractPcmFromWav(raw)
     const audioBase64 = raw.toString("base64")
