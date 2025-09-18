@@ -1572,18 +1572,17 @@ class ElevenLabsTTSProcessor {
     const timer = createTimer("TTS_SYNTHESIS")
 
     try {
-      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_16000`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "xi-api-key": API_KEYS.elevenlabs,
-          "Accept": "audio/mpeg",
+          "Accept": "audio/pcm",
         },
         body: JSON.stringify({
           text: text,
           model_id: "eleven_multilingual_v2",
           voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
-          output_format: "pcm_22050"
         }),
       })
 
@@ -1635,11 +1634,11 @@ class ElevenLabsTTSProcessor {
 
   async synthesizeToBuffer(text) {
     const timer = createTimer("TTS_PREPARE")
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}`, {
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_16000`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs},
+      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/pcm" },
       body: JSON.stringify({
-        text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }, output_format: "pcm_22050"
+        text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }
       }),
     })
     if (!response.ok) {
