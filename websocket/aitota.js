@@ -32,6 +32,7 @@ const {
   getVoiceConfig, 
   getSarvamLanguage, 
   getDeepgramLanguage,
+  getValidElevenLabsVoiceId,
   VALID_SARVAM_VOICES,
   DEFAULT_ELEVENLABS_VOICE_ID
 } = require("../utils/voice-config")
@@ -1450,12 +1451,13 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
 
 // Simplified TTS processor
 class ElevenLabsTTSProcessor {
-  constructor(language, ws, streamSid, callLogger = null) {
-    this.language = language
+  constructor(voiceConfig, ws, streamSid, callLogger = null) {
+    this.voiceConfig = voiceConfig
+    this.language = voiceConfig.language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.voiceId = getValidElevenLabsVoiceId(ws.sessionAgentConfig)
+    this.voiceId = voiceConfig.elevenLabsVoiceId
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
@@ -1731,7 +1733,7 @@ class UnifiedTTSProcessor {
     if (this.voiceConfig.serviceProvider === 'sarvam') {
       this.processor = new SarvamTTSProcessor(this.voiceConfig, ws, streamSid, callLogger)
     } else {
-      this.processor = new ElevenLabsTTSProcessor(this.voiceConfig.language, ws, streamSid, callLogger)
+      this.processor = new ElevenLabsTTSProcessor(this.voiceConfig, ws, streamSid, callLogger)
     }
   }
 

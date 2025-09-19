@@ -53,7 +53,8 @@ const getValidElevenLabsVoiceId = (agentConfig) => {
     const voiceSelection = agentConfig?.voiceSelection || ""
     
     // If voiceId is provided and looks like a valid ElevenLabs voice ID, use it
-    if (voiceId && /^[A-Za-z0-9]{20,}$/.test(voiceId)) {
+    if (voiceId && /^[A-Za-z0-9]{15,}$/.test(voiceId)) {
+      console.log(`✅ [VOICE-CONFIG] Using ElevenLabs voice ID from database: ${voiceId}`)
       return voiceId
     }
     
@@ -122,6 +123,14 @@ const getVoiceConfig = (agentConfig) => {
     config.sarvamVoice = getValidSarvamVoice(agentConfig)
   } else if (serviceProvider === 'elevenlabs') {
     config.elevenLabsVoiceId = getValidElevenLabsVoiceId(agentConfig)
+  }
+  
+  console.log(`🎤 [VOICE-CONFIG] Service: ${config.serviceProvider}, Language: ${config.language}, Voice: ${config.voiceSelection}, VoiceID: ${config.voiceId}`)
+  if (config.sarvamVoice) {
+    console.log(`🎤 [VOICE-CONFIG] Sarvam Voice: ${config.sarvamVoice}`)
+  }
+  if (config.elevenLabsVoiceId) {
+    console.log(`🎤 [VOICE-CONFIG] ElevenLabs Voice ID: ${config.elevenLabsVoiceId}`)
   }
   
   return config
