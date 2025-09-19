@@ -2239,8 +2239,8 @@ const setupUnifiedVoiceServer = (wss) => {
         const tts = new UnifiedTTSProcessor(agentConfig, ws, streamSid, callLogger)
         currentTTS = tts
         let sentIndex = 0
-        const MIN_TOKENS = 10
-        const MAX_TOKENS = 15
+        const MIN_TOKENS = 20
+        const MAX_TOKENS = 30
 
         aiResponse = await processWithOpenAIStream(
           text,
