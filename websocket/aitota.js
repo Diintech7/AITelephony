@@ -27,6 +27,15 @@ const fetch = globalThis.fetch || require("node-fetch")
 let WHATSAPP_API_URL = null
 
 // Normalize Indian mobile to 91XXXXXXXXXX format (no +)
+// Import unified voice configuration
+const { 
+  getVoiceConfig, 
+  getSarvamLanguage, 
+  getDeepgramLanguage,
+  VALID_SARVAM_VOICES,
+  DEFAULT_ELEVENLABS_VOICE_ID
+} = require("../utils/voice-config")
+
 const normalizeIndianMobile = (raw) => {
   try {
     if (!raw) return null
@@ -100,35 +109,7 @@ const createTimer = (label) => {
   }
 }
 
-// Language mapping for TTS and STT services
-const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
-  en: "en-IN",
-  bn: "bn-IN",
-  te: "te-IN",
-  ta: "ta-IN",
-  mr: "mr-IN",
-  gu: "gu-IN",
-  kn: "kn-IN",
-  ml: "ml-IN",
-  pa: "pa-IN",
-  or: "or-IN",
-  as: "as-IN",
-  ur: "ur-IN",
-}
-
-const getSarvamLanguage = (language = "hi") => {
-  const lang = language?.toLowerCase() || "hi"
-  return LANGUAGE_MAPPING[lang] || "hi-IN"
-}
-
-const getDeepgramLanguage = (language = "hi") => {
-  const lang = language?.toLowerCase() || "hi"
-  if (lang === "hi") return "hi"
-  if (lang === "en") return "en-IN"
-  if (lang === "mr") return "mr"
-  return lang
-}
+// Language mapping functions are now imported from voice-config.js
 
 // --- Audio format helpers for ElevenLabs responses ---
 const isMp3Buffer = (buf) => {
@@ -171,75 +152,7 @@ const extractPcmFromWav = (buf) => {
   }
 }
 
-// Valid Sarvam voice options
-const VALID_SARVAM_VOICES = new Set([
-  "abhilash",
-  "anushka",
-  "meera",
-  "pavithra",
-  "maitreyi",
-  "arvind",
-  "amol",
-  "amartya",
-  "diya",
-  "neel",
-  "misha",
-  "vian",
-  "arjun",
-  "maya",
-  "manisha",
-  "vidya",
-  "arya",
-  "karun",
-  "hitesh",
-])
-
-const getValidSarvamVoice = (voiceSelection = "pavithra") => {
-  const normalized = (voiceSelection || "").toString().trim().toLowerCase()
-  if (VALID_SARVAM_VOICES.has(normalized)) {
-    return normalized
-  }
-
-  const voiceMapping = {
-    "male-professional": "arvind",
-    "female-professional": "pavithra",
-    "male-friendly": "amol",
-    "female-friendly": "maya",
-    neutral: "pavithra",
-    default: "pavithra",
-    male: "arvind",
-    female: "pavithra",
-  }
-
-  return voiceMapping[normalized] || "pavithra"
-}
-
-// Resolve a safe ElevenLabs voice id from agent config or fallback
-const DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM" // Rachel
-const getValidElevenLabsVoiceId = (voiceSelection) => {
-  try {
-    const raw = (voiceSelection || "").toString().trim()
-    // If looks like a valid ElevenLabs voice id (alphanumeric, length >= 20), accept
-    if (/^[A-Za-z0-9]{20,}$/.test(raw)) return raw
-    // Map common labels to a default or known ids (extendable)
-    const mapping = {
-      rachel: DEFAULT_ELEVENLABS_VOICE_ID,
-      female: DEFAULT_ELEVENLABS_VOICE_ID,
-      female_professional: DEFAULT_ELEVENLABS_VOICE_ID,
-      "female-professional": DEFAULT_ELEVENLABS_VOICE_ID,
-      neutral: DEFAULT_ELEVENLABS_VOICE_ID,
-      default: DEFAULT_ELEVENLABS_VOICE_ID,
-      pavithra: DEFAULT_ELEVENLABS_VOICE_ID,
-      arvind: DEFAULT_ELEVENLABS_VOICE_ID,
-      male: DEFAULT_ELEVENLABS_VOICE_ID,
-      "male-professional": DEFAULT_ELEVENLABS_VOICE_ID,
-    }
-    const key = raw.toLowerCase()
-    return mapping[key] || DEFAULT_ELEVENLABS_VOICE_ID
-  } catch (_) {
-    return DEFAULT_ELEVENLABS_VOICE_ID
-  }
-}
+// Voice validation functions are now imported from voice-config.js
 
 // Utility function to decode base64 extra data
 const decodeExtraData = (extraBase64) => {
@@ -510,7 +423,7 @@ class EnhancedCallLogger {
       console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
       
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new ElevenLabsTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
+        const tts = new UnifiedTTSProcessor(agentConfig, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS synthesis but don't wait for completion
         tts.synthesizeAndStream(message).catch(err => 
@@ -605,7 +518,7 @@ class EnhancedCallLogger {
       // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
       let ttsStarted = false
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new ElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new UnifiedTTSProcessor(agentConfig, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS and wait for it to begin
         try {
@@ -684,7 +597,7 @@ class EnhancedCallLogger {
       
       // 2. Start TTS synthesis and wait for completion
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new ElevenLabsTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new UnifiedTTSProcessor(agentConfig, this.ws, this.streamSid, this.callLogger)
         
         try {
           console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
@@ -1542,7 +1455,7 @@ class ElevenLabsTTSProcessor {
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.voiceId = getValidElevenLabsVoiceId(ws.sessionAgentConfig?.elevenlabsVoiceId || ws.sessionAgentConfig?.voiceSelection)
+    this.voiceId = getValidElevenLabsVoiceId(ws.sessionAgentConfig)
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
@@ -1800,6 +1713,307 @@ class ElevenLabsTTSProcessor {
   }
 }
 
+// Unified TTS Processor that supports both Sarvam and ElevenLabs
+class UnifiedTTSProcessor {
+  constructor(agentConfig, ws, streamSid, callLogger = null) {
+    this.agentConfig = agentConfig
+    this.ws = ws
+    this.streamSid = streamSid
+    this.callLogger = callLogger
+    this.voiceConfig = getVoiceConfig(agentConfig)
+    this.isInterrupted = false
+    this.currentAudioStreaming = null
+    this.totalAudioBytes = 0
+    this.pendingQueue = []
+    this.isProcessingQueue = false
+    
+    // Initialize the appropriate TTS processor
+    if (this.voiceConfig.serviceProvider === 'sarvam') {
+      this.processor = new SarvamTTSProcessor(this.voiceConfig, ws, streamSid, callLogger)
+    } else {
+      this.processor = new ElevenLabsTTSProcessor(this.voiceConfig.language, ws, streamSid, callLogger)
+    }
+  }
+
+  interrupt() {
+    this.isInterrupted = true
+    if (this.processor) {
+      this.processor.interrupt()
+    }
+  }
+
+  reset() {
+    this.interrupt()
+    this.isInterrupted = false
+    this.totalAudioBytes = 0
+    if (this.processor) {
+      this.processor.reset()
+    }
+  }
+
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
+    return await this.processor.synthesizeAndStream(text)
+  }
+
+  async enqueueText(text) {
+    if (this.isInterrupted) return
+    return await this.processor.enqueueText(text)
+  }
+
+  getStats() {
+    return this.processor ? this.processor.getStats() : { totalAudioBytes: 0 }
+  }
+}
+
+// Sarvam TTS Processor
+class SarvamTTSProcessor {
+  constructor(voiceConfig, ws, streamSid, callLogger = null) {
+    this.voiceConfig = voiceConfig
+    this.ws = ws
+    this.streamSid = streamSid
+    this.callLogger = callLogger
+    this.sarvamLanguage = getSarvamLanguage(voiceConfig.language)
+    this.voice = voiceConfig.sarvamVoice
+    this.isInterrupted = false
+    this.currentAudioStreaming = null
+    this.totalAudioBytes = 0
+    this.pendingQueue = []
+    this.isProcessingQueue = false
+  }
+
+  interrupt() {
+    this.isInterrupted = true
+    if (this.currentAudioStreaming) {
+      this.currentAudioStreaming.interrupt = true
+    }
+  }
+
+  reset() {
+    this.interrupt()
+    this.isInterrupted = false
+    this.totalAudioBytes = 0
+  }
+
+  async synthesizeAndStream(text) {
+    if (this.isInterrupted) return
+
+    const timer = createTimer("SARVAM_TTS_SYNTHESIS")
+    try {
+      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "API-Subscription-Key": API_KEYS.sarvam,
+        },
+        body: JSON.stringify({
+          inputs: [text],
+          target_language_code: this.sarvamLanguage,
+          speaker: this.voice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: true,
+          model: "bulbul:v1",
+        }),
+      })
+
+      if (!response.ok || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [SARVAM-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+          throw new Error(`Sarvam API error: ${response.status}`)
+        }
+        return
+      }
+
+      const responseData = await response.json()
+      const audioBase64 = responseData.audios?.[0]
+      if (!audioBase64 || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [SARVAM-TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
+          throw new Error("No audio data received from Sarvam API")
+        }
+        return
+      }
+
+      console.log(`🕒 [SARVAM-TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
+      if (!this.isInterrupted) {
+        // Convert to PCM and stream
+        const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+        await this.streamAudioOptimizedForSIP(pcmBase64)
+        const audioBuffer = Buffer.from(pcmBase64, "base64")
+        this.totalAudioBytes += audioBuffer.length
+      }
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.log(`❌ [SARVAM-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+        throw error
+      }
+    }
+  }
+
+  async synthesizeToBuffer(text) {
+    const timer = createTimer("SARVAM_TTS_PREPARE")
+    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "API-Subscription-Key": API_KEYS.sarvam,
+      },
+      body: JSON.stringify({
+        inputs: [text],
+        target_language_code: this.sarvamLanguage,
+        speaker: this.voice,
+        pitch: 0,
+        pace: 1.0,
+        loudness: 1.0,
+        speech_sample_rate: 8000,
+        enable_preprocessing: true,
+        model: "bulbul:v1",
+      }),
+    })
+    if (!response.ok) {
+      console.log(`❌ [SARVAM-TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
+      throw new Error(`Sarvam API error: ${response.status}`)
+    }
+    const responseData = await response.json()
+    const audioBase64 = responseData.audios?.[0]
+    if (!audioBase64) {
+      console.log(`❌ [SARVAM-TTS-PREPARE] ${timer.end()}ms - No audio data received`)
+      throw new Error("No audio data received from Sarvam API")
+    }
+    console.log(`🕒 [SARVAM-TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
+    return audioBase64
+  }
+
+  async enqueueText(text) {
+    if (this.isInterrupted) return
+    const item = { text, audioBase64: null, preparing: true }
+    this.pendingQueue.push(item)
+    ;(async () => {
+      try {
+        item.audioBase64 = await this.synthesizeToBuffer(text)
+      } catch (_) {
+        item.audioBase64 = null
+      } finally {
+        item.preparing = false
+      }
+    })()
+    if (!this.isProcessingQueue) {
+      this.processQueue().catch(() => {})
+    }
+  }
+
+  async processQueue() {
+    if (this.isProcessingQueue) return
+    this.isProcessingQueue = true
+    try {
+      while (!this.isInterrupted && this.pendingQueue.length > 0) {
+        const item = this.pendingQueue[0]
+        if (!item.audioBase64) {
+          let waited = 0
+          while (!this.isInterrupted && item.preparing && waited < 3000) {
+            await new Promise(r => setTimeout(r, 20))
+            waited += 20
+          }
+        }
+        if (this.isInterrupted) break
+        const audioBase64 = item.audioBase64
+        this.pendingQueue.shift()
+        if (audioBase64) {
+          const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+          await this.streamAudioOptimizedForSIP(pcmBase64)
+          await new Promise(r => setTimeout(r, 60))
+        }
+      }
+    } finally {
+      this.isProcessingQueue = false
+    }
+  }
+
+  async streamAudioOptimizedForSIP(audioBase64) {
+    if (this.isInterrupted) return
+
+    const audioBuffer = Buffer.from(audioBase64, "base64")
+    const streamingSession = { interrupt: false }
+    this.currentAudioStreaming = streamingSession
+
+    const SAMPLE_RATE = 8000
+    const BYTES_PER_SAMPLE = 2
+    const CHUNK_SIZE = 320 // 20ms @ 8kHz mono 16-bit
+
+    let position = 0
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
+      const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
+      const mediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: {
+          payload: padded.toString("base64"),
+        },
+      }
+      if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        try {
+          this.ws.send(JSON.stringify(mediaMessage))
+        } catch (_) {
+          break
+        }
+      } else {
+        break
+      }
+      position += CHUNK_SIZE
+      if (position < audioBuffer.length && !this.isInterrupted) {
+        await new Promise(r => setTimeout(r, 20))
+      }
+    }
+
+    this.currentAudioStreaming = null
+  }
+
+  extractPcmLinear16Mono8kBase64(audioBase64) {
+    try {
+      const buf = Buffer.from(audioBase64, 'base64')
+      if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') {
+        let offset = 12
+        let fmt = null
+        let dataOffset = null
+        let dataSize = null
+        while (offset + 8 <= buf.length) {
+          const chunkId = buf.toString('ascii', offset, offset + 4)
+          const chunkSize = buf.readUInt32LE(offset + 4)
+          const next = offset + 8 + chunkSize
+          if (chunkId === 'fmt ') {
+            fmt = {
+              audioFormat: buf.readUInt16LE(offset + 8),
+              numChannels: buf.readUInt16LE(offset + 10),
+              sampleRate: buf.readUInt32LE(offset + 12),
+              bitsPerSample: buf.readUInt16LE(offset + 22),
+            }
+          } else if (chunkId === 'data') {
+            dataOffset = offset + 8
+            dataSize = chunkSize
+            break
+          }
+          offset = next
+        }
+        if (dataOffset != null && dataSize != null) {
+          const dataBuf = buf.slice(dataOffset, dataOffset + dataSize)
+          return dataBuf.toString('base64')
+        }
+      }
+      return audioBase64
+    } catch (e) {
+      return audioBase64
+    }
+  }
+
+  getStats() {
+    return { totalAudioBytes: this.totalAudioBytes }
+  }
+}
+
 // Enhanced agent lookup function with isActive check
 const findAgentForCall = async (callData) => {
   const timer = createTimer("MONGODB_AGENT_LOOKUP")
@@ -1817,7 +2031,7 @@ const findAgentForCall = async (callData) => {
       agent = await Agent.findOne({ 
         accountSid, 
         isActive: true 
-      }).lean()
+      }).select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection voiceServiceProvider voiceId language callerId whatsappEnabled whatsapplink depositions").lean()
       
       if (!agent) {
         throw new Error(`No active agent found for accountSid: ${accountSid}`)
@@ -1837,7 +2051,7 @@ const findAgentForCall = async (callData) => {
       agent = await Agent.findOne({ 
         callerId: callVaId, 
         isActive: true 
-      }).lean()
+      }).select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection voiceServiceProvider voiceId language callerId whatsappEnabled whatsapplink depositions").lean()
       
       if (!agent) {
         throw new Error(`No active agent found for callerId: ${callVaId}`)
@@ -2020,7 +2234,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off LLM streaming and partial TTS
         let aiResponse = null
-        const tts = new ElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        const tts = new UnifiedTTSProcessor(agentConfig, ws, streamSid, callLogger)
         currentTTS = tts
         let sentIndex = 0
         const MIN_TOKENS = 10
@@ -2258,6 +2472,9 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("✅ [SIP-AGENT-LOOKUP] Client ID:", agentConfig.clientId)
               console.log("✅ [SIP-AGENT-LOOKUP] Language:", agentConfig.language)
               console.log("✅ [SIP-AGENT-LOOKUP] Voice Selection:", agentConfig.voiceSelection)
+              console.log("✅ [SIP-AGENT-LOOKUP] Voice Service Provider:", agentConfig.voiceServiceProvider)
+              console.log("✅ [SIP-AGENT-LOOKUP] Voice ID:", agentConfig.voiceId)
+              console.log("✅ [SIP-AGENT-LOOKUP] TTS Selection:", agentConfig.ttsSelection)
               console.log("✅ [SIP-AGENT-LOOKUP] First Message:", agentConfig.firstMessage)
               console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp Enabled:", agentConfig.whatsappEnabled)
               console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp API URL:", agentConfig.whatsapplink)
@@ -2383,7 +2600,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new ElevenLabsTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            const tts = new UnifiedTTSProcessor(agentConfig, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break

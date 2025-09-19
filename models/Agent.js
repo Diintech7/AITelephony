@@ -13,10 +13,10 @@ const agentSchema = new mongoose.Schema({
   }, // Type of user who created the agent
   
   agentId: {type: String},
+  agentKey: { type: String, unique: true, index: true }, // Encrypted unique key for agent
   // Active Status
   isActive: { type: Boolean, default: true, index: true },
   isApproved: { type: Boolean, default: false, index: true },
-
   // Personal Information
   agentName: { type: String, required: true },
   description: { type: String, required: true },
@@ -41,6 +41,12 @@ const agentSchema = new mongoose.Schema({
     enum: ["sarvam", "elevenlabs", "openai", "google", "azure", "aws"],
     default: "sarvam",
   },
+  voiceServiceProvider: {
+    type: String,
+    enum: ["sarvam", "elevenlabs"],
+    default: "sarvam",
+  },
+  voiceId: { type: String }, // Store the actual voice ID for the selected service
   llmSelection: {
     type: String,
     enum: ["openai", "anthropic", "google", "azure"],
@@ -67,6 +73,10 @@ const agentSchema = new mongoose.Schema({
       "vian",
       "arjun",
       "maya",
+      "kumaran",
+      "monika",
+      "aahir",
+      "kanika",
     ],
     default: "meera",
   },
@@ -102,12 +112,42 @@ const agentSchema = new mongoose.Schema({
   backgroundImage: { type: String }, // base64 image for background
   backgroundColor: { type: String }, // hex color string
 
-  // Knowledge Base: store S3 keys and optional titles
+  // Knowledge Base: reference to separate KnowledgeBase collection
+  // This field is kept for backward compatibility but will be populated from KnowledgeBase model
   knowledgeBase: [
     {
-      key: { type: String, required: true },
+      // Old format fields (for backward compatibility)
+      key: { type: String }, // Made optional to support new format
       name: { type: String },
       uploadedAt: { type: Date, default: Date.now },
+      // New format fields (from KnowledgeBase model)
+      _id: { type: mongoose.Schema.Types.ObjectId },
+      agentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Agent' },
+      clientId: { type: String },
+      type: { 
+        type: String, 
+        enum: ['pdf', 'text', 'image', 'youtube', 'link', 'website'] 
+      },
+      title: { type: String },
+      description: { type: String },
+      content: {
+        s3Key: { type: String },
+        text: { type: String },
+        youtubeId: { type: String },
+        youtubeUrl: { type: String },
+        url: { type: String },
+        linkText: { type: String },
+      },
+      fileMetadata: {
+        originalName: { type: String },
+        fileSize: { type: Number },
+        mimeType: { type: String },
+        uploadedAt: { type: Date },
+      },
+      tags: [{ type: String }],
+      isActive: { type: Boolean, default: true },
+      createdAt: { type: Date },
+      updatedAt: { type: Date },
     },
   ],
 
@@ -334,5 +374,81 @@ agentSchema.methods.toggleSocial = function(platform, enabled) {
   }
   return false;
 }
+
+// Encryption/Decryption methods for agentKey
+const crypto = require("crypto");
+
+agentSchema.statics.encryptAgentKey = (key) => {
+  const algorithm = "aes-256-cbc";
+  const secretKey = crypto
+    .createHash("sha256")
+    .update(process.env.ENCRYPTION_SECRET || "default-secret-key-change-in-production")
+    .digest();
+  const iv = crypto.randomBytes(16);
+
+  const cipher = crypto.createCipheriv(algorithm, secretKey, iv);
+  let encrypted = cipher.update(key, "utf8", "hex");
+  encrypted += cipher.final("hex");
+
+  return iv.toString("hex") + ":" + encrypted;
+};
+
+agentSchema.statics.decryptAgentKey = (encryptedKey) => {
+  const algorithm = "aes-256-cbc";
+  const secretKey = crypto
+    .createHash("sha256")
+    .update(process.env.ENCRYPTION_SECRET || "default-secret-key-change-in-production")
+    .digest();
+
+  const parts = encryptedKey.split(":");
+  const iv = Buffer.from(parts[0], "hex");
+  const encrypted = parts[1];
+
+  const decipher = crypto.createDecipheriv(algorithm, secretKey, iv);
+  let decrypted = decipher.update(encrypted, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+
+  return decrypted;
+};
+
+agentSchema.methods.getDecryptedAgentKey = function () {
+  return this.constructor.decryptAgentKey(this.agentKey);
+};
+
+// Generate a unique agent key (8 characters max) - no encryption needed since it's already a hash
+agentSchema.statics.generateAgentKey = (agentId) => {
+  if (!agentId) {
+    // Fallback for cases without agentId
+    return crypto.randomBytes(4).toString('hex');
+  }
+  
+  // Create a simple hash of the ObjectId and take first 8 characters
+  const hash = crypto.createHash('md5').update(agentId.toString()).digest('hex');
+  return hash.substring(0, 8);
+};
+
+// Find agent by agentKey and return the document ID
+agentSchema.statics.findByAgentKey = async function(agentKey) {
+  try {
+    const agent = await this.findOne({ agentKey: agentKey });
+    if (agent) {
+      return {
+        success: true,
+        agentId: agent._id,
+        agent: agent
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Agent not found with this agentKey'
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      message: 'Error finding agent: ' + error.message
+    };
+  }
+};
 
 module.exports = mongoose.model("Agent", agentSchema)
