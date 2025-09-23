@@ -4,6 +4,7 @@ const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 const Credit = require("../models/Credit")
+const { getSystemPromptWithCache } = require("../utils/system-prompt-helper")
 
 // Language detection removed - using default language from agent config
 
@@ -953,14 +954,8 @@ const processWithOpenAI = async (
       ? `FirstGreeting: "${firstMessage}"\n`
       : ""
 
-    const policyBlock = [
-      "Answer strictly using the information provided above.",
-      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
-      "If the information is not present, reply briefly that you don't have that information.",
-      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
-      "Keep the entire reply under 100 tokens.",
-      "Use the language of the user's message in the same language give the response.",
-    ].join(" ")
+    // Get policy block from SystemPrompt database (with fallback)
+    const policyBlock = await getSystemPromptWithCache()
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
 
@@ -1044,18 +1039,14 @@ const processWithOpenAIStream = async (
       return null
     }
 
-    const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
-    const firstMessage = (agentConfig?.firstMessage || "").trim()
-    const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
-    const policyBlock = [
-      "Answer strictly using the information provided above.",
-      "If specifics (address/phone/timings) are missing, say you don't have that info.",
-      "End with a brief follow-up question.",
-      "Keep reply under 100 tokens.",
-      "dont give any fornts or styles in it or symbols in it",
-      "in which language you get the transcript in same language give response in same language"
-    ].join(" ")
-    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+      const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
+      const firstMessage = (agentConfig?.firstMessage || "").trim()
+      const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+      
+      // Get policy block from SystemPrompt database (with fallback)
+      const policyBlock = await getSystemPromptWithCache()
+      
+      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
     const personalizationMessage = userName && userName.trim()
       ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
       : null

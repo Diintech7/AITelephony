@@ -4,6 +4,7 @@ const mongoose = require("mongoose")
 const Agent = require("../models/Agent")
 const CallLog = require("../models/CallLog")
 const Credit = require("../models/Credit")
+const { getSystemPromptWithCache } = require("../utils/system-prompt-helper")
 
 // Load API keys from environment variables
 const API_KEYS = {
@@ -529,13 +530,8 @@ const processWithOpenAI = async (
       ? `FirstGreeting: "${firstMessage}"\n`
       : ""
 
-    const policyBlock = [
-      "Answer strictly using the information provided above.",
-      "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
-      "If the information is not present, reply briefly that you don't have that information.",
-      "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
-      "Keep the entire reply under 100 tokens.",
-    ].join(" ")
+    // Get policy block from SystemPrompt database (with fallback)
+    const policyBlock = await getSystemPromptWithCache()
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
 
@@ -2056,13 +2052,10 @@ const setupSanPbxWebSocketServer = (ws) => {
       const basePrompt = (ws.sessionAgentConfig?.systemPrompt || "You are a helpful AI assistant.").trim()
       const firstMessage = (ws.sessionAgentConfig?.firstMessage || "").trim()
       const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
-      const policyBlock = [
-        "Answer strictly using the information provided above.",
-        "If the user asks for address, phone, timings, or other specifics, check the System Prompt or FirstGreeting.",
-        "If the information is not present, reply briefly that you don't have that information.",
-        "Always end your answer with a short, relevant follow-up question to keep the conversation going.",
-        "Keep the entire reply under 100 tokens.",
-      ].join(" ")
+      
+      // Get policy block from SystemPrompt database (with fallback)
+      const policyBlock = await getSystemPromptWithCache()
+      
       const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
 
       const messages = [
