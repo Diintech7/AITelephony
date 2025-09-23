@@ -13,6 +13,24 @@ const VALID_SARVAM_VOICES = new Set([
 // Default ElevenLabs voice ID (Rachel)
 const DEFAULT_ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
+// Known ElevenLabs stock voices (name -> voiceId)
+const ELEVENLABS_VOICES = {
+  adam: "pNInz6obpgDQGcFmaJgB",
+  alice: "Xb7hH8MSUJpSbSDYk0k2",
+  antoni: "ErXwobaYiN019PkySvjV",
+  aria: "9BWtsMINqrJLrRacOk9x",
+  arnold: "VR6AewLTigWG4xSOukaG",
+  bill: "pqHfZKP75CvOlQylNhV4",
+  brian: "nPczCjzI2devNBz1zQrb",
+  callum: "N2lVS1w4EtoT3dr4eOWO",
+  charlie: "IKne3meq5aSn9XLyUdCD",
+  charlotte: "XB0fDUnXU5powFXDhCwa",
+  kumaran: "rgltZvTfiMmgWweZhh7n",
+  monika: "NaKPQmdr7mMxXuXrNeFC",
+  aahir: "RKshBIkZ7DwU6YNPq5Jd",
+  kanika: "xccfcojYYGnqTTxwZEDU",
+}
+
 /**
  * Get valid Sarvam voice from agent configuration
  * @param {Object} agentConfig - Agent configuration object
@@ -60,7 +78,13 @@ const getValidElevenLabsVoiceId = (agentConfig) => {
     
     // Map voice selection to ElevenLabs voice IDs
     const raw = (voiceSelection || "").toString().trim()
-    const mapping = {
+    const key = raw.toLowerCase()
+    // First check known ElevenLabs stock voices
+    if (ELEVENLABS_VOICES[key]) {
+      return ELEVENLABS_VOICES[key]
+    }
+    // Fallback generic mapping to a sensible default
+    const generic = {
       rachel: DEFAULT_ELEVENLABS_VOICE_ID,
       female: DEFAULT_ELEVENLABS_VOICE_ID,
       female_professional: DEFAULT_ELEVENLABS_VOICE_ID,
@@ -72,9 +96,7 @@ const getValidElevenLabsVoiceId = (agentConfig) => {
       male: DEFAULT_ELEVENLABS_VOICE_ID,
       "male-professional": DEFAULT_ELEVENLABS_VOICE_ID,
     }
-    
-    const key = raw.toLowerCase()
-    return mapping[key] || DEFAULT_ELEVENLABS_VOICE_ID
+    return generic[key] || DEFAULT_ELEVENLABS_VOICE_ID
   } catch (error) {
     console.log(`❌ [VOICE-CONFIG] Error getting ElevenLabs voice ID: ${error.message}`)
     return DEFAULT_ELEVENLABS_VOICE_ID
@@ -177,6 +199,7 @@ const getDeepgramLanguage = (language = "hi") => {
 module.exports = {
   VALID_SARVAM_VOICES,
   DEFAULT_ELEVENLABS_VOICE_ID,
+  ELEVENLABS_VOICES,
   getValidSarvamVoice,
   getValidElevenLabsVoiceId,
   getTtsServiceProvider,
