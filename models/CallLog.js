@@ -73,6 +73,12 @@ const CallLogSchema = new mongoose.Schema({
     },
     // Telephony identifiers
     callerId: { type: String },
+    // SanPBX start metadata snapshot
+    sanpbx: { type: Object, default: {} },
+    // For POST /api/call-recordings inbound number/extension mapping
+    inboundNumber: { type: String },
+    // For POST /api/call-recordings posted fields snapshot
+    postedRecordingMeta: { type: Object, default: {} },
     // Performance metrics
     totalUpdates: { type: Number, default: 0 },
     averageResponseTime: { type: Number },
