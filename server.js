@@ -26,6 +26,28 @@ app.use(cors())
 app.use(express.json({ limit: "10mb" }))
 app.use(express.urlencoded({ extended: true }))
 app.use(express.static(path.join(__dirname, "public")))
+// Static directory to store uploaded recordings
+app.use("/recordings", express.static(path.join(__dirname, "recordings")))
+
+// In-memory API key store (simple, non-persistent)
+const issuedApiKeys = new Map() // key -> { username, issuedAt, expiresAt }
+function generateApiKey() {
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+}
+function validateApiKey(req) {
+  const auth = req.headers["authorization"] || ""
+  const headerKey = auth.startsWith("Bearer ") ? auth.slice(7) : null
+  const queryKey = req.query.api_key || req.headers["x-api-key"]
+  const key = headerKey || queryKey
+  if (!key) return { ok: false, error: "missing_api_key" }
+  const info = issuedApiKeys.get(String(key))
+  if (!info) return { ok: false, error: "invalid_api_key" }
+  if (info.expiresAt && Date.now() > info.expiresAt) {
+    issuedApiKeys.delete(String(key))
+    return { ok: false, error: "expired_api_key" }
+  }
+  return { ok: true, key, info }
+}
 
 // Initialize database connection
 const initializeDatabase = async () => {
@@ -199,6 +221,154 @@ console.log("✅ [SERVER] SIP WebSocket server setup enabled")
 console.log("✅ [SERVER] SanIPPBX WebSocket server setup enabled")
 
 // ==================== API ENDPOINTS ====================
+
+// Issue API key with static credentials
+app.post("/api/issue-key", async (req, res) => {
+  try {
+    const { username, password } = req.body || {}
+    // Static credentials as requested
+    if (username !== "sip_user" || password !== "secret") {
+      return res.status(401).json({ success: false, error: "invalid_credentials" })
+    }
+    const key = generateApiKey()
+    const ttlMs = 24 * 60 * 60 * 1000 // 24h
+    issuedApiKeys.set(key, { username, issuedAt: Date.now(), expiresAt: Date.now() + ttlMs })
+    return res.json({ success: true, apiKey: key, expiresIn: ttlMs / 1000 })
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message })
+  }
+})
+
+// Call recordings API: validate key, return call meta, accept audio upload
+// GET: /api/call-recordings?api_key=KEY&streamSid=... or callSid=...
+// POST: /api/call-recordings (Authorization: Bearer KEY) { streamSid|callSid, audioBase64?, audioUrl? }
+app.get("/api/call-recordings", async (req, res) => {
+  try {
+    const v = validateApiKey(req)
+    if (!v.ok) return res.status(401).json({ success: false, error: v.error })
+
+    const CallLog = require("./models/CallLog")
+    const { streamSid, callSid } = req.query
+    if (!streamSid && !callSid) {
+      return res.status(400).json({ success: false, error: "missing_streamSid_or_callSid" })
+    }
+    const query = streamSid ? { streamSid } : { callSid }
+    const log = await CallLog.findOne(query).lean()
+    if (!log) return res.status(404).json({ success: false, error: "not_found" })
+
+    // Map requested fields
+    const uniqueCallId = log.callSid || log.streamSid || String(log._id)
+    const inboundOrExt = log.metadata?.callerId || log.streamSid || null
+    const customerNumber = log.mobile || null
+    const startDateTime = log.time || log.createdAt || null
+
+    return res.json({
+      success: true,
+      data: {
+        uniqueCallId,
+        inboundNumberOrExtension: inboundOrExt,
+        customerTelephoneNumber: customerNumber,
+        startDateTime,
+        callLogId: log._id,
+        audioUrl: log.audioUrl || null,
+      },
+    })
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message })
+  }
+})
+
+app.post("/api/call-recordings", async (req, res) => {
+  try {
+    const v = validateApiKey(req)
+    if (!v.ok) return res.status(401).json({ success: false, error: v.error })
+
+    const {
+      streamSid,
+      callSid,
+      uniqueCallId,
+      inboundNumberOrExtension,
+      customerTelephoneNumber,
+      startDateTime,
+      audioBase64,
+      audioUrl,
+    } = req.body || {}
+
+    if (!uniqueCallId && !streamSid && !callSid) {
+      return res.status(400).json({ success: false, error: "missing_identifier_uniqueCallId_or_streamSid_or_callSid" })
+    }
+
+    const CallLog = require("./models/CallLog")
+    let query = null
+    if (streamSid) query = { streamSid }
+    else if (callSid) query = { callSid }
+    else query = { $or: [{ callSid: uniqueCallId }, { streamSid: uniqueCallId }] }
+
+    const log = await CallLog.findOne(query)
+    if (!log) return res.status(404).json({ success: false, error: "not_found" })
+
+    // Update CallLog with provided meta
+    try {
+      const updates = {}
+      const meta = { ...(log.metadata || {}) }
+      meta.postedRecordingMeta = {
+        uniqueCallId: uniqueCallId || log.callSid || log.streamSid || null,
+        inboundNumberOrExtension: inboundNumberOrExtension || null,
+        customerTelephoneNumber: customerTelephoneNumber || null,
+        startDateTime: startDateTime || null,
+        updatedAt: new Date(),
+      }
+      if (typeof inboundNumberOrExtension === "string" && inboundNumberOrExtension.trim()) {
+        meta.inboundNumber = inboundNumberOrExtension.trim()
+        meta.sanpbx = meta.sanpbx || {}
+        if (!meta.sanpbx.to) meta.sanpbx.to = inboundNumberOrExtension.trim()
+      }
+      if (typeof customerTelephoneNumber === "string" && customerTelephoneNumber.trim()) {
+        updates.mobile = customerTelephoneNumber.trim()
+      }
+      if (startDateTime) {
+        const dt = new Date(startDateTime)
+        if (!isNaN(dt.getTime())) updates.time = dt
+      }
+      updates.metadata = meta
+      await CallLog.findByIdAndUpdate(log._id, updates)
+      Object.assign(log, updates)
+    } catch (_) {}
+
+    let savedUrl = null
+    if (audioBase64 && typeof audioBase64 === "string") {
+      const fs = require("fs")
+      const p = require("path")
+      const dir = p.join(__dirname, "recordings")
+      try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }) } catch (_) {}
+      const fname = `${(log.callSid || log.streamSid || log._id).toString()}_${Date.now()}.wav`
+      const outPath = p.join(dir, fname)
+      const buf = Buffer.from(audioBase64.replace(/^data:audio\/(?:wav|x-wav|mpeg);base64,/, ""), "base64")
+      fs.writeFileSync(outPath, buf)
+      savedUrl = `/recordings/${fname}`
+      log.audioUrl = savedUrl
+      await log.save()
+    } else if (audioUrl && typeof audioUrl === "string") {
+      log.audioUrl = audioUrl
+      await log.save()
+      savedUrl = audioUrl
+    }
+
+    return res.json({
+      success: true,
+      audioUrl: savedUrl || log.audioUrl || null,
+      callLogId: log._id,
+      data: {
+        uniqueCallId: uniqueCallId || log.callSid || log.streamSid || null,
+        inboundNumberOrExtension: inboundNumberOrExtension || log.metadata?.inboundNumber || log.metadata?.sanpbx?.to || null,
+        customerTelephoneNumber: customerTelephoneNumber || log.mobile || null,
+        startDateTime: startDateTime || log.time || log.createdAt || null,
+      },
+    })
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message })
+  }
+})
 
 // Live logs endpoint with filtering and pagination
 app.get("/api/logs", async (req, res) => {

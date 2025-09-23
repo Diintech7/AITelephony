@@ -2486,6 +2486,34 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Create initial call log entry immediately
           try {
             await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
+            // Persist initial SanPBX start-event fields into the call log (non-blocking)
+            try {
+              const sanMeta = {
+                event: 'start',
+                channelId: data.channelId,
+                callId: data.callId,
+                streamId: data.streamId,
+                callerId: data.callerId,
+                callDirection: data.callDirection,
+                extraParams: data.extraParams || {},
+                cid: data.cid,
+                did: data.did,
+                timestamp: data.timestamp,
+                mediaFormat: data.mediaFormat || {},
+                from: (data.start && data.start.from) || data.from || null,
+                to: (data.start && data.start.to) || data.to || null,
+              }
+              if (callLogger.callLogId) {
+                await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                  $set: {
+                    'metadata.sanpbx': sanMeta,
+                    'metadata.customParams': { ...(callLogger.customParams || {}), ...(data.extraParams || {}) },
+                    'metadata.callerId': data.callerId || callLogger.callerId || undefined,
+                    'metadata.lastUpdated': new Date(),
+                  },
+                })
+              }
+            } catch (_) {}
             console.log("✅ [SANPBX-CALL-SETUP] Initial call log created successfully")
             console.log("✅ [SANPBX-CALL-SETUP] Call Log ID:", callLogger.callLogId)
           } catch (error) {
