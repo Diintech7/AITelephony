@@ -1440,7 +1440,7 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
   }
 }
 
-// Low-latency ElevenLabs TTS over WebSocket (stream-input)
+// Simplified TTS processor
 class ElevenLabsTTSProcessor {
   constructor(voiceConfig, ws, streamSid, callLogger = null) {
     this.voiceConfig = voiceConfig
@@ -1450,149 +1450,260 @@ class ElevenLabsTTSProcessor {
     this.callLogger = callLogger
     this.voiceId = voiceConfig.elevenLabsVoiceId
     this.isInterrupted = false
+    this.currentAudioStreaming = null
     this.totalAudioBytes = 0
-    this.elWs = null
-    this.elReady = false
-    this.keepAliveTimer = null
-    this.pendingTexts = []
-    this.connecting = null
+    this.pendingQueue = [] // { text, audioBase64, preparing }
+    this.isProcessingQueue = false
   }
 
   interrupt() {
     this.isInterrupted = true
-    if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
-    try { this.elWs && this.elWs.close() } catch (_) {}
-    this.elWs = null
-    this.elReady = false
-    this.connecting = null
+    if (this.currentAudioStreaming) {
+      this.currentAudioStreaming.interrupt = true
+    }
   }
 
   reset(language) {
     this.interrupt()
-    if (language) this.language = language
+    if (language) {
+      this.language = language
+    }
     this.isInterrupted = false
     this.totalAudioBytes = 0
-    this.pendingTexts = []
-  }
-
-  async ensureConnection() {
-    if (this.elReady && this.elWs && this.elWs.readyState === WebSocket.OPEN) return
-    if (this.connecting) return this.connecting
-
-    const modelId = 'eleven_flash_v2_5'
-    const inactivity = 180
-    const url = `wss://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}/stream-input?model_id=${encodeURIComponent(modelId)}&inactivity_timeout=${inactivity}&output_format=pcm_8000`
-
-    this.connecting = new Promise((resolve, reject) => {
-      try {
-        const el = new WebSocket(url, { headers: { 'xi-api-key': API_KEYS.elevenlabs } })
-        this.elWs = el
-
-        el.onopen = () => {
-          this.elReady = true
-          const initMsg = {
-            text: " ",
-            voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
-            generation_config: { chunk_length_schedule: [120, 160, 220] },
-            optimize_streaming_latency: 3,
-            flush: false,
-          }
-          try { el.send(JSON.stringify(initMsg)) } catch (_) {}
-          this.keepAliveTimer = setInterval(() => {
-            try { if (this.elWs?.readyState === WebSocket.OPEN) this.elWs.send(JSON.stringify({ text: " " })) } catch (_) {}
-          }, 15000)
-          if (this.pendingTexts.length) {
-            for (const t of this.pendingTexts.splice(0)) {
-              try { el.send(JSON.stringify({ text: t })) } catch (_) {}
-            }
-            try { el.send(JSON.stringify({ flush: true })) } catch (_) {}
-          }
-          resolve()
-        }
-
-        el.onmessage = async (event) => {
-          try {
-            const raw = event.data
-            if (!raw) return
-            let msg = null
-            if (typeof raw === 'string') {
-              try { msg = JSON.parse(raw) } catch (_) { msg = null }
-            }
-            if (msg && msg.audio) {
-              const audioBase64 = msg.audio
-              if (audioBase64 && !this.isInterrupted) {
-                await this.streamAudioOptimizedForSIP(audioBase64)
-                this.totalAudioBytes += Buffer.from(audioBase64, 'base64').length
-              }
-            }
-          } catch (_) {}
-        }
-
-        el.onerror = (err) => {
-          this.elReady = false
-          reject(new Error(err?.message || 'elevenlabs ws error'))
-        }
-
-        el.onclose = () => {
-          this.elReady = false
-          if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
-        }
-      } catch (e) {
-        this.elReady = false
-        reject(e)
-      }
-    })
-
-    return this.connecting
   }
 
   async synthesizeAndStream(text) {
-    if (this.isInterrupted || !text) return
+    if (this.isInterrupted) return
+
+    const timer = createTimer("TTS_SYNTHESIS")
+
     try {
-      await this.ensureConnection()
-      if (this.elWs?.readyState === WebSocket.OPEN) {
-        this.elWs.send(JSON.stringify({ text }))
-        this.elWs.send(JSON.stringify({ flush: true }))
-      } else {
-        this.pendingTexts.push(text)
+      const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_8000`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": API_KEYS.elevenlabs,
+          "Accept": "audio/pcm",
+        },
+        body: JSON.stringify({
+          text: text,
+          model_id: "eleven_multilingual_v2",
+          voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true },
+        }),
+      })
+
+      if (!response.ok || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+          throw new Error(`ElevenLabs API error: ${response.status}`)
+        }
+        return
       }
-    } catch (_) {
-      this.pendingTexts.push(text)
+
+      const arrayBuffer = await response.arrayBuffer()
+      let audioBufferRaw = Buffer.from(arrayBuffer)
+      // Guard: if MP3 or WAV returned despite request, convert to raw PCM or abort
+      if (isMp3Buffer(audioBufferRaw)) {
+        console.log("❌ [TTS-SYNTHESIS] MP3 (ID3/MPEG) detected in ElevenLabs response; attempting to abort to avoid distortion")
+        throw new Error("Unexpected MP3 payload from ElevenLabs when PCM requested")
+      }
+      if (isWavBuffer(audioBufferRaw)) {
+        console.log("⚠️ [TTS-SYNTHESIS] WAV detected; stripping header to raw PCM for SIP streaming")
+        audioBufferRaw = extractPcmFromWav(audioBufferRaw)
+      }
+      const audioBase64 = audioBufferRaw.toString("base64")
+
+      if (!audioBase64 || this.isInterrupted) {
+        if (!this.isInterrupted) {
+          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
+          throw new Error("No audio data received from ElevenLabs API")
+        }
+        return
+      }
+
+      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
+
+      if (!this.isInterrupted) {
+        // ElevenLabs returned headerless PCM 16k (per output_format)
+        const pcmBase64 = audioBase64
+        await this.streamAudioOptimizedForSIP(pcmBase64)
+        const audioBuffer = Buffer.from(pcmBase64, "base64")
+        this.totalAudioBytes += audioBuffer.length
+      }
+    } catch (error) {
+      if (!this.isInterrupted) {
+        console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+        throw error
+      }
     }
   }
 
+  async synthesizeToBuffer(text) {
+    const timer = createTimer("TTS_PREPARE")
+    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${this.voiceId}?output_format=pcm_8000`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "xi-api-key": API_KEYS.elevenlabs, "Accept": "audio/pcm" },
+      body: JSON.stringify({
+        text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.5, style: 0.0, use_speaker_boost: true }
+      }),
+    })
+    if (!response.ok) {
+      console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
+      throw new Error(`ElevenLabs API error: ${response.status}`)
+    }
+    const arrayBuffer = await response.arrayBuffer()
+    let raw = Buffer.from(arrayBuffer)
+    if (isMp3Buffer(raw)) {
+      throw new Error("Unexpected MP3 payload from ElevenLabs when PCM requested")
+    }
+    if (isWavBuffer(raw)) raw = extractPcmFromWav(raw)
+    const audioBase64 = raw.toString("base64")
+    if (!audioBase64) {
+      console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
+      throw new Error("No audio data received from ElevenLabs API")
+    }
+    console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
+    return audioBase64
+  }
+
   async enqueueText(text) {
-    return this.synthesizeAndStream(text)
+    if (this.isInterrupted) return
+    const item = { text, audioBase64: null, preparing: true }
+    this.pendingQueue.push(item)
+    ;(async () => {
+      try { item.audioBase64 = await this.synthesizeToBuffer(text) } catch (_) { item.audioBase64 = null } finally { item.preparing = false }
+    })()
+    if (!this.isProcessingQueue) {
+      this.processQueue().catch(() => {})
+    }
+  }
+
+  async processQueue() {
+    if (this.isProcessingQueue) return
+    this.isProcessingQueue = true
+    try {
+      while (!this.isInterrupted && this.pendingQueue.length > 0) {
+        const item = this.pendingQueue[0]
+        if (!item.audioBase64) {
+          let waited = 0
+          while (!this.isInterrupted && item.preparing && waited < 3000) {
+            await new Promise(r => setTimeout(r, 20))
+            waited += 20
+          }
+        }
+        if (this.isInterrupted) break
+        const audioBase64 = item.audioBase64
+        this.pendingQueue.shift()
+        if (audioBase64) {
+          const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
+          await this.streamAudioOptimizedForSIP(pcmBase64)
+          await new Promise(r => setTimeout(r, 60))
+        }
+      }
+    } finally {
+      this.isProcessingQueue = false
+    }
   }
 
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
+
     const audioBuffer = Buffer.from(audioBase64, "base64")
+    const streamingSession = { interrupt: false }
+    this.currentAudioStreaming = streamingSession
+
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
-    const CHUNK_SIZE = Math.floor(20 * ((SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000))
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
 
     let position = 0
-    while (position < audioBuffer.length && !this.isInterrupted) {
-      const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
+    let chunkIndex = 0
+    let successfulChunks = 0
+
+    // One-time stream header log to confirm format and base64 preview (for comparison with aitota.js)
+    try {
+      const estimatedMs = Math.floor(audioBuffer.length / BYTES_PER_MS)
+      console.log(`🎧 [SIP-STREAM:T3] Format=PCM s16le, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
+      const previewChunk = audioBuffer.slice(0, Math.min(OPTIMAL_CHUNK_SIZE, audioBuffer.length))
+      const previewB64 = previewChunk.toString("base64")
+      console.log(`🎧 [SIP-STREAM:T3] FirstChunk Base64 (preview ${Math.min(previewB64.length, 120)} chars): ${previewB64.slice(0, 120)}${previewB64.length > 120 ? '…' : ''}`)
+    } catch (_) {}
+
+    while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+      const remaining = audioBuffer.length - position
+      const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
+      const chunk = audioBuffer.slice(position, position + chunkSize)
+
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
-        media: { payload: chunk.toString("base64") },
+        media: {
+          payload: chunk.toString("base64"),
+        },
       }
+
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-        try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) { break }
+        try {
+          if (chunkIndex === 0) {
+            console.log(`📤 [SIP-STREAM:T3] Sending first chunk: bytes=${chunk.length}, base64Len=${mediaMessage.media.payload.length}`)
+          }
+          this.ws.send(JSON.stringify(mediaMessage))
+          successfulChunks++
+        } catch (error) {
+          break
+        }
       } else {
         break
       }
-      position += CHUNK_SIZE
-      if (position < audioBuffer.length && !this.isInterrupted) {
-        await new Promise(r => setTimeout(r, 20))
+
+      if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
+        const delayMs = Math.max(chunkDurationMs - 2, 10)
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
+
+      position += chunkSize
+      chunkIndex++
+    }
+
+    this.currentAudioStreaming = null
+    console.log(`✅ [SIP-STREAM:T3] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
+  }
+
+  extractPcmLinear16Mono8kBase64(audioBase64) {
+    try {
+      const buf = Buffer.from(audioBase64, 'base64')
+      if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') {
+        let offset = 12
+        let dataOffset = null
+        let dataSize = null
+        while (offset + 8 <= buf.length) {
+          const chunkId = buf.toString('ascii', offset, offset + 4)
+          const chunkSize = buf.readUInt32LE(offset + 4)
+          const next = offset + 8 + chunkSize
+          if (chunkId === 'data') {
+            dataOffset = offset + 8
+            dataSize = chunkSize
+            break
+          }
+          offset = next
+        }
+        if (dataOffset != null && dataSize != null) {
+          return buf.slice(dataOffset, dataOffset + dataSize).toString('base64')
+        }
+      }
+      return audioBase64
+    } catch (_) {
+      return audioBase64
     }
   }
 
-  getStats() { return { totalAudioBytes: this.totalAudioBytes } }
+  getStats() {
+    return {
+      totalAudioBytes: this.totalAudioBytes,
+    }
+  }
 }
 
 // Unified TTS Processor that supports both Sarvam and ElevenLabs
