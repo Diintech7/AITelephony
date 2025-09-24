@@ -1670,13 +1670,14 @@ const setupSanPbxWebSocketServer = (ws) => {
       const is_final = data.is_final
 
       if (transcript?.trim()) {
-        if (currentTTS && isProcessing) {
-          currentTTS.interrupt()
-          isProcessing = false
-          processingRequestId++
-        }
-
         if (is_final) {
+          // Interrupt TTS only on completed user utterances to prevent cutting AI speech on interim echoes
+          if (currentTTS && isProcessing) {
+            currentTTS.interrupt()
+            isProcessing = false
+            processingRequestId++
+          }
+
           console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
           sttTimer = null
 
@@ -1736,8 +1737,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
       currentTTS = tts
       let sentIndex = 0
-      const MIN_TOKENS = 15
-      const MAX_TOKENS = 20
+      const MIN_TOKENS = 10
+      const MAX_TOKENS = 22
       aiResponse = await processWithOpenAIStream(
         text,
         conversationHistory,
