@@ -2533,13 +2533,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           await connectToDeepgram()
 
           // Send greeting after call is established
-          let greetingTemplate = (agentConfig.firstMessage || "How can I help you today?").trim()
-          const nameTokenRegex = /\{\s*name\s*\}/gi
-          if (nameTokenRegex.test(greetingTemplate)) {
-            const nameValue = (sessionUserName || "").trim()
-            greetingTemplate = greetingTemplate.replace(nameTokenRegex, nameValue)
+          let greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
+          if (sessionUserName && sessionUserName.trim()) {
+            const base = agentConfig.firstMessage || "How can I help you today?"
+            greeting = `Hello ${sessionUserName.trim()}! ${base}`
           }
-          const greeting = greetingTemplate.trim()
 
           console.log("🎯 [SANPBX-CALL-SETUP] Greeting Message:", greeting)
           console.log("🎯 [SANPBX-CALL-SETUP] ======================================")

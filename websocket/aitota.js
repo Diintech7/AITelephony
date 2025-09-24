@@ -1667,6 +1667,23 @@ class ElevenLabsTTSProcessor {
       chunkIndex++
     }
 
+    // Send short trailing silence to ensure tail is not cut off
+    if (!this.isInterrupted && !streamingSession.interrupt) {
+      try {
+        const tailMs = 80
+        const tailBytes = Math.max(OPTIMAL_CHUNK_SIZE, Math.floor(tailMs * BYTES_PER_MS))
+        const silence = Buffer.alloc(tailBytes)
+        const mediaMessage = {
+          event: "media",
+          streamSid: this.streamSid,
+          media: { payload: silence.toString("base64") },
+        }
+        if (this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify(mediaMessage))
+        }
+      } catch (_) {}
+    }
+
     this.currentAudioStreaming = null
     console.log(`✅ [SIP-STREAM:T3] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
   }
