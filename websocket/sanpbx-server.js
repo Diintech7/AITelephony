@@ -529,11 +529,21 @@ const processWithOpenAI = async (
     const knowledgeBlock = firstMessage
       ? `FirstGreeting: "${firstMessage}"\n`
       : ""
+    const detailsText = (agentConfig.details || "").trim()
+    const detailsBlock = detailsText ? `Details:\n${detailsText}\n\n` : ""
+    const qaItems = Array.isArray(agentConfig.qa) ? agentConfig.qa : []
+    const qaBlock = qaItems.length > 0
+      ? `QnA:\n${qaItems.map((item, idx) => {
+          const q = (item?.question || "").toString().trim()
+          const a = (item?.answer || "").toString().trim()
+          return q && a ? `${idx + 1}. Q: ${q}\n   A: ${a}` : null
+        }).filter(Boolean).join("\n")}\n\n`
+      : ""
 
     // Get policy block from SystemPrompt database (with fallback)
     const policyBlock = await getSystemPromptWithCache()
 
-    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+    const systemPrompt = `System Prompt:\n${basePrompt}\n\n${detailsBlock}${qaBlock}${knowledgeBlock}${policyBlock}\n\nAnswer strictly using the Details and QnA above. If information is missing, say you don't have that info.`
 
     const personalizationMessage = userName && userName.trim()
       ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
@@ -1228,6 +1238,16 @@ const setupSanPbxWebSocketServer = (ws) => {
       const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
       const firstMessage = (agentConfig?.firstMessage || "").trim()
       const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+      const detailsText = (agentConfig?.details || "").trim()
+      const detailsBlock = detailsText ? `Details:\n${detailsText}\n\n` : ""
+      const qaItems = Array.isArray(agentConfig?.qa) ? agentConfig.qa : []
+      const qaBlock = qaItems.length > 0
+        ? `QnA:\n${qaItems.map((item, idx) => {
+            const q = (item?.question || "").toString().trim()
+            const a = (item?.answer || "").toString().trim()
+            return q && a ? `${idx + 1}. Q: ${q}\n   A: ${a}` : null
+          }).filter(Boolean).join("\n")}\n\n`
+        : ""
       const policyBlock = [
         "Answer strictly using the information provided above.",
         "If specifics (address/phone/timings) are missing, say you don't have that info.",
@@ -1236,7 +1256,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         "dont give any fornts or styles in it or symbols in it",
         "in which language you get the transcript in same language give response in same language"
       ].join(" ")
-      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${detailsBlock}${qaBlock}${knowledgeBlock}${policyBlock}\n\nAnswer strictly using the Details and QnA above. If information is missing, say you don't have that info.`
       const personalizationMessage = userName && userName.trim()
         ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
         : null

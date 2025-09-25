@@ -82,6 +82,18 @@ const agentSchema = new mongoose.Schema({
   },
   contextMemory: { type: String },
   brandInfo: { type: String },
+  // Dynamic configuration details (separate from brandInfo)
+  details: { type: String },
+
+  // Q&A items for agent (managed via dashboard System Configuration)
+  qa: [
+    {
+      question: { type: String, required: true },
+      answer: { type: String, required: true },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date },
+    }
+  ],
 
 
   // Multiple starting messages
@@ -98,7 +110,7 @@ const agentSchema = new mongoose.Schema({
   callerId: { type: String, index: true }, // For outbound call matching
   serviceProvider: {
     type: String,
-    enum: ["twilio", "vonage", "plivo", "bandwidth", "other", "c-zentrix", "tata", "snapbx"],
+    enum: ["twilio", "vonage", "plivo", "bandwidth", "other", "c-zentrix", "tata", "sanpbx", "snapbx"],
   },
   X_API_KEY: { type: String }, // Add missing X_API_KEY field
 
@@ -106,6 +118,7 @@ const agentSchema = new mongoose.Schema({
   didNumber: { type: String },
   accessToken: { type: String },
   accessKey: { type: String },
+  appId: { type: String },
 
   // UI customization
   uiImage: { type: String }, // base64 image for agent avatar/logo
