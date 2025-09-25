@@ -2567,6 +2567,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           if (callLogger) {
             callLogger.logAIResponse(greeting, currentLanguage)
+            try {
+              await callLogger.savePendingTranscripts()
+            } catch (_) {}
           }
 
           console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
