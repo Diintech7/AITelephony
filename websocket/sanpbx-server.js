@@ -1183,6 +1183,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   let deepgramReady = false
   let deepgramAudioQueue = []
   let sttTimer = null
+  let pendingGreeting = null
 
   const buildFullTranscript = () => {
     try {
@@ -2555,7 +2556,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Connect to Deepgram for speech recognition
           await connectToDeepgram()
 
-          // Send greeting after call is established
+          // Prepare greeting immediately (log to DB now), play on 'answer'
           let greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
           if (sessionUserName && sessionUserName.trim()) {
             const base = agentConfig.firstMessage || "How can I help you today?"
@@ -2571,11 +2572,8 @@ const setupSanPbxWebSocketServer = (ws) => {
               await callLogger.savePendingTranscripts()
             } catch (_) {}
           }
-
-          console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
-          currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-          await currentTTS.synthesizeAndStream(greeting)
-          console.log("✅ [SANPBX-TTS] Greeting TTS completed")
+          // Defer TTS until call is answered by callee
+          pendingGreeting = greeting
           break
         }
 
@@ -2598,6 +2596,19 @@ const setupSanPbxWebSocketServer = (ws) => {
             }
           })
           console.log("=".repeat(80))
+          // Play pending greeting now that call is answered
+          if (pendingGreeting && typeof pendingGreeting === 'string' && pendingGreeting.trim()) {
+            try {
+              console.log("🎤 [SANPBX-TTS] Starting greeting TTS (on answer)...")
+              currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
+              await currentTTS.synthesizeAndStream(pendingGreeting)
+              console.log("✅ [SANPBX-TTS] Greeting TTS completed")
+            } catch (e) {
+              console.log("❌ [SANPBX-TTS] Greeting playback error:", e.message)
+            } finally {
+              pendingGreeting = null
+            }
+          }
           break
 
         case "media":
