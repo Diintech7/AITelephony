@@ -1258,6 +1258,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         "in which language you get the transcript in same language give response in same language"
       ].join(" ")
       const systemPrompt = `System Prompt:\n${basePrompt}\n\n${detailsBlock}${qaBlock}${knowledgeBlock}${policyBlock}\n\nAnswer strictly using the Details and QnA above. If information is missing, say you don't have that info.`
+      console.log(systemPrompt)
       const personalizationMessage = userName && userName.trim()
         ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
         : null
