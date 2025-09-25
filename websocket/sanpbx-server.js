@@ -542,6 +542,7 @@ const processWithOpenAI = async (
 
     // Get policy block from SystemPrompt database (with fallback)
     const policyBlock = await getSystemPromptWithCache()
+    console.log(qaBlock)
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${detailsBlock}${qaBlock}${knowledgeBlock}${policyBlock}\n\nAnswer strictly using the Details and QnA above. If information is missing, say you don't have that info.`
 
