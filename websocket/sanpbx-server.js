@@ -539,13 +539,13 @@ const processWithOpenAI = async (
           return q && a ? `${idx + 1}. Q: ${q}\n   A: ${a}` : null
         }).filter(Boolean).join("\n")}\n\n`
       : ""
-
+    console.log(qaBlock)
     // Get policy block from SystemPrompt database (with fallback)
     const policyBlock = await getSystemPromptWithCache()
     console.log(qaBlock)
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${detailsBlock}${qaBlock}${knowledgeBlock}${policyBlock}\n\nAnswer strictly using the Details and QnA above. If information is missing, say you don't have that info.`
-
+    console.log(systemPrompt)
     const personalizationMessage = userName && userName.trim()
       ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
       : null
