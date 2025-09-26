@@ -1886,10 +1886,14 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          if (currentTTS && isProcessing) {
+          // Interrupt TTS on any user speech (including greeting interruption)
+          if (currentTTS) {
+            console.log(`🛑 [STT-INTERRUPT] ${sttTimer?.end() || 0}ms - Interrupting TTS due to user speech: "${transcript.trim()}"`)
             currentTTS.interrupt()
-            isProcessing = false
-            processingRequestId++
+            if (isProcessing) {
+              isProcessing = false
+              processingRequestId++
+            }
           }
 
           if (is_final) {
@@ -1926,12 +1930,13 @@ const setupUnifiedVoiceServer = (wss) => {
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
+      const utteranceTimer = createTimer("USER_UTTERANCE_PROCESSING")
       console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
-      console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
-      console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
+      console.log(`🗣️ [USER-UTTERANCE] ${utteranceTimer.start}ms - Text:`, text.trim())
+      console.log(`🗣️ [USER-UTTERANCE] ${utteranceTimer.start}ms - Current Language:`, currentLanguage)
 
       if (currentTTS) {
-        console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
+        console.log(`🛑 [USER-UTTERANCE] ${utteranceTimer.start}ms - Interrupting current TTS...`)
         currentTTS.interrupt()
       }
 
@@ -1940,7 +1945,7 @@ const setupUnifiedVoiceServer = (wss) => {
       const currentRequestId = ++processingRequestId
 
       try {
-        console.log("🔍 [USER-UTTERANCE] Running AI detections + streaming...")
+        console.log(`🔍 [USER-UTTERANCE] ${utteranceTimer.start}ms - Running AI detections + streaming...`)
 
         // Kick off LLM streaming and partial TTS
         let aiResponse = null
@@ -2009,17 +2014,17 @@ const setupUnifiedVoiceServer = (wss) => {
             { role: "assistant", content: aiResponse }
           )
           if (conversationHistory.length > 10) conversationHistory = conversationHistory.slice(-10)
-          console.log("✅ [USER-UTTERANCE] Processing completed")
+          console.log(`✅ [USER-UTTERANCE] ${utteranceTimer.end()}ms - Processing completed`)
         } else {
-          console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
+          console.log(`⏭️ [USER-UTTERANCE] ${utteranceTimer.end()}ms - Processing skipped (newer request in progress)`)
         }
       } catch (error) {
-        console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
+        console.log(`❌ [USER-UTTERANCE] ${utteranceTimer.end()}ms - Error processing utterance:`, error.message)
       } finally {
         if (processingRequestId === currentRequestId) {
           isProcessing = false
         }
-        console.log("🗣️ [USER-UTTERANCE] ======================================")
+        console.log(`🗣️ [USER-UTTERANCE] ${utteranceTimer.end()}ms - ======================================`)
       }
     }
 
@@ -2035,19 +2040,21 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log("🔗 [SIP-CONNECTION] WebSocket connected")
+            const connectionTimer = createTimer("SIP_CONNECTION")
+            console.log(`🔗 [SIP-CONNECTION] ${connectionTimer.start}ms - WebSocket connected`)
             break
 
           case "start": {
+            const startTimer = createTimer("SIP_START_PROCESSING")
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
 
             // Log all incoming SIP data
             console.log("📞 [SIP-START] ========== CALL START DATA ==========")
-            console.log("📞 [SIP-START] Raw data:", JSON.stringify(data, null, 2))
-            console.log("📞 [SIP-START] URL Parameters:", JSON.stringify(urlParams, null, 2))
-            console.log("📞 [SIP-START] StreamSID:", streamSid)
-            console.log("📞 [SIP-START] AccountSID:", accountSid)
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - Raw data:`, JSON.stringify(data, null, 2))
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - URL Parameters:`, JSON.stringify(urlParams, null, 2))
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - StreamSID:`, streamSid)
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - AccountSID:`, accountSid)
 
             let mobile = null;
             let callerId = null;
@@ -2156,20 +2163,21 @@ const setupUnifiedVoiceServer = (wss) => {
 
             // Log parsed call information
             console.log("📞 [SIP-START] ========== PARSED CALL INFO ==========")
-            console.log("📞 [SIP-START] Call Direction:", callDirection)
-            console.log("📞 [SIP-START] From/Mobile:", mobile)
-            console.log("📞 [SIP-START] To/DID:", to)
-            console.log("📞 [SIP-START] Unique ID:", uniqueid)
-            console.log("📞 [SIP-START] Extra Data:", JSON.stringify(extraData, null, 2))
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - Call Direction:`, callDirection)
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - From/Mobile:`, mobile)
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - To/DID:`, to)
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - Unique ID:`, uniqueid)
+            console.log(`📞 [SIP-START] ${startTimer.start}ms - Extra Data:`, JSON.stringify(extraData, null, 2))
             console.log("📞 [SIP-START] ======================================")
 
             // Note: WhatsApp message will be sent at call end if enabled in agent
 
             try {
+              const agentLookupTimer = createTimer("AGENT_LOOKUP")
               console.log("🔍 [SIP-AGENT-LOOKUP] ========== AGENT LOOKUP ==========")
-              console.log("🔍 [SIP-AGENT-LOOKUP] AccountSID:", accountSid)
-              console.log("🔍 [SIP-AGENT-LOOKUP] Call Direction:", callDirection)
-              console.log("🔍 [SIP-AGENT-LOOKUP] Extra Data:", JSON.stringify(extraData, null, 2))
+              console.log(`🔍 [SIP-AGENT-LOOKUP] ${agentLookupTimer.start}ms - AccountSID:`, accountSid)
+              console.log(`🔍 [SIP-AGENT-LOOKUP] ${agentLookupTimer.start}ms - Call Direction:`, callDirection)
+              console.log(`🔍 [SIP-AGENT-LOOKUP] ${agentLookupTimer.start}ms - Extra Data:`, JSON.stringify(extraData, null, 2))
               
               agentConfig = await findAgentForCall({
                 accountSid,
@@ -2177,15 +2185,15 @@ const setupUnifiedVoiceServer = (wss) => {
                 extraData,
               })
 
-              console.log("✅ [SIP-AGENT-LOOKUP] Agent found successfully")
-              console.log("✅ [SIP-AGENT-LOOKUP] Agent Name:", agentConfig.agentName)
-              console.log("✅ [SIP-AGENT-LOOKUP] Client ID:", agentConfig.clientId)
-              console.log("✅ [SIP-AGENT-LOOKUP] Language:", agentConfig.language)
-              console.log("✅ [SIP-AGENT-LOOKUP] Voice Selection:", agentConfig.voiceSelection)
-              console.log("✅ [SIP-AGENT-LOOKUP] First Message:", agentConfig.firstMessage)
-              console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp Enabled:", agentConfig.whatsappEnabled)
-              console.log("✅ [SIP-AGENT-LOOKUP] WhatsApp API URL:", agentConfig.whatsapplink)
-              console.log("✅ [SIP-AGENT-LOOKUP] Depositions:", agentConfig.depositions ? `${agentConfig.depositions.length} configured` : "None configured")
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - Agent found successfully`)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - Agent Name:`, agentConfig.agentName)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - Client ID:`, agentConfig.clientId)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - Language:`, agentConfig.language)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - Voice Selection:`, agentConfig.voiceSelection)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - First Message:`, agentConfig.firstMessage)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - WhatsApp Enabled:`, agentConfig.whatsappEnabled)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - WhatsApp API URL:`, agentConfig.whatsapplink)
+              console.log(`✅ [SIP-AGENT-LOOKUP] ${agentLookupTimer.end()}ms - Depositions:`, agentConfig.depositions ? `${agentConfig.depositions.length} configured` : "None configured")
               if (agentConfig.depositions && agentConfig.depositions.length > 0) {
                 console.log("✅ [SIP-AGENT-LOOKUP] Disposition Categories:")
                 agentConfig.depositions.forEach((dep, index) => {
@@ -2255,13 +2263,14 @@ const setupUnifiedVoiceServer = (wss) => {
             ws.sessionAgentConfig = agentConfig
             currentLanguage = agentConfig.language || "en"
 
+            const callSetupTimer = createTimer("CALL_SETUP")
             console.log("🎯 [SIP-CALL-SETUP] ========== CALL SETUP ==========")
-            console.log("🎯 [SIP-CALL-SETUP] Current Language:", currentLanguage)
-            console.log("🎯 [SIP-CALL-SETUP] Mobile Number:", mobile)
-            console.log("🎯 [SIP-CALL-SETUP] Call Direction:", callDirection)
-            console.log("🎯 [SIP-CALL-SETUP] Client ID:", agentConfig.clientId || accountSid)
-            console.log("🎯 [SIP-CALL-SETUP] StreamSID:", streamSid)
-            console.log("🎯 [SIP-CALL-SETUP] CallSID:", data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Current Language:`, currentLanguage)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Mobile Number:`, mobile)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Call Direction:`, callDirection)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Client ID:`, agentConfig.clientId || accountSid)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - StreamSID:`, streamSid)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - CallSID:`, data.start?.callSid || data.start?.CallSid || data.callSid || data.CallSid)
 
             // Create enhanced call logger with live transcript capability
             callLogger = new EnhancedCallLogger(
@@ -2281,15 +2290,15 @@ const setupUnifiedVoiceServer = (wss) => {
             // Create initial call log entry immediately
             try {
               await callLogger.createInitialCallLog(agentConfig._id, 'not_connected');
-              console.log("✅ [SIP-CALL-SETUP] Initial call log created successfully")
-              console.log("✅ [SIP-CALL-SETUP] Call Log ID:", callLogger.callLogId)
+              console.log(`✅ [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Initial call log created successfully`)
+              console.log(`✅ [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Call Log ID:`, callLogger.callLogId)
             } catch (error) {
-              console.log("❌ [SIP-CALL-SETUP] Failed to create initial call log:", error.message)
+              console.log(`❌ [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Failed to create initial call log:`, error.message)
               // Continue anyway - fallback will create log at end
             }
 
-            console.log("🎯 [SIP-CALL-SETUP] Call Logger initialized")
-            console.log("🎯 [SIP-CALL-SETUP] Connecting to Deepgram...")
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Call Logger initialized`)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Connecting to Deepgram...`)
 
             await connectToDeepgram()
 
@@ -2299,7 +2308,7 @@ const setupUnifiedVoiceServer = (wss) => {
               greeting = `Hello ${userName.trim()}! ${base}`
             }
 
-            console.log("🎯 [SIP-CALL-SETUP] Greeting Message:", greeting)
+            console.log(`🎯 [SIP-CALL-SETUP] ${callSetupTimer.start}ms - Greeting Message:`, greeting)
             console.log("🎯 [SIP-CALL-SETUP] ======================================")
 
             if (callLogger) {
@@ -2307,9 +2316,18 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-            await tts.synthesizeAndStream(greeting)
-            console.log("✅ [SIP-TTS] Greeting TTS completed")
+            const greetingTimer = createTimer("GREETING_TTS")
+            currentTTS = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            try {
+              await currentTTS.synthesizeAndStream(greeting)
+              console.log(`✅ [SIP-TTS] ${greetingTimer.end()}ms - Greeting TTS completed`)
+            } catch (error) {
+              if (error.message.includes('interrupted') || error.message.includes('Interrupted')) {
+                console.log(`🛑 [SIP-TTS] ${greetingTimer.end()}ms - Greeting TTS interrupted by user speech`)
+              } else {
+                console.log(`❌ [SIP-TTS] ${greetingTimer.end()}ms - Greeting TTS error:`, error.message)
+              }
+            }
             break
           }
 
@@ -2322,7 +2340,8 @@ const setupUnifiedVoiceServer = (wss) => {
               ws.mediaPacketCount++
               
               if (ws.mediaPacketCount % 1000 === 0) {
-                console.log("🎵 [SIP-MEDIA] Audio packets received:", ws.mediaPacketCount)
+                const mediaTimer = createTimer("MEDIA_PROCESSING")
+                console.log(`🎵 [SIP-MEDIA] ${mediaTimer.start}ms - Audio packets received:`, ws.mediaPacketCount)
               }
 
               if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
@@ -2330,17 +2349,19 @@ const setupUnifiedVoiceServer = (wss) => {
               } else {
                 deepgramAudioQueue.push(audioBuffer)
                 if (deepgramAudioQueue.length % 100 === 0) {
-                  console.log("⏳ [SIP-MEDIA] Audio queued for Deepgram:", deepgramAudioQueue.length)
+                  const queueTimer = createTimer("AUDIO_QUEUE")
+                  console.log(`⏳ [SIP-MEDIA] ${queueTimer.start}ms - Audio queued for Deepgram:`, deepgramAudioQueue.length)
                 }
               }
             }
             break
 
           case "stop":
+            const stopTimer = createTimer("SIP_STOP_PROCESSING")
             console.log("🛑 [SIP-STOP] ========== CALL END ==========")
-            console.log("🛑 [SIP-STOP] StreamSID:", streamSid)
-            console.log("🛑 [SIP-STOP] Call Direction:", callDirection)
-            console.log("🛑 [SIP-STOP] Mobile:", mobile)
+            console.log(`🛑 [SIP-STOP] ${stopTimer.start}ms - StreamSID:`, streamSid)
+            console.log(`🛑 [SIP-STOP] ${stopTimer.start}ms - Call Direction:`, callDirection)
+            console.log(`🛑 [SIP-STOP] ${stopTimer.start}ms - Mobile:`, mobile)
 
             // Intelligent WhatsApp send based on lead status and user requests
             try {
