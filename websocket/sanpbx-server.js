@@ -2462,11 +2462,15 @@ const setupSanPbxWebSocketServer = (ws) => {
             return
           }
 
-          // Block call if the client has no credits
+          // Block call if the client has no credits (fast, lean query)
           try {
-            const creditRecord = await Credit.getOrCreateCreditRecord(agentConfig.clientId)
-            const currentBalance = Number(creditRecord?.currentBalance || 0)
-            if (currentBalance <= 0) {
+            const t0 = Date.now()
+            const creditDoc = await Credit.findOne({ clientId: agentConfig.clientId })
+              .select('clientId currentBalance')
+              .lean()
+            const currentBalance = Number(creditDoc?.currentBalance ?? 0)
+            console.log(`🪙 [SANPBX-CREDIT-CHECK] ${Date.now() - t0}ms - clientId=${agentConfig.clientId}, balance=${currentBalance}`)
+            if (!(currentBalance > 0)) {
               console.log("🛑 [SANPBX-CREDIT-CHECK] Insufficient credits. Blocking call connection.")
               ws.send(
                 JSON.stringify({
