@@ -2456,7 +2456,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 1: Match by DID (for inbound calls)
             if (!agent && didValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(didValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
                 .lean()
               if (agent) matchReason = "callerId==DID"
             }
@@ -2464,7 +2464,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 2: Match by CallerID (for outbound calls)
             if (!agent && callerIdValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(callerIdValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
                 .lean()
               if (agent) matchReason = "callerId==CallerID"
             }
@@ -2473,7 +2473,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             if (!agent) {
               try {
                 const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
-                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
+                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
                   .lean()
                 agent = candidates.find((a) => last10Digits(a.callingNumber) === toLast || last10Digits(a.callingNumber) === fromLast) || null
                 if (agent) matchReason = "callingNumber(last10)==to/from"
