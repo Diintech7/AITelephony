@@ -1908,7 +1908,7 @@ const setupSanPbxWebSocketServer = (ws) => {
                 }
                 const finalMsg = farewellByLang[lang] || farewellByLang.en
                 const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-                try { await tts.synthesizeAndStream(finalMsg) } catch (_) {}
+                try { await tts.synthesizeAndStream(finalMsg, { bypassDisconnect: true }) } catch (_) {}
               } catch (_) {}
               // Allow farewell to play fully before hangup
               try { await new Promise(r => setTimeout(r, 2000)) } catch (_) {}
@@ -1958,9 +1958,10 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.totalAudioBytes = 0
     }
 
-    async synthesizeAndStream(text) {
+    async synthesizeAndStream(text, opts = {}) {
       if (this.isInterrupted) return
-      if (isDisconnecting) return
+      const bypass = !!opts.bypassDisconnect
+      if (isDisconnecting && !bypass) return
 
       const timer = createTimer("TTS_SYNTHESIS")
       try {
@@ -2005,7 +2006,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         if (!this.isInterrupted) {
           // Strip WAV header if present; send raw PCM 16-bit mono @ 8kHz
           const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
-          await this.streamAudioOptimizedForSIP(pcmBase64)
+          await this.streamAudioOptimizedForSIP(pcmBase64, { bypassDisconnect: bypass })
           const audioBuffer = Buffer.from(pcmBase64, "base64")
           this.totalAudioBytes += audioBuffer.length
         }
@@ -2019,6 +2020,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     async synthesizeToBuffer(text) {
       const timer = createTimer("TTS_PREPARE")
+      if (isDisconnecting) return null
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -2048,11 +2050,12 @@ const setupSanPbxWebSocketServer = (ws) => {
         throw new Error("No audio data received from Sarvam API")
       }
       console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
-      return audioBase64
+      return isDisconnecting ? null : audioBase64
     }
 
     async enqueueText(text) {
       if (this.isInterrupted) return
+      if (isDisconnecting) return
       const item = { text, audioBase64: null, preparing: true }
       this.pendingQueue.push(item)
       ;(async () => {
@@ -2101,8 +2104,9 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
     }
 
-    async streamAudioOptimizedForSIP(audioBase64) {
+    async streamAudioOptimizedForSIP(audioBase64, opts = {}) {
       if (this.isInterrupted) return
+      const bypass = !!opts.bypassDisconnect
 
       const audioBuffer = Buffer.from(audioBase64, "base64")
       const streamingSession = { interrupt: false }
@@ -2114,7 +2118,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       let position = 0
       while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-        if (isDisconnecting) {
+        if (isDisconnecting && !bypass) {
           break
         }
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
@@ -2722,7 +2726,7 @@ const setupSanPbxWebSocketServer = (ws) => {
                   }
                   const finalMsg = farewellByLang[lang] || farewellByLang.en
                   const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-                  try { await tts.synthesizeAndStream(finalMsg) } catch (_) {}
+                  try { await tts.synthesizeAndStream(finalMsg, { bypassDisconnect: true }) } catch (_) {}
                 } catch (_) {}
                 // Allow farewell to play fully before hangup
                 try { await new Promise(r => setTimeout(r, 2000)) } catch (_) {}
