@@ -1398,6 +1398,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   const handleWhatsAppAtEnd = async () => {
     try {
       if (!callLogger || !callLogger.callLogId) return
+      console.log("📨 [WHATSAPP] end-of-call handler invoked")
       // Analyze conversation for WhatsApp request using OpenAI over full history
       const requested = await (async () => {
         try {
@@ -1406,7 +1407,9 @@ const setupSanPbxWebSocketServer = (ws) => {
             .map(e=>({ role: e.type === 'user' ? 'user' : 'assistant', content: e.text }))
           const combinedUserText = userTranscripts.map(u => u.text).join(' \n ')
           const result = await detectWhatsAppRequest(combinedUserText || ' ', history, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
-          return result === 'WHATSAPP_REQUEST'
+          const isRequested = result === 'WHATSAPP_REQUEST'
+          console.log("📨 [WHATSAPP] detection:", { requested: isRequested, userMsgs: userTranscripts.length, aiMsgs: aiResponses.length })
+          return isRequested
         } catch (_) { return false }
       })()
 
@@ -1417,10 +1420,19 @@ const setupSanPbxWebSocketServer = (ws) => {
       const link = getAgentWhatsappLink(agentConfig)
       const number = normalizeIndianMobile(callLogger?.mobile || null)
       const canSend = requested && agentConfig?.whatsappEnabled && !!link && !!number
+      console.log("📨 [WHATSAPP] readiness:", {
+        requested,
+        whatsappEnabled: !!agentConfig?.whatsappEnabled,
+        hasLink: !!link,
+        hasNumber: !!number,
+        normalized: number,
+        canSend
+      })
 
       if (canSend) {
         // Send WhatsApp via agent's configured endpoint
         const sendResult = await sendWhatsAppTemplateMessage(number, link, agentConfig?.whatsapplink)
+        console.log("📨 [WHATSAPP] send result:", sendResult?.ok ? "OK" : "FAIL", sendResult?.status || sendResult?.reason || sendResult?.error || "")
         if (sendResult?.ok) {
           callLogger.markWhatsAppSent()
           try {
@@ -1456,6 +1468,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
       } else if (requested) {
         // Requested but disabled/missing data – record intent only
+        console.log("📨 [WHATSAPP] requested but cannot send; recording flags only")
         try {
           if (callLogger?.callLogId) {
             await CallLog.findByIdAndUpdate(callLogger.callLogId, {
