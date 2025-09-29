@@ -1898,7 +1898,7 @@ const setupSanPbxWebSocketServer = (ws) => {
               try {
                 const lang = (agentConfig?.language || 'en').toLowerCase()
                 const farewellByLang = {
-                  hi: "ठीक है, धन्यवाद। अलविदा।",
+                  hi: "ठीक है, धन्यवाद।",
                   en: "Alright, thank you. Goodbye.",
                   bn: "ঠিক আছে, ধন্যবাদ। বিদায়।",
                   ta: "சரி, நன்றி. வணக்கம்.",
