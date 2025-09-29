@@ -1114,8 +1114,8 @@ const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect', opts =
     console.log(`🛑 [SANPBX-DISCONNECT] API URL: ${disconnectUrl}`)
     console.log(`🛑 [SANPBX-DISCONNECT] Request Body:`, JSON.stringify(requestBody))
 
-    // Prefer dynamic Apitoken using agent accessToken if provided
-    let apiToken = SANPBX_API_CONFIG.apiToken
+    // Obtain Apitoken strictly from DB-provided accessToken (no env fallback)
+    let apiToken = null
     const candidateAccessToken = opts?.accessToken || opts?.ws?.sessionAgentConfig?.accessToken || null
     if (candidateAccessToken) {
       const token = await getSanpbxApiToken(candidateAccessToken)
@@ -3062,7 +3062,8 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
       // Try to disconnect via SanPBX API first if we have callId
       if (callId) {
         console.log(`🛑 [MANUAL-TERMINATION] Attempting to disconnect call via SanPBX API: ${callId}`)
-        const accessToken = agentConfig?.accessToken || callLogger?.ws?.sessionAgentConfig?.accessToken || null
+        // AccessToken strictly from DB/session agent config
+        const accessToken = callLogger?.ws?.sessionAgentConfig?.accessToken || agentConfig?.accessToken || null
         const disconnectResult = await disconnectCallViaAPI(callId, reason, { accessToken })
         
         if (disconnectResult.success) {
@@ -3094,8 +3095,9 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
           callId = activeCall.callSid
           console.log(`🛑 [MANUAL-TERMINATION] Found callId from database: ${callId}`)
           
-          // Try to disconnect via SanPBX API
-          const disconnectResult = await disconnectCallViaAPI(callId, reason)
+      // Try to disconnect via SanPBX API using DB accessToken if available from agent lookup
+      const accessToken = activeCall?.metadata?.sanpbx?.accessToken || null
+      const disconnectResult = await disconnectCallViaAPI(callId, reason, { accessToken })
           
           if (disconnectResult.success) {
             console.log(`✅ [MANUAL-TERMINATION] Successfully disconnected call via API: ${callId}`)
