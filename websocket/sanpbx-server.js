@@ -17,8 +17,11 @@ const API_KEYS = {
 // SanPBX API configuration
 const SANPBX_API_CONFIG = {
   baseUrl: "https://dialer.sansoftwares.com/pbxadmin/sanpbxapi",
-  apiToken: process.env.SANPBX_API_TOKEN || "abcdefgf123456789", // Use environment variable for security
-  disconnectEndpoint: "/calldisconnect"
+  // UAT base (as per SIP team docs)
+  uatBaseUrl: "https://clouduat28.sansoftwares.com/pbxadmin/sanpbxapi",
+  apiToken: process.env.SANPBX_API_TOKEN || "",
+  disconnectEndpoint: "/calldisconnect",
+  gentokenEndpoint: "/gentoken"
 }
 
 // Validate API keys
@@ -1070,14 +1073,39 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
 }
 
 // Helper to disconnect call via SanPBX API
-const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect') => {
+const getSanpbxApiToken = async (accessToken) => {
+  try {
+    if (!accessToken) return null
+    const url = `${SANPBX_API_CONFIG.uatBaseUrl}${SANPBX_API_CONFIG.gentokenEndpoint}`
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "accessToken": accessToken,
+      },
+      body: JSON.stringify({ access_key: "mob" }),
+    })
+    const text = await res.text()
+    try {
+      const json = JSON.parse(text)
+      if (json?.status === 'success' && json?.Apitoken) return json.Apitoken
+      return null
+    } catch (_) {
+      return null
+    }
+  } catch (_) {
+    return null
+  }
+}
+
+const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect', opts = {}) => {
   try {
     if (!callId) {
       console.log("❌ [SANPBX-DISCONNECT] No callId provided for disconnect")
       return { success: false, error: "No callId provided" }
     }
 
-    const disconnectUrl = `${SANPBX_API_CONFIG.baseUrl}${SANPBX_API_CONFIG.disconnectEndpoint}`
+    const disconnectUrl = `${SANPBX_API_CONFIG.uatBaseUrl}${SANPBX_API_CONFIG.disconnectEndpoint}`
     const requestBody = {
       callid: callId
     }
@@ -1086,11 +1114,18 @@ const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect') => {
     console.log(`🛑 [SANPBX-DISCONNECT] API URL: ${disconnectUrl}`)
     console.log(`🛑 [SANPBX-DISCONNECT] Request Body:`, JSON.stringify(requestBody))
 
+    // Prefer dynamic Apitoken using agent accessToken if provided
+    let apiToken = SANPBX_API_CONFIG.apiToken
+    if (opts?.accessToken) {
+      const token = await getSanpbxApiToken(opts.accessToken)
+      if (token) apiToken = token
+    }
+
     const response = await fetch(disconnectUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Apitoken": SANPBX_API_CONFIG.apiToken,
+        "Apitoken": apiToken,
       },
       body: JSON.stringify(requestBody),
     })
@@ -2696,6 +2731,15 @@ const setupSanPbxWebSocketServer = (ws) => {
             console.log("🛑 [SANPBX-STOP] Call Stats:", JSON.stringify(stats, null, 2))
             // Bill credits at end of call (decimal precision)
             const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
+            // Persist just the duration seconds immediately to DB to avoid mismatch
+            try {
+              if (callLogger.callLogId) {
+                await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                  duration: durationSeconds,
+                  'metadata.lastUpdated': new Date(),
+                })
+              }
+            } catch (_) {}
             await billCallCredits({
               clientId: callLogger.clientId,
               durationSeconds,
@@ -2983,7 +3027,8 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
       // Try to disconnect via SanPBX API first if we have callId
       if (callId) {
         console.log(`🛑 [MANUAL-TERMINATION] Attempting to disconnect call via SanPBX API: ${callId}`)
-        const disconnectResult = await disconnectCallViaAPI(callId, reason)
+        const accessToken = agentConfig?.accessToken || callLogger?.ws?.sessionAgentConfig?.accessToken || null
+        const disconnectResult = await disconnectCallViaAPI(callId, reason, { accessToken })
         
         if (disconnectResult.success) {
           console.log(`✅ [MANUAL-TERMINATION] Successfully disconnected call via API: ${callId}`)
@@ -3096,11 +3141,11 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
  * @param {string} reason - Reason for disconnection
  * @returns {Object} Result of disconnection attempt
  */
-const disconnectCallByCallId = async (callId, reason = 'manual_disconnect') => {
+const disconnectCallByCallId = async (callId, reason = 'manual_disconnect', accessToken = null) => {
   try {
     console.log(`🛑 [CALL-DISCONNECT] Attempting to disconnect call: ${callId}`)
     
-    const result = await disconnectCallViaAPI(callId, reason)
+    const result = await disconnectCallViaAPI(callId, reason, { accessToken })
     
     if (result.success) {
       console.log(`✅ [CALL-DISCONNECT] Successfully disconnected call: ${callId}`)
