@@ -1257,6 +1257,7 @@ const setupSanPbxWebSocketServer = (ws) => {
     ttsBusy = true
     try {
       while (ttsQueue.length > 0) {
+        if (isDisconnecting) { ttsQueue = []; break }
         const item = ttsQueue.shift()
         await synthesizeAndStreamAudio(item.text, item.language)
       }
@@ -1448,6 +1449,7 @@ const setupSanPbxWebSocketServer = (ws) => {
    * Chunks: 20ms (320 bytes) to match PBX expectations
    */
   const streamAudioToSanIPPBX = async (pcmBase64) => {
+    if (isDisconnecting) return
     if (!streamId || !callId || !channelId) {
       console.error("[SANPBX] Missing required IDs for streaming")
       return
@@ -1488,6 +1490,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       let firstChunkSpecChecked = false
 
       while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+        if (isDisconnecting) break
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
 
         // Pad smaller chunks with silence if needed
@@ -1532,6 +1535,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         // Wait for chunk duration before sending next chunk
         if (position < audioBuffer.length) {
+          if (isDisconnecting) break
           await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
         }
       }
@@ -1956,6 +1960,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     async synthesizeAndStream(text) {
       if (this.isInterrupted) return
+      if (isDisconnecting) return
 
       const timer = createTimer("TTS_SYNTHESIS")
       try {
@@ -2069,6 +2074,10 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.isProcessingQueue = true
       try {
         while (!this.isInterrupted && this.pendingQueue.length > 0) {
+          if (isDisconnecting) {
+            this.pendingQueue = []
+            break
+          }
           const item = this.pendingQueue[0]
           if (!item.audioBase64) {
             let waited = 0
