@@ -1906,6 +1906,8 @@ const setupSanPbxWebSocketServer = (ws) => {
                 const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
                 try { await tts.synthesizeAndStream(finalMsg) } catch (_) {}
               } catch (_) {}
+              // Allow farewell to play fully before hangup
+              try { await new Promise(r => setTimeout(r, 2000)) } catch (_) {}
               const accessToken = agentConfig?.accessToken || null
               await disconnectCallViaAPI(callId, 'user_intent_disconnect', { accessToken })
             }
@@ -2713,6 +2715,8 @@ const setupSanPbxWebSocketServer = (ws) => {
                   const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
                   try { await tts.synthesizeAndStream(finalMsg) } catch (_) {}
                 } catch (_) {}
+                // Allow farewell to play fully before hangup
+                try { await new Promise(r => setTimeout(r, 2000)) } catch (_) {}
                 const accessToken = agentConfig?.accessToken || null
                 if (callId) {
                   await disconnectCallViaAPI(callId, 'silence_timeout', { accessToken })
