@@ -1867,6 +1867,21 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
         
         console.log("✅ [USER-UTTERANCE] Processing completed")
+        // Non-blocking: detect disconnect intent and request remote hangup
+        ;(async () => {
+          try {
+            const intent = await (async () => {
+              try {
+                return await detectCallDisconnectionIntent(text, conversationHistory, (agentConfig?.language || 'en').toLowerCase())
+              } catch (_) { return "CONTINUE" }
+            })()
+            if (intent === "DISCONNECT" && callId) {
+              console.log("🛑 [AUTO-DISCONNECT] Detected disconnect intent. Requesting remote hangup...")
+              const accessToken = agentConfig?.accessToken || null
+              await disconnectCallViaAPI(callId, 'user_intent_disconnect', { accessToken })
+            }
+          } catch (_) {}
+        })()
       } else {
         console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
       }
@@ -2640,6 +2655,19 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Expect base64 payload; forward decoded PCM to Deepgram
           if (data.payload) {
             const audioBuffer = Buffer.from(data.payload, "base64")
+            // Reset silence watchdog on incoming media
+            try { if (silenceTimer) clearTimeout(silenceTimer) } catch (_) {}
+            silenceTimer = setTimeout(async () => {
+              try {
+                console.log("⏳ [SANPBX-SILENCE] No audio detected for 20s, requesting remote hangup...")
+                const accessToken = agentConfig?.accessToken || null
+                if (callId) {
+                  await disconnectCallViaAPI(callId, 'silence_timeout', { accessToken })
+                }
+              } catch (e) {
+                console.log("⚠️ [SANPBX-SILENCE] Remote hangup request failed:", e?.message || e)
+              }
+            }, 20000)
             
             // Log media stats periodically (every 1000 packets to avoid spam)
             if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
