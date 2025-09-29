@@ -1394,6 +1394,81 @@ const setupSanPbxWebSocketServer = (ws) => {
     } catch (_) {}
   }
 
+  // Handle WhatsApp sending logic at end-of-call with all possibilities
+  const handleWhatsAppAtEnd = async () => {
+    try {
+      if (!callLogger || !callLogger.callLogId) return
+      // Analyze conversation for WhatsApp request using OpenAI over full history
+      const requested = await (async () => {
+        try {
+          const history = [...userTranscripts, ...aiResponses]
+            .sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp))
+            .map(e=>({ role: e.type === 'user' ? 'user' : 'assistant', content: e.text }))
+          const combinedUserText = userTranscripts.map(u => u.text).join(' \n ')
+          const result = await detectWhatsAppRequest(combinedUserText || ' ', history, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+          return result === 'WHATSAPP_REQUEST'
+        } catch (_) { return false }
+      })()
+
+      if (requested) {
+        callLogger.markWhatsAppRequested()
+      }
+
+      const link = getAgentWhatsappLink(agentConfig)
+      const number = normalizeIndianMobile(callLogger?.mobile || null)
+      const canSend = requested && agentConfig?.whatsappEnabled && !!link && !!number
+
+      if (canSend) {
+        // Send WhatsApp via agent's configured endpoint
+        const sendResult = await sendWhatsAppTemplateMessage(number, link, agentConfig?.whatsapplink)
+        if (sendResult?.ok) {
+          callLogger.markWhatsAppSent()
+          try {
+            if (callLogger?.callLogId) {
+              await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                'metadata.whatsappRequested': true,
+                'metadata.whatsappMessageSent': true,
+                'metadata.lastUpdated': new Date(),
+              })
+            }
+          } catch (_) {}
+          // Bill 1 credit on successful send
+          try {
+            await billWhatsAppCredit({
+              clientId: agentConfig?.clientId,
+              mobile: callLogger?.mobile || null,
+              link,
+              callLogId: callLogger?.callLogId,
+              streamSid: streamId,
+            })
+          } catch (_) {}
+        } else {
+          // Mark requested but failed to send
+          try {
+            if (callLogger?.callLogId) {
+              await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                'metadata.whatsappRequested': true,
+                'metadata.whatsappMessageSent': false,
+                'metadata.lastUpdated': new Date(),
+              })
+            }
+          } catch (_) {}
+        }
+      } else if (requested) {
+        // Requested but disabled/missing data – record intent only
+        try {
+          if (callLogger?.callLogId) {
+            await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+              'metadata.whatsappRequested': true,
+              'metadata.whatsappMessageSent': false,
+              'metadata.lastUpdated': new Date(),
+            })
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
   /**
    * Track response to prevent multiple responses to same input
    */
@@ -2771,58 +2846,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             clearTimeout(silenceTimer)
           }
 
-          // Intelligent WhatsApp send based on lead status and user requests
-          try {
-            // Recompute WhatsApp request at end-of-call using full history
-            if (callLogger && agentConfig?.whatsappEnabled) {
-              try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
-            }
-            if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
-              const waLink = getAgentWhatsappLink(agentConfig)
-              const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
-              const waApiUrl = agentConfig?.whatsapplink
-              console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
-              if (waLink && waNumber && waApiUrl) {
-                sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
-                  .then(async (r) => {
-                    console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
-                    if (r?.ok) {
-                      await billWhatsAppCredit({
-                        clientId: agentConfig.clientId,
-                        mobile: callLogger?.mobile || null,
-                        link: waLink,
-                        callLogId: callLogger?.callLogId,
-                        streamSid: streamId,
-                      })
-                      callLogger.markWhatsAppSent()
-                      try {
-                        if (callLogger?.callLogId) {
-                          await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                            'metadata.whatsappMessageSent': true,
-                            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
-                            'metadata.lastUpdated': new Date(),
-                          })
-                        }
-                      } catch (_) {}
-                    }
-                  })
-                  .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
-              } else {
-                console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
-              }
-            } else {
-              console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
-                hasCallLogger: !!callLogger,
-                whatsappEnabled: agentConfig?.whatsappEnabled,
-                shouldSend: callLogger?.shouldSendWhatsApp(),
-                leadStatus: callLogger?.currentLeadStatus,
-                alreadySent: callLogger?.whatsappSent,
-                requested: callLogger?.whatsappRequested
-              })
-            }
-          } catch (waErr) {
-            console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
-          }
+          // Unified WhatsApp end-of-call handling (request detection + send + DB flags)
+          await handleWhatsAppAtEnd()
           
           if (callLogger) {
             const stats = callLogger.getStats()
@@ -2956,58 +2981,8 @@ const setupSanPbxWebSocketServer = (ws) => {
   ws.on("close", async () => {
     console.log("🔌 [SANPBX] WebSocket connection closed")
 
-    // Safety: Intelligent WhatsApp send on close if conditions are met
-    try {
-      // Recompute at end-of-call using full history
-      if (callLogger && agentConfig?.whatsappEnabled) {
-        try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
-      }
-      if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
-        const waLink = getAgentWhatsappLink(agentConfig)
-        const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
-        const waApiUrl = agentConfig?.whatsapplink
-        console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
-        if (waLink && waNumber && waApiUrl) {
-          sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
-            .then(async (r) => {
-              console.log("📨 [WHATSAPP] close-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
-              if (r?.ok) {
-                await billWhatsAppCredit({
-                  clientId: agentConfig.clientId || callLogger?.clientId,
-                  mobile: callLogger?.mobile || null,
-                  link: waLink,
-                  callLogId: callLogger?.callLogId,
-                  streamSid: streamId,
-                })
-                callLogger.markWhatsAppSent()
-                try {
-                  if (callLogger?.callLogId) {
-                    await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                      'metadata.whatsappMessageSent': true,
-                      'metadata.whatsappRequested': !!callLogger.whatsappRequested,
-                      'metadata.lastUpdated': new Date(),
-                    })
-                  }
-                } catch (_) {}
-              }
-            })
-            .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
-        } else {
-          console.log("📨 [WHATSAPP] close-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
-        }
-      } else {
-        console.log("📨 [WHATSAPP] close-event skipped → conditions not met:", {
-          hasCallLogger: !!callLogger,
-          whatsappEnabled: agentConfig?.whatsappEnabled,
-          shouldSend: callLogger?.shouldSendWhatsApp(),
-          leadStatus: callLogger?.currentLeadStatus,
-          alreadySent: callLogger?.whatsappSent,
-          requested: callLogger?.whatsappRequested
-        })
-      }
-    } catch (waErr) {
-      console.log("❌ [WHATSAPP] close-event unexpected:", waErr.message)
-    }
+    // Safety: run unified WhatsApp handler on close as well
+    await handleWhatsAppAtEnd()
     
     if (callLogger) {
       const stats = callLogger.getStats()
