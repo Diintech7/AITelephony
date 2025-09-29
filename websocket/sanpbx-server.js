@@ -1883,7 +1883,22 @@ const setupSanPbxWebSocketServer = (ws) => {
               } catch (_) { return "CONTINUE" }
             })()
             if (intent === "DISCONNECT" && callId) {
-              console.log("🛑 [AUTO-DISCONNECT] Detected disconnect intent. Requesting remote hangup...")
+              console.log("🛑 [AUTO-DISCONNECT] Detected disconnect intent. Sending final message then hanging up...")
+              try {
+                const lang = (agentConfig?.language || 'en').toLowerCase()
+                const farewellByLang = {
+                  hi: "ठीक है, धन्यवाद। अलविदा।",
+                  en: "Alright, thank you. Goodbye.",
+                  bn: "ঠিক আছে, ধন্যবাদ। বিদায়।",
+                  ta: "சரி, நன்றி. வணக்கம்.",
+                  te: "సరే, ధన్యవాదాలు. నమస్తే.",
+                  mr: "ठीक आहे, धन्यवाद. नमस्कार.",
+                  gu: "બરાબર, આભાર. આવજો.",
+                }
+                const finalMsg = farewellByLang[lang] || farewellByLang.en
+                const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
+                try { await tts.synthesizeAndStream(finalMsg) } catch (_) {}
+              } catch (_) {}
               const accessToken = agentConfig?.accessToken || null
               await disconnectCallViaAPI(callId, 'user_intent_disconnect', { accessToken })
             }
@@ -2666,7 +2681,22 @@ const setupSanPbxWebSocketServer = (ws) => {
             try { if (silenceTimer) clearTimeout(silenceTimer) } catch (_) {}
             silenceTimer = setTimeout(async () => {
               try {
-                console.log("⏳ [SANPBX-SILENCE] No audio detected for 20s, requesting remote hangup...")
+                console.log("⏳ [SANPBX-SILENCE] No audio detected for 20s, sending final message then remote hangup...")
+                try {
+                  const lang = (agentConfig?.language || 'en').toLowerCase()
+                  const farewellByLang = {
+                    hi: "कॉल डिस्कनेक्ट किया जा रहा है। धन्यवाद।",
+                    en: "Disconnecting the call now. Thank you.",
+                    bn: "এখন কলটি বিচ্ছিন্ন করা হচ্ছে। ধন্যবাদ।",
+                    ta: "இப்போது அழைப்பு துண்டிக்கப்படுகிறது. நன்றி.",
+                    te: "కాల్‌ను ఇప్పుడు విడదీస్తున్నాం. ధన్యవాదాలు.",
+                    mr: "आता कॉल डिस्कनेक्ट करत आहोत. धन्यवाद.",
+                    gu: "હવે કોલ ડિસકનેક્ટ કરી રહ્યા છીએ. આભાર.",
+                  }
+                  const finalMsg = farewellByLang[lang] || farewellByLang.en
+                  const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
+                  try { await tts.synthesizeAndStream(finalMsg) } catch (_) {}
+                } catch (_) {}
                 const accessToken = agentConfig?.accessToken || null
                 if (callId) {
                   await disconnectCallViaAPI(callId, 'silence_timeout', { accessToken })
