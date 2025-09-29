@@ -1116,9 +1116,14 @@ const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect', opts =
 
     // Prefer dynamic Apitoken using agent accessToken if provided
     let apiToken = SANPBX_API_CONFIG.apiToken
-    if (opts?.accessToken) {
-      const token = await getSanpbxApiToken(opts.accessToken)
+    const candidateAccessToken = opts?.accessToken || opts?.ws?.sessionAgentConfig?.accessToken || null
+    if (candidateAccessToken) {
+      const token = await getSanpbxApiToken(candidateAccessToken)
       if (token) apiToken = token
+    }
+    if (!apiToken) {
+      console.log("❌ [SANPBX-DISCONNECT] Missing Apitoken. Provide agent accessToken or SANPBX_API_TOKEN env.")
+      return { success: false, callId, reason, error: 'missing_apitoken' }
     }
 
     const response = await fetch(disconnectUrl, {
@@ -1131,7 +1136,9 @@ const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect', opts =
     })
 
     const responseText = await response.text()
-    const isOk = response.ok
+    let responseJson = null
+    try { responseJson = JSON.parse(responseText) } catch (_) {}
+    const isOk = response.ok && (responseJson?.status === 'success' || responseJson?.error === 0)
 
     console.log(`🛑 [SANPBX-DISCONNECT] Response Status: ${response.status} ${response.statusText}`)
     console.log(`🛑 [SANPBX-DISCONNECT] Response Body: ${responseText}`)
