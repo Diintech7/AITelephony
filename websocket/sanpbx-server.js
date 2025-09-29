@@ -1402,13 +1402,19 @@ const setupSanPbxWebSocketServer = (ws) => {
       // Analyze conversation for WhatsApp request using OpenAI over full history
       const requested = await (async () => {
         try {
-          const history = [...userTranscripts, ...aiResponses]
+          const userEntries = Array.isArray(callLogger?.transcripts) && callLogger.transcripts.length > 0
+            ? callLogger.transcripts.map(t => ({ type: 'user', text: t.text, timestamp: t.timestamp }))
+            : (Array.isArray(userTranscripts) ? userTranscripts : [])
+          const aiEntries = Array.isArray(callLogger?.responses) && callLogger.responses.length > 0
+            ? callLogger.responses.map(r => ({ type: 'ai', text: r.text, timestamp: r.timestamp }))
+            : (Array.isArray(aiResponses) ? aiResponses : [])
+          const history = [...userEntries, ...aiEntries]
             .sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp))
             .map(e=>({ role: e.type === 'user' ? 'user' : 'assistant', content: e.text }))
-          const combinedUserText = userTranscripts.map(u => u.text).join(' \n ')
+          const combinedUserText = userEntries.map(u => u.text).join(' \n ')
           const result = await detectWhatsAppRequest(combinedUserText || ' ', history, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
           const isRequested = result === 'WHATSAPP_REQUEST'
-          console.log("📨 [WHATSAPP] detection:", { requested: isRequested, userMsgs: userTranscripts.length, aiMsgs: aiResponses.length })
+          console.log("📨 [WHATSAPP] detection:", { requested: isRequested, userMsgs: userEntries.length, aiMsgs: aiEntries.length })
           return isRequested
         } catch (_) { return false }
       })()
