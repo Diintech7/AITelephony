@@ -1203,6 +1203,8 @@ const setupSanPbxWebSocketServer = (ws) => {
   let lastProcessedTranscript = ""
   let lastProcessedTime = 0
   let activeResponseId = null
+  // Prevent any further AI TTS when disconnecting with farewell
+  let isDisconnecting = false
   // Additional session state for logging and DB
   let sessionCustomParams = {}
   let sessionUserName = null
@@ -1244,6 +1246,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   let ttsBusy = false
   const enqueueTts = async (text, language = "en") => {
     if (!text || !text.trim()) return
+    if (isDisconnecting) return // Block normal TTS while disconnecting
     ttsQueue.push({ text: text.trim(), language })
     if (!ttsBusy) {
       processTtsQueue().catch(() => {})
@@ -1800,6 +1803,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       let aiResponse = null
       const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
       currentTTS = tts
+      if (isDisconnecting) return // skip normal TTS if disconnecting
       let sentIndex = 0
       const MIN_TOKENS = 10
       const MAX_TOKENS = 22
@@ -1829,7 +1833,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (processingRequestId === currentRequestId && aiResponse && aiResponse.length > sentIndex) {
         const tail = aiResponse.slice(sentIndex).trim()
         if (tail) {
-          try { await currentTTS.enqueueText(tail) } catch (_) {}
+          try { if (!isDisconnecting) await currentTTS.enqueueText(tail) } catch (_) {}
           sentIndex = aiResponse.length
         }
       }
@@ -1884,6 +1888,9 @@ const setupSanPbxWebSocketServer = (ws) => {
             })()
             if (intent === "DISCONNECT" && callId) {
               console.log("🛑 [AUTO-DISCONNECT] Detected disconnect intent. Sending final message then hanging up...")
+              // Stop any ongoing/queued AI TTS immediately
+              try { if (currentTTS) currentTTS.interrupt() } catch (_) {}
+              isDisconnecting = true
               try {
                 const lang = (agentConfig?.language || 'en').toLowerCase()
                 const farewellByLang = {
@@ -2096,6 +2103,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       let position = 0
       while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+        if (isDisconnecting) {
+          break
+        }
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
         const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
         const mediaMessage = {
@@ -2271,6 +2281,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
         const tts = new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
         currentTTS = tts
+        if (isDisconnecting) return // block streaming if we're disconnecting
 
         const finalResponse = await processWithOpenAIStream(
           transcript,
@@ -2283,7 +2294,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             if (!shouldFlush(lastLen, partial)) return
             const chunk = partial.slice(lastLen)
             lastLen = partial.length
-            if (chunk.trim()) {
+            if (chunk.trim() && !isDisconnecting) {
               try { await tts.enqueueText(chunk.trim()) } catch (_) {}
             }
           }
@@ -2647,7 +2658,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
           currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-          await currentTTS.synthesizeAndStream(greeting)
+          if (!isDisconnecting) {
+            await currentTTS.synthesizeAndStream(greeting)
+          }
           console.log("✅ [SANPBX-TTS] Greeting TTS completed")
           break
         }
@@ -2682,6 +2695,9 @@ const setupSanPbxWebSocketServer = (ws) => {
             silenceTimer = setTimeout(async () => {
               try {
                 console.log("⏳ [SANPBX-SILENCE] No audio detected for 20s, sending final message then remote hangup...")
+                // Stop any ongoing/queued AI TTS immediately
+                try { if (currentTTS) currentTTS.interrupt() } catch (_) {}
+                isDisconnecting = true
                 try {
                   const lang = (agentConfig?.language || 'en').toLowerCase()
                   const farewellByLang = {
