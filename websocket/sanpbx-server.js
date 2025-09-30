@@ -345,33 +345,6 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return voiceMapping[normalized] || "pavithra"
 }
 
-// Helper function to get default system prompt and dynamic info from agent lists
-const getDefaultAgentContent = (agent) => {
-  let systemPrompt = agent.systemPrompt || "You are a helpful AI assistant."
-  let details = agent.details || ""
-  let firstMessage = agent.firstMessage || ""
-
-  // Use default system prompt from list if available
-  if (agent.systemPromptList && agent.systemPromptList.length > 0) {
-    const defaultIndex = agent.defaultSystemPromptIndex || 0
-    const defaultPrompt = agent.systemPromptList[defaultIndex]
-    if (defaultPrompt && defaultPrompt.text) {
-      systemPrompt = defaultPrompt.text
-    }
-  }
-
-  // Use default dynamic info from list if available
-  if (agent.dynamicInfoList && agent.dynamicInfoList.length > 0) {
-    const defaultIndex = agent.defaultDynamicInfoIndex || 0
-    const defaultInfo = agent.dynamicInfoList[defaultIndex]
-    if (defaultInfo && defaultInfo.text) {
-      details = defaultInfo.text
-    }
-  }
-
-  return { systemPrompt, details, firstMessage }
-}
-
 // Intelligent lead status detection using OpenAI
 const detectLeadStatusWithOpenAI = async (userMessage, conversationHistory, detectedLanguage) => {
   const timer = createTimer("LEAD_STATUS_DETECTION")
@@ -554,10 +527,12 @@ const processWithOpenAI = async (
 
   try {
     // Build a stricter system prompt that embeds firstMessage and sets answering policy
-    const { systemPrompt: basePrompt, details: detailsText, firstMessage } = getDefaultAgentContent(agentConfig)
+    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    const firstMessage = (agentConfig.firstMessage || "").trim()
     const knowledgeBlock = firstMessage
       ? `FirstGreeting: "${firstMessage}"\n`
       : ""
+    const detailsText = (agentConfig.details || "").trim()
     const detailsBlock = detailsText ? `Details:\n${detailsText}\n\n` : ""
     const qaItems = Array.isArray(agentConfig.qa) ? agentConfig.qa : []
     const qaBlock = qaItems.length > 0
@@ -1307,8 +1282,10 @@ const setupSanPbxWebSocketServer = (ws) => {
         return null
       }
 
-      const { systemPrompt: basePrompt, details: detailsText, firstMessage } = getDefaultAgentContent(agentConfig)
+      const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
+      const firstMessage = (agentConfig?.firstMessage || "").trim()
       const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+      const detailsText = (agentConfig?.details || "").trim()
       const detailsBlock = detailsText ? `Details:\n${detailsText}\n\n` : ""
       const qaItems = Array.isArray(agentConfig?.qa) ? agentConfig.qa : []
       const qaBlock = qaItems.length > 0
@@ -2614,7 +2591,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 1: Match by DID (for inbound calls)
             if (!agent && didValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(didValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken systemPromptList defaultSystemPromptIndex dynamicInfoList defaultDynamicInfoIndex")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
                 .lean()
               if (agent) matchReason = "callerId==DID"
             }
@@ -2622,7 +2599,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 2: Match by CallerID (for outbound calls)
             if (!agent && callerIdValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(callerIdValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken systemPromptList defaultSystemPromptIndex dynamicInfoList defaultDynamicInfoIndex")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
                 .lean()
               if (agent) matchReason = "callerId==CallerID"
             }
@@ -2631,7 +2608,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             if (!agent) {
               try {
                 const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
-                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken systemPromptList defaultSystemPromptIndex dynamicInfoList defaultDynamicInfoIndex")
+                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
                   .lean()
                 agent = candidates.find((a) => last10Digits(a.callingNumber) === toLast || last10Digits(a.callingNumber) === fromLast) || null
                 if (agent) matchReason = "callingNumber(last10)==to/from"
@@ -2775,10 +2752,9 @@ const setupSanPbxWebSocketServer = (ws) => {
           await connectToDeepgram()
 
           // Send greeting after call is established
-          const { firstMessage } = getDefaultAgentContent(agentConfig)
-          let greeting = firstMessage || "Hello! How can I help you today?"
+          let greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
           if (sessionUserName && sessionUserName.trim()) {
-            const base = firstMessage || "How can I help you today?"
+            const base = agentConfig.firstMessage || "How can I help you today?"
             greeting = `Hello ${sessionUserName.trim()}! ${base}`
           }
 
