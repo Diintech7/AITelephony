@@ -60,7 +60,6 @@ const agentSchema = new mongoose.Schema({
       "male-friendly",
       "female-friendly",
       "neutral",
-      "anushka",
       "meera",
       "pavithra",
       "maitreyi",
@@ -103,6 +102,24 @@ const agentSchema = new mongoose.Schema({
       audioBase64: { type: String },
     },
   ],
+
+  // Multiple dynamic info items
+  dynamicInfoList: [
+    {
+      text: { type: String, required: true },
+      isDefault: { type: Boolean, default: false },
+    },
+  ],
+  defaultDynamicInfoIndex: { type: Number, default: 0 },
+
+  // Multiple system prompts
+  systemPromptList: [
+    {
+      text: { type: String, required: true },
+      isDefault: { type: Boolean, default: false },
+    },
+  ],
+  defaultSystemPromptIndex: { type: Number, default: 0 },
 
   // Telephony
   accountSid: { type: String },
@@ -282,6 +299,40 @@ const agentSchema = new mongoose.Schema({
 agentSchema.pre("save", function (next) {
   this.updatedAt = Date.now()
 
+  // Handle dynamic info list migration and default selection
+  if (this.dynamicInfoList && this.dynamicInfoList.length > 0) {
+    // Ensure default index is valid
+    if (this.defaultDynamicInfoIndex >= this.dynamicInfoList.length) {
+      this.defaultDynamicInfoIndex = 0;
+    }
+    // Set primary details field from default selection
+    const defaultDynamicInfo = this.dynamicInfoList[this.defaultDynamicInfoIndex];
+    if (defaultDynamicInfo && defaultDynamicInfo.text) {
+      this.details = defaultDynamicInfo.text;
+    }
+  } else if (this.details && !this.dynamicInfoList) {
+    // Migrate single details field to list format
+    this.dynamicInfoList = [{ text: this.details, isDefault: true }];
+    this.defaultDynamicInfoIndex = 0;
+  }
+
+  // Handle system prompt list migration and default selection
+  if (this.systemPromptList && this.systemPromptList.length > 0) {
+    // Ensure default index is valid
+    if (this.defaultSystemPromptIndex >= this.systemPromptList.length) {
+      this.defaultSystemPromptIndex = 0;
+    }
+    // Set primary systemPrompt field from default selection
+    const defaultSystemPrompt = this.systemPromptList[this.defaultSystemPromptIndex];
+    if (defaultSystemPrompt && defaultSystemPrompt.text) {
+      this.systemPrompt = defaultSystemPrompt.text;
+    }
+  } else if (this.systemPrompt && !this.systemPromptList) {
+    // Migrate single systemPrompt field to list format
+    this.systemPromptList = [{ text: this.systemPrompt, isDefault: true }];
+    this.defaultSystemPromptIndex = 0;
+  }
+
   // Clean up disabled social media fields
   if (!this.whatsappEnabled) {
     this.whatsapp = undefined;
@@ -383,6 +434,74 @@ agentSchema.methods.toggleSocial = function(platform, enabled) {
       this[platform] = undefined;
     }
     
+    return true;
+  }
+  return false;
+}
+
+// Method to get the default dynamic info
+agentSchema.methods.getDefaultDynamicInfo = function() {
+  if (this.dynamicInfoList && this.dynamicInfoList.length > 0) {
+    const defaultIndex = this.defaultDynamicInfoIndex || 0;
+    return this.dynamicInfoList[defaultIndex] || this.dynamicInfoList[0];
+  }
+  return null;
+}
+
+// Method to get the default system prompt
+agentSchema.methods.getDefaultSystemPrompt = function() {
+  if (this.systemPromptList && this.systemPromptList.length > 0) {
+    const defaultIndex = this.defaultSystemPromptIndex || 0;
+    return this.systemPromptList[defaultIndex] || this.systemPromptList[0];
+  }
+  return null;
+}
+
+// Method to add a new dynamic info item
+agentSchema.methods.addDynamicInfo = function(text, isDefault = false) {
+  if (!this.dynamicInfoList) {
+    this.dynamicInfoList = [];
+  }
+  
+  const newItem = { text, isDefault };
+  this.dynamicInfoList.push(newItem);
+  
+  if (isDefault) {
+    this.defaultDynamicInfoIndex = this.dynamicInfoList.length - 1;
+  }
+  
+  return this.dynamicInfoList.length - 1;
+}
+
+// Method to add a new system prompt item
+agentSchema.methods.addSystemPrompt = function(text, isDefault = false) {
+  if (!this.systemPromptList) {
+    this.systemPromptList = [];
+  }
+  
+  const newItem = { text, isDefault };
+  this.systemPromptList.push(newItem);
+  
+  if (isDefault) {
+    this.defaultSystemPromptIndex = this.systemPromptList.length - 1;
+  }
+  
+  return this.systemPromptList.length - 1;
+}
+
+// Method to set default dynamic info by index
+agentSchema.methods.setDefaultDynamicInfo = function(index) {
+  if (this.dynamicInfoList && index >= 0 && index < this.dynamicInfoList.length) {
+    this.defaultDynamicInfoIndex = index;
+    return true;
+  }
+  return false;
+}
+
+// Method to set default system prompt by index
+agentSchema.methods.setDefaultSystemPrompt = function(index) {
+  if (this.systemPromptList && index >= 0 && index < this.systemPromptList.length) {
+    this.defaultSystemPromptIndex = index;
     return true;
   }
   return false;
