@@ -17,11 +17,8 @@ const API_KEYS = {
 // SanPBX API configuration
 const SANPBX_API_CONFIG = {
   baseUrl: "https://dialer.sansoftwares.com/pbxadmin/sanpbxapi",
-  // UAT base (as per SIP team docs)
-  uatBaseUrl: "https://clouduat28.sansoftwares.com/pbxadmin/sanpbxapi",
-  apiToken: process.env.SANPBX_API_TOKEN || "",
-  disconnectEndpoint: "/calldisconnect",
-  gentokenEndpoint: "/gentoken"
+  apiToken: process.env.SANPBX_API_TOKEN || "abcdefgf123456789", // Use environment variable for security
+  disconnectEndpoint: "/calldisconnect"
 }
 
 // Validate API keys
@@ -1073,39 +1070,14 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
 }
 
 // Helper to disconnect call via SanPBX API
-const getSanpbxApiToken = async (accessToken) => {
-  try {
-    if (!accessToken) return null
-    const url = `${SANPBX_API_CONFIG.uatBaseUrl}${SANPBX_API_CONFIG.gentokenEndpoint}`
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "accessToken": accessToken,
-      },
-      body: JSON.stringify({ access_key: "mob" }),
-    })
-    const text = await res.text()
-    try {
-      const json = JSON.parse(text)
-      if (json?.status === 'success' && json?.Apitoken) return json.Apitoken
-      return null
-    } catch (_) {
-      return null
-    }
-  } catch (_) {
-    return null
-  }
-}
-
-const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect', opts = {}) => {
+const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect') => {
   try {
     if (!callId) {
       console.log("❌ [SANPBX-DISCONNECT] No callId provided for disconnect")
       return { success: false, error: "No callId provided" }
     }
 
-    const disconnectUrl = `${SANPBX_API_CONFIG.uatBaseUrl}${SANPBX_API_CONFIG.disconnectEndpoint}`
+    const disconnectUrl = `${SANPBX_API_CONFIG.baseUrl}${SANPBX_API_CONFIG.disconnectEndpoint}`
     const requestBody = {
       callid: callId
     }
@@ -1114,31 +1086,17 @@ const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect', opts =
     console.log(`🛑 [SANPBX-DISCONNECT] API URL: ${disconnectUrl}`)
     console.log(`🛑 [SANPBX-DISCONNECT] Request Body:`, JSON.stringify(requestBody))
 
-    // Obtain Apitoken strictly from DB-provided accessToken (no env fallback)
-    let apiToken = null
-    const candidateAccessToken = opts?.accessToken || opts?.ws?.sessionAgentConfig?.accessToken || null
-    if (candidateAccessToken) {
-      const token = await getSanpbxApiToken(candidateAccessToken)
-      if (token) apiToken = token
-    }
-    if (!apiToken) {
-      console.log("❌ [SANPBX-DISCONNECT] Missing Apitoken. Provide agent accessToken or SANPBX_API_TOKEN env.")
-      return { success: false, callId, reason, error: 'missing_apitoken' }
-    }
-
     const response = await fetch(disconnectUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Apitoken": apiToken,
+        "Apitoken": SANPBX_API_CONFIG.apiToken,
       },
       body: JSON.stringify(requestBody),
     })
 
     const responseText = await response.text()
-    let responseJson = null
-    try { responseJson = JSON.parse(responseText) } catch (_) {}
-    const isOk = response.ok && (responseJson?.status === 'success' || responseJson?.error === 0)
+    const isOk = response.ok
 
     console.log(`🛑 [SANPBX-DISCONNECT] Response Status: ${response.status} ${response.statusText}`)
     console.log(`🛑 [SANPBX-DISCONNECT] Response Body: ${responseText}`)
@@ -1203,8 +1161,6 @@ const setupSanPbxWebSocketServer = (ws) => {
   let lastProcessedTranscript = ""
   let lastProcessedTime = 0
   let activeResponseId = null
-  // Prevent any further AI TTS when disconnecting with farewell
-  let isDisconnecting = false
   // Additional session state for logging and DB
   let sessionCustomParams = {}
   let sessionUserName = null
@@ -1246,7 +1202,6 @@ const setupSanPbxWebSocketServer = (ws) => {
   let ttsBusy = false
   const enqueueTts = async (text, language = "en") => {
     if (!text || !text.trim()) return
-    if (isDisconnecting) return // Block normal TTS while disconnecting
     ttsQueue.push({ text: text.trim(), language })
     if (!ttsBusy) {
       processTtsQueue().catch(() => {})
@@ -1257,7 +1212,6 @@ const setupSanPbxWebSocketServer = (ws) => {
     ttsBusy = true
     try {
       while (ttsQueue.length > 0) {
-        if (isDisconnecting) { ttsQueue = []; break }
         const item = ttsQueue.shift()
         await synthesizeAndStreamAudio(item.text, item.language)
       }
@@ -1394,100 +1348,6 @@ const setupSanPbxWebSocketServer = (ws) => {
     } catch (_) {}
   }
 
-  // Handle WhatsApp sending logic at end-of-call with all possibilities
-  const handleWhatsAppAtEnd = async () => {
-    try {
-      if (!callLogger || !callLogger.callLogId) return
-      console.log("📨 [WHATSAPP] end-of-call handler invoked")
-      // Analyze conversation for WhatsApp request using OpenAI over full history
-      const requested = await (async () => {
-        try {
-          const userEntries = Array.isArray(callLogger?.transcripts) && callLogger.transcripts.length > 0
-            ? callLogger.transcripts.map(t => ({ type: 'user', text: t.text, timestamp: t.timestamp }))
-            : (Array.isArray(userTranscripts) ? userTranscripts : [])
-          const aiEntries = Array.isArray(callLogger?.responses) && callLogger.responses.length > 0
-            ? callLogger.responses.map(r => ({ type: 'ai', text: r.text, timestamp: r.timestamp }))
-            : (Array.isArray(aiResponses) ? aiResponses : [])
-          const history = [...userEntries, ...aiEntries]
-            .sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp))
-            .map(e=>({ role: e.type === 'user' ? 'user' : 'assistant', content: e.text }))
-          const combinedUserText = userEntries.map(u => u.text).join(' \n ')
-          const result = await detectWhatsAppRequest(combinedUserText || ' ', history, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
-          const isRequested = result === 'WHATSAPP_REQUEST'
-          console.log("📨 [WHATSAPP] detection:", { requested: isRequested, userMsgs: userEntries.length, aiMsgs: aiEntries.length })
-          return isRequested
-        } catch (_) { return false }
-      })()
-
-      if (requested) {
-        callLogger.markWhatsAppRequested()
-      }
-
-      const link = getAgentWhatsappLink(agentConfig)
-      const number = normalizeIndianMobile(callLogger?.mobile || null)
-      const canSend = requested && agentConfig?.whatsappEnabled && !!link && !!number
-      console.log("📨 [WHATSAPP] readiness:", {
-        requested,
-        whatsappEnabled: !!agentConfig?.whatsappEnabled,
-        hasLink: !!link,
-        hasNumber: !!number,
-        normalized: number,
-        canSend
-      })
-
-      if (canSend) {
-        // Send WhatsApp via agent's configured endpoint
-        const sendResult = await sendWhatsAppTemplateMessage(number, link, agentConfig?.whatsapplink)
-        console.log("📨 [WHATSAPP] send result:", sendResult?.ok ? "OK" : "FAIL", sendResult?.status || sendResult?.reason || sendResult?.error || "")
-        if (sendResult?.ok) {
-          callLogger.markWhatsAppSent()
-          try {
-            if (callLogger?.callLogId) {
-              await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                'metadata.whatsappRequested': true,
-                'metadata.whatsappMessageSent': true,
-                'metadata.lastUpdated': new Date(),
-              })
-            }
-          } catch (_) {}
-          // Bill 1 credit on successful send
-          try {
-            await billWhatsAppCredit({
-              clientId: agentConfig?.clientId,
-              mobile: callLogger?.mobile || null,
-              link,
-              callLogId: callLogger?.callLogId,
-              streamSid: streamId,
-            })
-          } catch (_) {}
-        } else {
-          // Mark requested but failed to send
-          try {
-            if (callLogger?.callLogId) {
-              await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                'metadata.whatsappRequested': true,
-                'metadata.whatsappMessageSent': false,
-                'metadata.lastUpdated': new Date(),
-              })
-            }
-          } catch (_) {}
-        }
-      } else if (requested) {
-        // Requested but disabled/missing data – record intent only
-        console.log("📨 [WHATSAPP] requested but cannot send; recording flags only")
-        try {
-          if (callLogger?.callLogId) {
-            await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-              'metadata.whatsappRequested': true,
-              'metadata.whatsappMessageSent': false,
-              'metadata.lastUpdated': new Date(),
-            })
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
-  }
-
   /**
    * Track response to prevent multiple responses to same input
    */
@@ -1543,7 +1403,6 @@ const setupSanPbxWebSocketServer = (ws) => {
    * Chunks: 20ms (320 bytes) to match PBX expectations
    */
   const streamAudioToSanIPPBX = async (pcmBase64) => {
-    if (isDisconnecting) return
     if (!streamId || !callId || !channelId) {
       console.error("[SANPBX] Missing required IDs for streaming")
       return
@@ -1584,7 +1443,6 @@ const setupSanPbxWebSocketServer = (ws) => {
       let firstChunkSpecChecked = false
 
       while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
-        if (isDisconnecting) break
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
 
         // Pad smaller chunks with silence if needed
@@ -1629,7 +1487,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         // Wait for chunk duration before sending next chunk
         if (position < audioBuffer.length) {
-          if (isDisconnecting) break
           await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
         }
       }
@@ -1901,7 +1758,6 @@ const setupSanPbxWebSocketServer = (ws) => {
       let aiResponse = null
       const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
       currentTTS = tts
-      if (isDisconnecting) return // skip normal TTS if disconnecting
       let sentIndex = 0
       const MIN_TOKENS = 10
       const MAX_TOKENS = 22
@@ -1931,7 +1787,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (processingRequestId === currentRequestId && aiResponse && aiResponse.length > sentIndex) {
         const tail = aiResponse.slice(sentIndex).trim()
         if (tail) {
-          try { if (!isDisconnecting) await currentTTS.enqueueText(tail) } catch (_) {}
+          try { await currentTTS.enqueueText(tail) } catch (_) {}
           sentIndex = aiResponse.length
         }
       }
@@ -1976,41 +1832,6 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
         
         console.log("✅ [USER-UTTERANCE] Processing completed")
-        // Non-blocking: detect disconnect intent and request remote hangup
-        ;(async () => {
-          try {
-            const intent = await (async () => {
-              try {
-                return await detectCallDisconnectionIntent(text, conversationHistory, (agentConfig?.language || 'en').toLowerCase())
-              } catch (_) { return "CONTINUE" }
-            })()
-            if (intent === "DISCONNECT" && callId) {
-              console.log("🛑 [AUTO-DISCONNECT] Detected disconnect intent. Sending final message then hanging up...")
-              // Stop any ongoing/queued AI TTS immediately
-              try { if (currentTTS) currentTTS.interrupt() } catch (_) {}
-              isDisconnecting = true
-              try {
-                const lang = (agentConfig?.language || 'en').toLowerCase()
-                const farewellByLang = {
-                  hi: "ठीक है, धन्यवाद। ",
-                  en: "Alright, thank you. if you have any other questions, please contact us.",
-                  bn: "ঠিক আছে, ধন্যবাদ। বিদায়।",
-                  ta: "சரி, நன்றி. வணக்கம்.",
-                  te: "సరే, ధన్యవాదాలు. నమస్తే.",
-                  mr: "ठीक आहे, धन्यवाद. नमस्कार.",
-                  gu: "બરાબર, આભાર. આવજો.",
-                }
-                const finalMsg = farewellByLang[lang] || farewellByLang.en
-                const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-                try { await tts.synthesizeAndStream(finalMsg, { bypassDisconnect: true }) } catch (_) {}
-              } catch (_) {}
-              // Allow farewell to play fully before hangup
-              try { await new Promise(r => setTimeout(r, 2000)) } catch (_) {}
-              const accessToken = agentConfig?.accessToken || null
-              await disconnectCallViaAPI(callId, 'user_intent_disconnect', { accessToken })
-            }
-          } catch (_) {}
-        })()
       } else {
         console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
       }
@@ -2052,10 +1873,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.totalAudioBytes = 0
     }
 
-    async synthesizeAndStream(text, opts = {}) {
+    async synthesizeAndStream(text) {
       if (this.isInterrupted) return
-      const bypass = !!opts.bypassDisconnect
-      if (isDisconnecting && !bypass) return
 
       const timer = createTimer("TTS_SYNTHESIS")
       try {
@@ -2100,7 +1919,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         if (!this.isInterrupted) {
           // Strip WAV header if present; send raw PCM 16-bit mono @ 8kHz
           const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
-          await this.streamAudioOptimizedForSIP(pcmBase64, { bypassDisconnect: bypass })
+          await this.streamAudioOptimizedForSIP(pcmBase64)
           const audioBuffer = Buffer.from(pcmBase64, "base64")
           this.totalAudioBytes += audioBuffer.length
         }
@@ -2114,7 +1933,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     async synthesizeToBuffer(text) {
       const timer = createTimer("TTS_PREPARE")
-      if (isDisconnecting) return null
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -2144,12 +1962,11 @@ const setupSanPbxWebSocketServer = (ws) => {
         throw new Error("No audio data received from Sarvam API")
       }
       console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
-      return isDisconnecting ? null : audioBase64
+      return audioBase64
     }
 
     async enqueueText(text) {
       if (this.isInterrupted) return
-      if (isDisconnecting) return
       const item = { text, audioBase64: null, preparing: true }
       this.pendingQueue.push(item)
       ;(async () => {
@@ -2171,10 +1988,6 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.isProcessingQueue = true
       try {
         while (!this.isInterrupted && this.pendingQueue.length > 0) {
-          if (isDisconnecting) {
-            this.pendingQueue = []
-            break
-          }
           const item = this.pendingQueue[0]
           if (!item.audioBase64) {
             let waited = 0
@@ -2198,9 +2011,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
     }
 
-    async streamAudioOptimizedForSIP(audioBase64, opts = {}) {
+    async streamAudioOptimizedForSIP(audioBase64) {
       if (this.isInterrupted) return
-      const bypass = !!opts.bypassDisconnect
 
       const audioBuffer = Buffer.from(audioBase64, "base64")
       const streamingSession = { interrupt: false }
@@ -2212,9 +2024,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       let position = 0
       while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-        if (isDisconnecting && !bypass) {
-          break
-        }
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
         const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
         const mediaMessage = {
@@ -2390,7 +2199,6 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
         const tts = new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
         currentTTS = tts
-        if (isDisconnecting) return // block streaming if we're disconnecting
 
         const finalResponse = await processWithOpenAIStream(
           transcript,
@@ -2403,7 +2211,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             if (!shouldFlush(lastLen, partial)) return
             const chunk = partial.slice(lastLen)
             lastLen = partial.length
-            if (chunk.trim() && !isDisconnecting) {
+            if (chunk.trim()) {
               try { await tts.enqueueText(chunk.trim()) } catch (_) {}
             }
           }
@@ -2591,7 +2399,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 1: Match by DID (for inbound calls)
             if (!agent && didValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(didValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
                 .lean()
               if (agent) matchReason = "callerId==DID"
             }
@@ -2599,7 +2407,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 2: Match by CallerID (for outbound calls)
             if (!agent && callerIdValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(callerIdValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
                 .lean()
               if (agent) matchReason = "callerId==CallerID"
             }
@@ -2608,7 +2416,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             if (!agent) {
               try {
                 const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
-                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa accessToken")
+                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
                   .lean()
                 agent = candidates.find((a) => last10Digits(a.callingNumber) === toLast || last10Digits(a.callingNumber) === fromLast) || null
                 if (agent) matchReason = "callingNumber(last10)==to/from"
@@ -2767,9 +2575,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
           currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-          if (!isDisconnecting) {
-            await currentTTS.synthesizeAndStream(greeting)
-          }
+          await currentTTS.synthesizeAndStream(greeting)
           console.log("✅ [SANPBX-TTS] Greeting TTS completed")
           break
         }
@@ -2799,39 +2605,6 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Expect base64 payload; forward decoded PCM to Deepgram
           if (data.payload) {
             const audioBuffer = Buffer.from(data.payload, "base64")
-            // Reset silence watchdog on incoming media
-            try { if (silenceTimer) clearTimeout(silenceTimer) } catch (_) {}
-            silenceTimer = setTimeout(async () => {
-              try {
-                console.log("⏳ [SANPBX-SILENCE] No audio detected for 20s, sending final message then remote hangup...")
-                // Stop any ongoing/queued AI TTS immediately
-                try { if (currentTTS) currentTTS.interrupt() } catch (_) {}
-                isDisconnecting = true
-                try {
-                  const lang = (agentConfig?.language || 'en').toLowerCase()
-                  const farewellByLang = {
-                    hi: "कॉल डिस्कनेक्ट किया जा रहा है। धन्यवाद।",
-                    en: "Disconnecting the call now. Thank you.",
-                    bn: "এখন কলটি বিচ্ছিন্ন করা হচ্ছে। ধন্যবাদ।",
-                    ta: "இப்போது அழைப்பு துண்டிக்கப்படுகிறது. நன்றி.",
-                    te: "కాల్‌ను ఇప్పుడు విడదీస్తున్నాం. ధన్యవాదాలు.",
-                    mr: "आता कॉल डिस्कनेक्ट करत आहोत. धन्यवाद.",
-                    gu: "હવે કોલ ડિસકનેક્ટ કરી રહ્યા છીએ. આભાર.",
-                  }
-                  const finalMsg = farewellByLang[lang] || farewellByLang.en
-                  const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
-                  try { await tts.synthesizeAndStream(finalMsg, { bypassDisconnect: true }) } catch (_) {}
-                } catch (_) {}
-                // Allow farewell to play fully before hangup
-                try { await new Promise(r => setTimeout(r, 2000)) } catch (_) {}
-                const accessToken = agentConfig?.accessToken || null
-                if (callId) {
-                  await disconnectCallViaAPI(callId, 'silence_timeout', { accessToken })
-                }
-              } catch (e) {
-                console.log("⚠️ [SANPBX-SILENCE] Remote hangup request failed:", e?.message || e)
-              }
-            }, 20000)
             
             // Log media stats periodically (every 1000 packets to avoid spam)
             if (!ws.mediaPacketCount) ws.mediaPacketCount = 0
@@ -2865,23 +2638,64 @@ const setupSanPbxWebSocketServer = (ws) => {
             clearTimeout(silenceTimer)
           }
 
-          // Unified WhatsApp end-of-call handling (request detection + send + DB flags)
-          await handleWhatsAppAtEnd()
+          // Intelligent WhatsApp send based on lead status and user requests
+          try {
+            // Recompute WhatsApp request at end-of-call using full history
+            if (callLogger && agentConfig?.whatsappEnabled) {
+              try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
+            }
+            if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+              const waLink = getAgentWhatsappLink(agentConfig)
+              const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+              const waApiUrl = agentConfig?.whatsapplink
+              console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+              if (waLink && waNumber && waApiUrl) {
+                sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+                  .then(async (r) => {
+                    console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+                    if (r?.ok) {
+                      await billWhatsAppCredit({
+                        clientId: agentConfig.clientId,
+                        mobile: callLogger?.mobile || null,
+                        link: waLink,
+                        callLogId: callLogger?.callLogId,
+                        streamSid: streamId,
+                      })
+                      callLogger.markWhatsAppSent()
+                      try {
+                        if (callLogger?.callLogId) {
+                          await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                            'metadata.whatsappMessageSent': true,
+                            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                            'metadata.lastUpdated': new Date(),
+                          })
+                        }
+                      } catch (_) {}
+                    }
+                  })
+                  .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
+              } else {
+                console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
+              }
+            } else {
+              console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
+                hasCallLogger: !!callLogger,
+                whatsappEnabled: agentConfig?.whatsappEnabled,
+                shouldSend: callLogger?.shouldSendWhatsApp(),
+                leadStatus: callLogger?.currentLeadStatus,
+                alreadySent: callLogger?.whatsappSent,
+                requested: callLogger?.whatsappRequested
+              })
+            }
+          } catch (waErr) {
+            console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
+          }
           
           if (callLogger) {
             const stats = callLogger.getStats()
             console.log("🛑 [SANPBX-STOP] Call Stats:", JSON.stringify(stats, null, 2))
             // Bill credits at end of call (decimal precision)
             const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
-            // Persist just the duration seconds immediately to DB to avoid mismatch
-            try {
-              if (callLogger.callLogId) {
-                await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                  duration: durationSeconds,
-                  'metadata.lastUpdated': new Date(),
-                })
-              }
-            } catch (_) {}
             await billCallCredits({
               clientId: callLogger.clientId,
               durationSeconds,
@@ -3000,8 +2814,58 @@ const setupSanPbxWebSocketServer = (ws) => {
   ws.on("close", async () => {
     console.log("🔌 [SANPBX] WebSocket connection closed")
 
-    // Safety: run unified WhatsApp handler on close as well
-    await handleWhatsAppAtEnd()
+    // Safety: Intelligent WhatsApp send on close if conditions are met
+    try {
+      // Recompute at end-of-call using full history
+      if (callLogger && agentConfig?.whatsappEnabled) {
+        try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
+      }
+      if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+        const waLink = getAgentWhatsappLink(agentConfig)
+        const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+        const waApiUrl = agentConfig?.whatsapplink
+        console.log("📨 [WHATSAPP] close-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+        if (waLink && waNumber && waApiUrl) {
+          sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+            .then(async (r) => {
+              console.log("📨 [WHATSAPP] close-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+              if (r?.ok) {
+                await billWhatsAppCredit({
+                  clientId: agentConfig.clientId || callLogger?.clientId,
+                  mobile: callLogger?.mobile || null,
+                  link: waLink,
+                  callLogId: callLogger?.callLogId,
+                  streamSid: streamId,
+                })
+                callLogger.markWhatsAppSent()
+                try {
+                  if (callLogger?.callLogId) {
+                    await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                      'metadata.whatsappMessageSent': true,
+                      'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                      'metadata.lastUpdated': new Date(),
+                    })
+                  }
+                } catch (_) {}
+              }
+            })
+            .catch((e) => console.log("❌ [WHATSAPP] close-event error:", e.message))
+        } else {
+          console.log("📨 [WHATSAPP] close-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
+        }
+      } else {
+        console.log("📨 [WHATSAPP] close-event skipped → conditions not met:", {
+          hasCallLogger: !!callLogger,
+          whatsappEnabled: agentConfig?.whatsappEnabled,
+          shouldSend: callLogger?.shouldSendWhatsApp(),
+          leadStatus: callLogger?.currentLeadStatus,
+          alreadySent: callLogger?.whatsappSent,
+          requested: callLogger?.whatsappRequested
+        })
+      }
+    } catch (waErr) {
+      console.log("❌ [WHATSAPP] close-event unexpected:", waErr.message)
+    }
     
     if (callLogger) {
       const stats = callLogger.getStats()
@@ -3119,9 +2983,7 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
       // Try to disconnect via SanPBX API first if we have callId
       if (callId) {
         console.log(`🛑 [MANUAL-TERMINATION] Attempting to disconnect call via SanPBX API: ${callId}`)
-        // AccessToken strictly from DB/session agent config
-        const accessToken = callLogger?.ws?.sessionAgentConfig?.accessToken || agentConfig?.accessToken || null
-        const disconnectResult = await disconnectCallViaAPI(callId, reason, { accessToken })
+        const disconnectResult = await disconnectCallViaAPI(callId, reason)
         
         if (disconnectResult.success) {
           console.log(`✅ [MANUAL-TERMINATION] Successfully disconnected call via API: ${callId}`)
@@ -3152,9 +3014,8 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
           callId = activeCall.callSid
           console.log(`🛑 [MANUAL-TERMINATION] Found callId from database: ${callId}`)
           
-      // Try to disconnect via SanPBX API using DB accessToken if available from agent lookup
-      const accessToken = activeCall?.metadata?.sanpbx?.accessToken || null
-      const disconnectResult = await disconnectCallViaAPI(callId, reason, { accessToken })
+          // Try to disconnect via SanPBX API
+          const disconnectResult = await disconnectCallViaAPI(callId, reason)
           
           if (disconnectResult.success) {
             console.log(`✅ [MANUAL-TERMINATION] Successfully disconnected call via API: ${callId}`)
@@ -3235,11 +3096,11 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
  * @param {string} reason - Reason for disconnection
  * @returns {Object} Result of disconnection attempt
  */
-const disconnectCallByCallId = async (callId, reason = 'manual_disconnect', accessToken = null) => {
+const disconnectCallByCallId = async (callId, reason = 'manual_disconnect') => {
   try {
     console.log(`🛑 [CALL-DISCONNECT] Attempting to disconnect call: ${callId}`)
     
-    const result = await disconnectCallViaAPI(callId, reason, { accessToken })
+    const result = await disconnectCallViaAPI(callId, reason)
     
     if (result.success) {
       console.log(`✅ [CALL-DISCONNECT] Successfully disconnected call: ${callId}`)
