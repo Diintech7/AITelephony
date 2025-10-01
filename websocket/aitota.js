@@ -1519,7 +1519,7 @@ class SimplifiedSarvamTTSProcessor {
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
-          speech_sample_rate: 16000,
+          speech_sample_rate: 8000,
           enable_preprocessing: true,
           model: "bulbul:v1",
         }),
@@ -1567,7 +1567,7 @@ class SimplifiedSarvamTTSProcessor {
       headers: { "Content-Type": "application/json", "API-Subscription-Key": API_KEYS.sarvam },
       body: JSON.stringify({
         inputs: [text], target_language_code: this.sarvamLanguage, speaker: this.voice,
-        pitch: 0, pace: 1.0, loudness: 1.0, speech_sample_rate: 16000, enable_preprocessing: true, model: "bulbul:v1",
+        pitch: 0, pace: 1.0, loudness: 1.0, speech_sample_rate: 8000, enable_preprocessing: true, model: "bulbul:v1",
       }),
     })
     if (!response.ok) {
@@ -1630,10 +1630,10 @@ class SimplifiedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    const SAMPLE_RATE = 16000
+    const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    // Use 20ms chunks at 16kHz, 16-bit mono → 20ms * 32 bytes/ms = 640 bytes
+    // Use 20ms chunks at 8kHz, 16-bit mono → 20ms * 16 bytes/ms = 320 bytes
     const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS)
 
     let position = 0
@@ -1837,7 +1837,7 @@ const setupUnifiedVoiceServer = (wss) => {
         const deepgramLanguage = getDeepgramLanguage(currentLanguage)
 
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-        deepgramUrl.searchParams.append("sample_rate", "16000")
+        deepgramUrl.searchParams.append("sample_rate", "8000")
         deepgramUrl.searchParams.append("channels", "1")
         deepgramUrl.searchParams.append("encoding", "linear16")
         deepgramUrl.searchParams.append("model", "nova-2")
