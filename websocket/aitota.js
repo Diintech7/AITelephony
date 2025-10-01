@@ -1633,7 +1633,8 @@ class SimplifiedSarvamTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    // Use 20ms chunks at 8kHz, 16-bit mono → 20ms * 16 bytes/ms = 320 bytes
+    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS)
 
     let position = 0
     let chunkIndex = 0
