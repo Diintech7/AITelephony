@@ -1949,7 +1949,7 @@ const setupUnifiedVoiceServer = (wss) => {
         currentTTS = tts
         let sentIndex = 0
         const MIN_TOKENS = 8
-        const MAX_TOKENS = 10
+        const MAX_TOKENS = 15
 
         aiResponse = await processWithOpenAIStream(
           text,
