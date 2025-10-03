@@ -1071,7 +1071,8 @@ const processWithOpenAIStream = async (
       "End with a brief follow-up question.",
       "Keep reply under 100 tokens.",
       "dont give any fornts or styles in it or symbols in it",
-      "in which language you get the transcript in same language give response in same language"
+      "in which language you get the transcript in same language give response in same language",
+      "give follow up question at end of every response"
     ].join(" ")
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
     const personalizationMessage = userName && userName.trim()
@@ -1138,7 +1139,8 @@ const processWithOpenAIStream = async (
     }
 
     console.log(`🕒 [LLM-STREAM] ${timer.end()}ms - Streaming completed (${accumulated.length} chars)`) 
-    return accumulated || null
+    // Let the LLM include the follow-up per policy; do not append here
+    return (accumulated || '').trim() || null
   } catch (error) {
     console.error(`❌ [LLM-STREAM] ${timer.end()}ms - Error: ${error.message}`)
     return accumulated || null
@@ -1981,11 +1983,7 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         }
 
-        // Ensure follow-up question at end
-        if (aiResponse && !/[?]\s*$/.test(aiResponse)) {
-          const followUps = { hi: "क्या मैं और किसी बात में आपकी मदद कर सकता/सकती हूँ?", en: "Is there anything else I can help you with?", mr: "आणखी काही मदत हवी आहे का?", bn: "আর কিছু কি আপনাকে সাহায্য করতে পারি?", ta: "வேறு எதற்காவது உதவி வேண்டுமா?", te: "ఇంకేమైనా సహాయం కావాలా?", gu: "શું બીજી કોઈ મદદ કરી શકું?" }
-          aiResponse = `${aiResponse} ${(followUps[currentLanguage?.toLowerCase()] || followUps.en)}`.trim()
-        }
+        // Follow-up now handled inside processWithOpenAIStream
 
         // Save detections (lead status, WA request) in parallel (non-blocking)
         ;(async () => {
