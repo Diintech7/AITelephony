@@ -1072,7 +1072,7 @@ const processWithOpenAIStream = async (
       "Keep reply under 100 tokens.",
       "dont give any fornts or styles in it or symbols in it",
       "in which language you get the transcript in same language give response in same language",
-      "give follow up question at end of every response"
+      "give follow up question at end of every response in the same language they ask question"
     ].join(" ")
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
     const personalizationMessage = userName && userName.trim()
