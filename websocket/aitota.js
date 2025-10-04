@@ -1529,23 +1529,19 @@ class SimplifiedSmallestTTSProcessor {
         this.lastProcessedSentence = latestSentence
         
         // Stream this sentence immediately
-        const requestId = ++this.requestId
+        const requestId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
         const request = {
           voice_id: "ryan",
           text: latestSentence,
-          max_buffer_flush_ms: 50,
-          continue: false,
-          flush: true,
           language: this.language === "hi" ? "hi" : "en",
           sample_rate: 8000,
-          speed: 1.3,
-          consistency: 0.2,
-          enhancement: 0.7,
-          similarity: 0
+          speed: 1.0,
+          consistency: 0.5,
+          enhancement: 1.0
         }
         
         if (this.smallestWs.readyState === WebSocket.OPEN) {
-          const requestWithId = { ...request, request_id: String(requestId) }
+          const requestWithId = { ...request, request_id: requestId }
           this.smallestWs.send(JSON.stringify(requestWithId))
         }
       }
@@ -1651,11 +1647,8 @@ class SimplifiedSmallestTTSProcessor {
   handleSmallestResponse(data) {
     const { request_id, status, data: responseData } = data
     
-    // Convert request_id to number for lookup since we store as numbers
-    const numericRequestId = parseInt(request_id)
-    
-    if (request_id && this.pendingRequests.has(numericRequestId)) {
-      const request = this.pendingRequests.get(numericRequestId)
+    if (request_id && this.pendingRequests.has(request_id)) {
+      const request = this.pendingRequests.get(request_id)
       
       if (status === "chunk" && responseData?.audio) {
         // Store audio chunk and stream immediately (no logging for performance)
@@ -1674,23 +1667,23 @@ class SimplifiedSmallestTTSProcessor {
         // Complete status means no more audio chunks, resolve without streaming again
         // Audio was already streamed chunk by chunk above
         request.resolve("COMPLETED")
-        this.pendingRequests.delete(numericRequestId)
+        this.pendingRequests.delete(request_id)
       } else if (status === "success" && responseData?.audio) {
         console.log(`✅ [SMALLEST-TTS] Received success response for request ${request_id}`)
         // Convert base64 audio to PCM and stream
         this.streamAudioOptimizedForSIP(responseData.audio)
           .then(() => {
             request.resolve(responseData.audio)
-            this.pendingRequests.delete(numericRequestId)
+            this.pendingRequests.delete(request_id)
           })
           .catch((error) => {
             request.reject(error)
-            this.pendingRequests.delete(numericRequestId)
+            this.pendingRequests.delete(request_id)
           })
       } else if (status === "error") {
         console.log(`❌ [SMALLEST-TTS] Request ${request_id} failed: ${data.message || 'Unknown error'}`)
         request.reject(new Error(`Smallest.ai TTS error: ${data.message || 'Unknown error'}`))
-        this.pendingRequests.delete(numericRequestId)
+        this.pendingRequests.delete(request_id)
       } else {
         console.log(`⚠️ [SMALLEST-TTS] Unknown status for request ${request_id}: ${status}`)
       }
@@ -1763,7 +1756,7 @@ class SimplifiedSmallestTTSProcessor {
       const audioPromise = new Promise((resolve, reject) => {
         this.pendingRequests.set(requestId, { resolve, reject, text, audioChunks: [] })
         
-        const requestWithId = { ...request, request_id: String(requestId) }
+        const requestWithId = { ...request, request_id: requestId }
         
         // Check WebSocket state before sending
         if (this.smallestWs.readyState !== WebSocket.OPEN) {
@@ -1846,19 +1839,16 @@ class SimplifiedSmallestTTSProcessor {
       // Reduced wait time for faster processing
       await new Promise(resolve => setTimeout(resolve, 20))
 
-      const requestId = ++this.requestId
+      // Generate UUID-like request ID (Smallest.ai expects UUID format)
+      const requestId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
       const request = {
         voice_id: "ryan",
         text: item.text,
-        max_buffer_flush_ms: 100, // Reduced buffer flush for faster streaming
-        continue: false,
-        flush: true, // Enable flushing for faster output
         language: this.language === "hi" ? "hi" : "en",
         sample_rate: 8000,
-        speed: 1.2, // Slightly faster speech for reduced duration
-        consistency: 0.3, // Reduced consistency for faster generation
-        enhancement: 0.8, // Reduced enhancement for faster processing  
-        similarity: 0
+        speed: 1.0, // Reset to default value
+        consistency: 0.5, // Reset to default value
+        enhancement: 1.0 // Reset to default value
       }
 
       console.log(`🕒 [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Requesting TTS for: "${item.text.substring(0, 50)}..."`)
@@ -1867,7 +1857,7 @@ class SimplifiedSmallestTTSProcessor {
       const audioPromise = new Promise((resolve, reject) => {
         this.pendingRequests.set(requestId, { resolve, reject, text: item.text, audioChunks: [] })
         
-        const requestWithId = { ...request, request_id: String(requestId) }
+        const requestWithId = { ...request, request_id: requestId }
         
         console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${item.text.substring(0, 30)}..."`)
         
