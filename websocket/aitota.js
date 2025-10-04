@@ -2128,6 +2128,13 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log("🔄 [USER-UTTERANCE] Recreating TTS processor after interrupt...")
         ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = ttsProcessor
+        // Ensure WebSocket connection is established for the new processor
+        try {
+          await ttsProcessor.connectToSmallest()
+          console.log("✅ [USER-UTTERANCE] TTS processor WebSocket reconnected")
+        } catch (error) {
+          console.log(`❌ [USER-UTTERANCE] Failed to reconnect TTS WebSocket: ${error.message}`)
+        }
       }
 
           if (is_final) {
@@ -2188,8 +2195,25 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("🔄 [USER-UTTERANCE] Creating new TTS processor...")
           ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
           currentTTS = ttsProcessor
+          // Ensure WebSocket connection is established
+          try {
+            await ttsProcessor.connectToSmallest()
+            console.log("✅ [USER-UTTERANCE] TTS processor WebSocket connected")
+          } catch (error) {
+            console.log(`❌ [USER-UTTERANCE] Failed to connect TTS WebSocket: ${error.message}`)
+          }
         } else {
           console.log("🔄 [USER-UTTERANCE] Reusing existing TTS processor...")
+          // Ensure WebSocket connection is still active
+          if (!ttsProcessor.smallestReady || !ttsProcessor.smallestWs || ttsProcessor.smallestWs.readyState !== WebSocket.OPEN) {
+            console.log("🔄 [USER-UTTERANCE] Reconnecting TTS WebSocket...")
+            try {
+              await ttsProcessor.connectToSmallest()
+              console.log("✅ [USER-UTTERANCE] TTS processor WebSocket reconnected")
+            } catch (error) {
+              console.log(`❌ [USER-UTTERANCE] Failed to reconnect TTS WebSocket: ${error.message}`)
+            }
+          }
         }
 
         aiResponse = await processWithOpenAIStream(
@@ -2212,6 +2236,9 @@ const setupUnifiedVoiceServer = (wss) => {
             ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             currentTTS = ttsProcessor
             try {
+              // Ensure WebSocket connection is established for retry
+              await ttsProcessor.connectToSmallest()
+              console.log("✅ [USER-UTTERANCE] TTS retry WebSocket connected")
               await ttsProcessor.synthesizeAndStream(aiResponse)
               console.log(`✅ [USER-UTTERANCE] TTS retry successful`)
             } catch (retryError) {
@@ -2545,6 +2572,13 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
             ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             currentTTS = ttsProcessor
+            // Ensure WebSocket connection is established for greeting
+            try {
+              await ttsProcessor.connectToSmallest()
+              console.log("✅ [SIP-TTS] Greeting TTS WebSocket connected")
+            } catch (error) {
+              console.log(`❌ [SIP-TTS] Failed to connect greeting TTS WebSocket: ${error.message}`)
+            }
             await ttsProcessor.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
