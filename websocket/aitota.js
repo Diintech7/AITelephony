@@ -11,12 +11,13 @@ const Credit = require("../models/Credit")
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
   sarvam: process.env.SARVAM_API_KEY,
+  smallest: process.env.SMALLEST_API_KEY,
   openai: process.env.OPENAI_API_KEY,
   whatsapp: process.env.WHATSAPP_TOKEN,
 }
 
 // Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+if (!API_KEYS.deepgram || !API_KEYS.smallest || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables")
   process.exit(1)
 }
@@ -442,7 +443,7 @@ class EnhancedCallLogger {
       console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
       
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS synthesis but don't wait for completion
         tts.synthesizeAndStream(message).catch(err => 
@@ -537,7 +538,7 @@ class EnhancedCallLogger {
       // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
       let ttsStarted = false
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         // Start TTS and wait for it to begin
         try {
@@ -616,7 +617,7 @@ class EnhancedCallLogger {
       
       // 2. Start TTS synthesis and wait for completion
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSarvamTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
         
         try {
           console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
@@ -1469,20 +1470,22 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
   }
 }
 
-// Simplified TTS processor
-class SimplifiedSarvamTTSProcessor {
+// Simplified TTS processor using Smallest.ai Lightning v2 WebSocket
+class SimplifiedSmallestTTSProcessor {
   constructor(language, ws, streamSid, callLogger = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
-    this.sarvamLanguage = getSarvamLanguage(language)
-    this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
     this.pendingQueue = [] // { text, audioBase64, preparing }
     this.isProcessingQueue = false
+    this.smallestWs = null
+    this.smallestReady = false
+    this.requestId = 0
+    this.pendingRequests = new Map() // requestId -> { resolve, reject, text }
   }
 
   interrupt() {
@@ -1490,100 +1493,208 @@ class SimplifiedSarvamTTSProcessor {
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true
     }
+    if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN) {
+      this.smallestWs.close()
+    }
   }
 
   reset(language) {
     this.interrupt()
     if (language) {
       this.language = language
-      this.sarvamLanguage = getSarvamLanguage(language)
     }
     this.isInterrupted = false
     this.totalAudioBytes = 0
   }
 
+  async connectToSmallest() {
+    if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN) {
+      return
+    }
+
+    try {
+      this.smallestWs = new WebSocket("wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream", {
+        headers: {
+          Authorization: `Bearer ${API_KEYS.smallest}`
+        }
+      })
+
+      this.smallestWs.onopen = () => {
+        console.log("🎤 [SMALLEST-TTS] WebSocket connection established")
+        this.smallestReady = true
+      }
+
+      this.smallestWs.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
+          this.handleSmallestResponse(data)
+        } catch (error) {
+          console.log("❌ [SMALLEST-TTS] Error parsing response:", error.message)
+        }
+      }
+
+      this.smallestWs.onerror = (error) => {
+        console.log("❌ [SMALLEST-TTS] WebSocket error:", error.message)
+        this.smallestReady = false
+      }
+
+      this.smallestWs.onclose = () => {
+        console.log("🔌 [SMALLEST-TTS] WebSocket connection closed")
+        this.smallestReady = false
+      }
+
+      // Wait for connection to be ready
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Connection timeout")), 5000)
+        this.smallestWs.onopen = () => {
+          clearTimeout(timeout)
+          resolve()
+        }
+        this.smallestWs.onerror = (error) => {
+          clearTimeout(timeout)
+          reject(error)
+        }
+      })
+
+    } catch (error) {
+      console.log("❌ [SMALLEST-TTS] Connection error:", error.message)
+      throw error
+    }
+  }
+
+  handleSmallestResponse(data) {
+    const { request_id, status, data: responseData } = data
+    
+    if (request_id && this.pendingRequests.has(request_id)) {
+      const request = this.pendingRequests.get(request_id)
+      
+      if (status === "success" && responseData?.audio) {
+        // Convert base64 audio to PCM and stream
+        this.streamAudioOptimizedForSIP(responseData.audio)
+          .then(() => {
+            request.resolve(responseData.audio)
+            this.pendingRequests.delete(request_id)
+          })
+          .catch((error) => {
+            request.reject(error)
+            this.pendingRequests.delete(request_id)
+          })
+      } else if (status === "error") {
+        request.reject(new Error(`Smallest.ai TTS error: ${data.error || 'Unknown error'}`))
+        this.pendingRequests.delete(request_id)
+      }
+    }
+  }
+
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
 
-    const timer = createTimer("TTS_SYNTHESIS")
+    const timer = createTimer("SMALLEST_TTS_SYNTHESIS")
 
     try {
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
-        },
-        body: JSON.stringify({
-          inputs: [text],
-          target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: true,
-          model: "bulbul:v1",
-        }),
+      // Ensure WebSocket connection
+      if (!this.smallestReady) {
+        await this.connectToSmallest()
+      }
+
+      const requestId = ++this.requestId
+      const request = {
+        voice_id: "ryan", // Static voice for now
+        text: text,
+        max_buffer_flush_ms: 0,
+        continue: false,
+        flush: false,
+        language: this.language === "hi" ? "hi" : "en",
+        sample_rate: 8000, // Updated to 8kHz
+        speed: 1,
+        consistency: 0.5,
+        enhancement: 1,
+        similarity: 0
+      }
+
+      console.log(`🕒 [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Requesting TTS for: "${text.substring(0, 50)}..."`)
+
+      // Send request and wait for response
+      const audioPromise = new Promise((resolve, reject) => {
+        this.pendingRequests.set(requestId, { resolve, reject, text })
+        
+        // Add request_id to the request
+        const requestWithId = { ...request, request_id: requestId }
+        
+        this.smallestWs.send(JSON.stringify(requestWithId))
+        
+        // Timeout after 10 seconds
+        setTimeout(() => {
+          if (this.pendingRequests.has(requestId)) {
+            this.pendingRequests.delete(requestId)
+            reject(new Error("TTS request timeout"))
+          }
+        }, 10000)
       })
 
-      if (!response.ok || this.isInterrupted) {
-        if (!this.isInterrupted) {
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
-          throw new Error(`Sarvam API error: ${response.status}`)
-        }
-        return
-      }
-
-      const responseData = await response.json()
-      const audioBase64 = responseData.audios?.[0]
-
-      if (!audioBase64 || this.isInterrupted) {
-        if (!this.isInterrupted) {
-          console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - No audio data received`)
-          throw new Error("No audio data received from Sarvam API")
-        }
-        return
-      }
-
-      console.log(`🕒 [TTS-SYNTHESIS] ${timer.end()}ms - Audio generated`)
-
-      if (!this.isInterrupted) {
-        const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
-        await this.streamAudioOptimizedForSIP(pcmBase64)
-        const audioBuffer = Buffer.from(pcmBase64, "base64")
+      const audioBase64 = await audioPromise
+      
+      if (audioBase64) {
+        const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
+        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generated and streamed`)
       }
+
     } catch (error) {
       if (!this.isInterrupted) {
-        console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+        console.log(`❌ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
         throw error
       }
     }
   }
 
   async synthesizeToBuffer(text) {
-    const timer = createTimer("TTS_PREPARE")
-    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "API-Subscription-Key": API_KEYS.sarvam },
-      body: JSON.stringify({
-        inputs: [text], target_language_code: this.sarvamLanguage, speaker: this.voice,
-        pitch: 0, pace: 1.0, loudness: 1.0, speech_sample_rate: 8000, enable_preprocessing: true, model: "bulbul:v1",
-      }),
-    })
-    if (!response.ok) {
-      console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
-      throw new Error(`Sarvam API error: ${response.status}`)
-    }
-    const data = await response.json()
-    const audioBase64 = data.audios?.[0]
-    if (!audioBase64) {
-      console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - No audio data received`)
-      throw new Error("No audio data received from Sarvam API")
-    }
-    console.log(`🕒 [TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
+    const timer = createTimer("SMALLEST_TTS_PREPARE")
+    
+    try {
+      // Ensure WebSocket connection
+      if (!this.smallestReady) {
+        await this.connectToSmallest()
+      }
+
+      const requestId = ++this.requestId
+      const request = {
+        voice_id: "ryan", // Static voice for now
+        text: text,
+        max_buffer_flush_ms: 0,
+        continue: false,
+        flush: false,
+        language: this.language === "hi" ? "hi" : "en",
+        sample_rate: 8000,
+        speed: 1,
+        consistency: 0.5,
+        enhancement: 1,
+        similarity: 0
+      }
+
+      // Send request and wait for response
+      const audioPromise = new Promise((resolve, reject) => {
+        this.pendingRequests.set(requestId, { resolve, reject, text })
+        
+        const requestWithId = { ...request, request_id: requestId }
+        this.smallestWs.send(JSON.stringify(requestWithId))
+        
+        setTimeout(() => {
+          if (this.pendingRequests.has(requestId)) {
+            this.pendingRequests.delete(requestId)
+            reject(new Error("TTS request timeout"))
+          }
+        }, 10000)
+      })
+
+      const audioBase64 = await audioPromise
+      console.log(`🕒 [SMALLEST-TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
     return audioBase64
+
+    } catch (error) {
+      console.log(`❌ [SMALLEST-TTS-PREPARE] ${timer.end()}ms - Error: ${error.message}`)
+      throw error
+    }
   }
 
   async enqueueText(text) {
@@ -1591,7 +1702,13 @@ class SimplifiedSarvamTTSProcessor {
     const item = { text, audioBase64: null, preparing: true }
     this.pendingQueue.push(item)
     ;(async () => {
-      try { item.audioBase64 = await this.synthesizeToBuffer(text) } catch (_) { item.audioBase64 = null } finally { item.preparing = false }
+      try { 
+        item.audioBase64 = await this.synthesizeToBuffer(text) 
+      } catch (_) { 
+        item.audioBase64 = null 
+      } finally { 
+        item.preparing = false 
+      }
     })()
     if (!this.isProcessingQueue) {
       this.processQueue().catch(() => {})
@@ -1606,7 +1723,7 @@ class SimplifiedSarvamTTSProcessor {
         const item = this.pendingQueue[0]
         if (!item.audioBase64) {
           let waited = 0
-          while (!this.isInterrupted && item.preparing && waited < 3000) {
+          while (!this.isInterrupted && item.preparing && waited < 5000) {
             await new Promise(r => setTimeout(r, 20))
             waited += 20
           }
@@ -1615,8 +1732,7 @@ class SimplifiedSarvamTTSProcessor {
         const audioBase64 = item.audioBase64
         this.pendingQueue.shift()
         if (audioBase64) {
-          const pcmBase64 = this.extractPcmLinear16Mono8kBase64(audioBase64)
-          await this.streamAudioOptimizedForSIP(pcmBase64)
+          await this.streamAudioOptimizedForSIP(audioBase64)
           await new Promise(r => setTimeout(r, 60))
         }
       }
@@ -1632,7 +1748,7 @@ class SimplifiedSarvamTTSProcessor {
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    const SAMPLE_RATE = 8000
+    const SAMPLE_RATE = 8000 // Updated to 8kHz
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     // Use 20ms chunks at 8kHz, 16-bit mono → 20ms * 16 bytes/ms = 320 bytes
@@ -1642,13 +1758,10 @@ class SimplifiedSarvamTTSProcessor {
     let chunkIndex = 0
     let successfulChunks = 0
 
-    // One-time stream header log to confirm format and base64 preview (for comparison with aitota.js)
+    // One-time stream header log
     try {
       const estimatedMs = Math.floor(audioBuffer.length / BYTES_PER_MS)
-      console.log(`🎧 [SIP-STREAM:T3] Format=PCM s16le, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
-      const previewChunk = audioBuffer.slice(0, Math.min(OPTIMAL_CHUNK_SIZE, audioBuffer.length))
-      const previewB64 = previewChunk.toString("base64")
-      console.log(`🎧 [SIP-STREAM:T3] FirstChunk Base64 (preview ${Math.min(previewB64.length, 120)} chars): ${previewB64.slice(0, 120)}${previewB64.length > 120 ? '…' : ''}`)
+      console.log(`🎧 [SMALLEST-STREAM] Format=PCM s16le, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
     } catch (_) {}
 
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
@@ -1667,7 +1780,7 @@ class SimplifiedSarvamTTSProcessor {
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
           if (chunkIndex === 0) {
-            console.log(`📤 [SIP-STREAM:T3] Sending first chunk: bytes=${chunk.length}, base64Len=${mediaMessage.media.payload.length}`)
+            console.log(`📤 [SMALLEST-STREAM] Sending first chunk: bytes=${chunk.length}, base64Len=${mediaMessage.media.payload.length}`)
           }
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
@@ -1689,35 +1802,7 @@ class SimplifiedSarvamTTSProcessor {
     }
 
     this.currentAudioStreaming = null
-    console.log(`✅ [SIP-STREAM:T3] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
-  }
-
-  extractPcmLinear16Mono8kBase64(audioBase64) {
-    try {
-      const buf = Buffer.from(audioBase64, 'base64')
-      if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WAVE') {
-        let offset = 12
-        let dataOffset = null
-        let dataSize = null
-        while (offset + 8 <= buf.length) {
-          const chunkId = buf.toString('ascii', offset, offset + 4)
-          const chunkSize = buf.readUInt32LE(offset + 4)
-          const next = offset + 8 + chunkSize
-          if (chunkId === 'data') {
-            dataOffset = offset + 8
-            dataSize = chunkSize
-            break
-          }
-          offset = next
-        }
-        if (dataOffset != null && dataSize != null) {
-          return buf.slice(dataOffset, dataOffset + dataSize).toString('base64')
-        }
-      }
-      return audioBase64
-    } catch (_) {
-      return audioBase64
-    }
+    console.log(`✅ [SMALLEST-STREAM] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
   }
 
   getStats() {
@@ -1947,7 +2032,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off LLM streaming and partial TTS
         let aiResponse = null
-        const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
         let sentIndex = 0
         const MIN_TOKENS = 8
@@ -2306,7 +2391,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSarvamTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
             await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
