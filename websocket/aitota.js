@@ -2034,7 +2034,6 @@ const setupUnifiedVoiceServer = (wss) => {
     let callDirection = "inbound"
     let agentConfig = null
     let userName = null
-    let ttsProcessor = null // Reusable TTS processor
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -2097,14 +2096,14 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-      if (ttsProcessor && isProcessing) {
+          if (currentTTS && isProcessing) {
         console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for new user input...")
-        ttsProcessor.interrupt()
-        isProcessing = false
-        processingRequestId++
+            currentTTS.interrupt()
+            isProcessing = false
+            processingRequestId++
         // Wait a bit for the interrupt to take effect
         await new Promise(resolve => setTimeout(resolve, 100))
-      }
+          }
 
           if (is_final) {
             console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
@@ -2158,12 +2157,8 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off LLM streaming and TTS
         let aiResponse = null
-
-        // Create or reuse TTS processor
-        if (!ttsProcessor) {
-          ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-          currentTTS = ttsProcessor
-        }
+        const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        currentTTS = tts
 
         aiResponse = await processWithOpenAIStream(
           text,
@@ -2175,7 +2170,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Process the complete AI response through TTS queue
         if (processingRequestId === currentRequestId && aiResponse) {
           try {
-            await ttsProcessor.synthesizeAndStream(aiResponse)
+            await tts.synthesizeAndStream(aiResponse)
           } catch (error) {
             console.log(`❌ [USER-UTTERANCE] TTS error: ${error.message}`)
           }
@@ -2504,9 +2499,8 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
-            currentTTS = ttsProcessor
-            await ttsProcessor.synthesizeAndStream(greeting)
+            const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
           }
@@ -2619,10 +2613,9 @@ const setupUnifiedVoiceServer = (wss) => {
             }
             
             // Clean up TTS processor
-            if (ttsProcessor) {
+            if (currentTTS) {
               console.log("🛑 [SIP-STOP] Interrupting TTS processor...")
-              ttsProcessor.interrupt()
-              ttsProcessor = null
+              currentTTS.interrupt()
               currentTTS = null
             }
             
@@ -2716,10 +2709,9 @@ const setupUnifiedVoiceServer = (wss) => {
       }
       
       // Clean up TTS processor
-      if (ttsProcessor) {
+      if (currentTTS) {
         console.log("🔌 [SIP-CLOSE] Interrupting TTS processor...")
-        ttsProcessor.interrupt()
-        ttsProcessor = null
+        currentTTS.interrupt()
         currentTTS = null
       }
 
