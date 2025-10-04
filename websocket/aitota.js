@@ -1569,24 +1569,30 @@ class SimplifiedSmallestTTSProcessor {
   handleSmallestResponse(data) {
     const { request_id, status, data: responseData } = data
     
-    if (request_id && this.pendingRequests.has(request_id)) {
-      const request = this.pendingRequests.get(request_id)
+    // Convert request_id to number for lookup since we store as numbers
+    const numericRequestId = parseInt(request_id)
+    
+    if (request_id && this.pendingRequests.has(numericRequestId)) {
+      const request = this.pendingRequests.get(numericRequestId)
       
       if (status === "success" && responseData?.audio) {
         // Convert base64 audio to PCM and stream
         this.streamAudioOptimizedForSIP(responseData.audio)
           .then(() => {
             request.resolve(responseData.audio)
-            this.pendingRequests.delete(request_id)
+            this.pendingRequests.delete(numericRequestId)
           })
           .catch((error) => {
             request.reject(error)
-            this.pendingRequests.delete(request_id)
+            this.pendingRequests.delete(numericRequestId)
           })
       } else if (status === "error") {
-        request.reject(new Error(`Smallest.ai TTS error: ${data.error || 'Unknown error'}`))
-        this.pendingRequests.delete(request_id)
+        console.log(`❌ [SMALLEST-TTS] Request ${request_id} failed: ${data.message || 'Unknown error'}`)
+        request.reject(new Error(`Smallest.ai TTS error: ${data.message || 'Unknown error'}`))
+        this.pendingRequests.delete(numericRequestId)
       }
+    } else {
+      console.log(`⚠️ [SMALLEST-TTS] Received response for unknown request_id: ${request_id}`)
     }
   }
 
@@ -1622,8 +1628,8 @@ class SimplifiedSmallestTTSProcessor {
       const audioPromise = new Promise((resolve, reject) => {
         this.pendingRequests.set(requestId, { resolve, reject, text })
         
-        // Add request_id to the request
-        const requestWithId = { ...request, request_id: requestId }
+        // Add request_id to the request (convert to string as required by API)
+        const requestWithId = { ...request, request_id: String(requestId) }
         
         console.log(`📤 [SMALLEST-TTS] Sending request ${requestId}:`, JSON.stringify(requestWithId, null, 2))
         this.smallestWs.send(JSON.stringify(requestWithId))
@@ -1695,7 +1701,7 @@ class SimplifiedSmallestTTSProcessor {
       const audioPromise = new Promise((resolve, reject) => {
         this.pendingRequests.set(requestId, { resolve, reject, text })
         
-        const requestWithId = { ...request, request_id: requestId }
+        const requestWithId = { ...request, request_id: String(requestId) }
         this.smallestWs.send(JSON.stringify(requestWithId))
         
         setTimeout(() => {
