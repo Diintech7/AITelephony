@@ -1047,13 +1047,13 @@ const processWithOpenAI = async (
   }
 }
 
-// Streaming OpenAI completion that emits partials via callback (reference: sanpbx-server.js)
-const processWithOpenAIStream = async (
+// Enhanced streaming OpenAI completion with TTS capability for ultra-low latency
+const processWithOpenAIStreamOptimized = async (
   userMessage,
   conversationHistory,
   agentConfig,
   userName = null,
-  onPartial = null,
+  ttsProcessor = null,
 ) => {
   const timer = createTimer("LLM_STREAMING")
   let accumulated = ""
@@ -1130,8 +1130,11 @@ const processWithOpenAIStream = async (
             const delta = chunk.choices?.[0]?.delta?.content || ""
             if (delta) {
               accumulated += delta
-              if (typeof onPartial === "function") {
-                try { await onPartial(accumulated) } catch (_) {}
+              
+              // Stream to TTS processor if available and text is complete enough
+              if (ttsProcessor && accumulated.length > 10 && /[.!?]/.test(delta)) {
+                // Send partial text to TTS for immediate processing
+                ttsProcessor.streamPartialText(accumulated).catch(() => {})
               }
             }
           } catch (_) {}
@@ -1491,6 +1494,66 @@ class SimplifiedSmallestTTSProcessor {
     this.isStreamingAudio = false // Prevent overlapping audio streaming
   }
 
+  // Pre-connect to establish WebSocket connection early for latency reduction
+  async preConnect() {
+    if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN && this.smallestReady) {
+      console.log("🎤 [SMALLEST-TTS-PRECONNECT] Already connected")
+      return Promise.resolve()
+    }
+
+    try {
+      console.log("🎤 [SMALLEST-TTS-PRECONNECT] Pre-establishing WebSocket connection...")
+      await this.connectToSmallest()
+      console.log("✅ [SMALLEST-TTS-PRECONNECT] Connection ready for immediate use")
+    } catch (error) {
+      console.log(`❌ [SMALLEST-TTS-PRECONNECT] Failed to pre-connect: ${error.message}`)
+      // Don't throw, let the actual synthesis handle reconnection
+    }
+  }
+
+  // Stream partial text for ultra-low latency (stream sentences as they're generated)
+  async streamPartialText(partialText) {
+    if (!this.smallestReady || !this.smallestWs || this.isInterrupted) return
+    
+    try {
+      // Extract sentences from partial text
+      const sentences = partialText.match(/[^.!?]*[.!?]+/g) || []
+      if (sentences.length === 0) return
+      
+      // Get the latest complete sentence(s)
+      const latestSentence = sentences[sentences.length - 1]?.trim()
+      if (!latestSentence || latestSentence.length < 5) return
+      
+      // Only process if we haven't already processed this sentence
+      if (!this.lastProcessedSentence || this.lastProcessedSentence !== latestSentence) {
+        this.lastProcessedSentence = latestSentence
+        
+        // Stream this sentence immediately
+        const requestId = ++this.requestId
+        const request = {
+          voice_id: "ryan",
+          text: latestSentence,
+          max_buffer_flush_ms: 50,
+          continue: false,
+          flush: true,
+          language: this.language === "hi" ? "hi" : "en",
+          sample_rate: 8000,
+          speed: 1.3,
+          consistency: 0.2,
+          enhancement: 0.7,
+          similarity: 0
+        }
+        
+        if (this.smallestWs.readyState === WebSocket.OPEN) {
+          const requestWithId = { ...request, request_id: String(requestId) }
+          this.smallestWs.send(JSON.stringify(requestWithId))
+        }
+      }
+    } catch (error) {
+      // Silent error handling for performance
+    }
+  }
+
   interrupt() {
     this.isInterrupted = true
     this.isProcessing = false
@@ -1780,21 +1843,21 @@ class SimplifiedSmallestTTSProcessor {
       // Clear any pending requests to prevent conflicts
       this.pendingRequests.clear()
       
-      // Wait a bit to ensure previous requests are cleared
-      await new Promise(resolve => setTimeout(resolve, 100))
+      // Reduced wait time for faster processing
+      await new Promise(resolve => setTimeout(resolve, 20))
 
       const requestId = ++this.requestId
       const request = {
         voice_id: "ryan",
         text: item.text,
-        max_buffer_flush_ms: 0,
+        max_buffer_flush_ms: 100, // Reduced buffer flush for faster streaming
         continue: false,
-        flush: false,
+        flush: true, // Enable flushing for faster output
         language: this.language === "hi" ? "hi" : "en",
         sample_rate: 8000,
-        speed: 1,
-        consistency: 0.5,
-        enhancement: 1,
+        speed: 1.2, // Slightly faster speech for reduced duration
+        consistency: 0.3, // Reduced consistency for faster generation
+        enhancement: 0.8, // Reduced enhancement for faster processing  
         similarity: 0
       }
 
@@ -1823,14 +1886,14 @@ class SimplifiedSmallestTTSProcessor {
           return
         }
         
-        // Timeout after 8 seconds for better reliability
+        // Reduced timeout for faster failure handling
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 8 seconds`)
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 8000)
+        }, 5000)
       })
 
       const audioBase64 = await audioPromise
@@ -1876,8 +1939,8 @@ class SimplifiedSmallestTTSProcessor {
     const SAMPLE_RATE = 8000 // Updated to 8kHz
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    // Use 20ms chunks at 8kHz, 16-bit mono → 20ms * 16 bytes/ms = 320 bytes
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS)
+    // Use smaller 10ms chunks for lower latency → 10ms * 16 bytes/ms = 160 bytes
+    const OPTIMAL_CHUNK_SIZE = Math.floor(10 * BYTES_PER_MS)
 
     let position = 0
     let chunkIndex = 0
@@ -1915,7 +1978,7 @@ class SimplifiedSmallestTTSProcessor {
 
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
+        const delayMs = Math.max(chunkDurationMs - 1, 5) // Reduced delay for lower latency
         await new Promise((resolve) => setTimeout(resolve, delayMs))
       }
 
@@ -2157,30 +2220,27 @@ const setupUnifiedVoiceServer = (wss) => {
       const currentRequestId = ++processingRequestId
 
       try {
-        console.log("🔍 [USER-UTTERANCE] Running AI detections + streaming...")
+        console.log("🔍 [USER-UTTERANCE] Starting parallel LLM + TTS setup...")
 
-        // Kick off LLM streaming and TTS
-        let aiResponse = null
+        // Pre-create TTS processor and establish connection in parallel
         const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
 
-        aiResponse = await processWithOpenAIStream(
-          text,
-          conversationHistory,
-          agentConfig,
-          userName
-        )
+        // Start TTS connection setup immediately (non-blocking)
+        const ttsConnectionPromise = tts.preConnect()
+        
+        // Start LLM processing with streaming TTS in parallel
+        const aiResponse = await processWithOpenAIStreamOptimized(text, conversationHistory, agentConfig, userName, tts)
 
-        // Process the complete AI response through TTS queue
+        // If LLM completed first, start TTS immediately on streaming chunks
         if (processingRequestId === currentRequestId && aiResponse) {
+          console.log("🎤 [USER-UTTERANCE] Streaming TTS in parallel with continued processing...")
           try {
             await tts.synthesizeAndStream(aiResponse)
           } catch (error) {
             console.log(`❌ [USER-UTTERANCE] TTS error: ${error.message}`)
           }
         }
-
-        // Follow-up now handled inside processWithOpenAIStream
 
         // Save detections (lead status, WA request) in parallel (non-blocking)
         ;(async () => {
@@ -2205,7 +2265,7 @@ const setupUnifiedVoiceServer = (wss) => {
             { role: "assistant", content: aiResponse }
           )
           if (conversationHistory.length > 10) conversationHistory = conversationHistory.slice(-10)
-          console.log("✅ [USER-UTTERANCE] Processing completed")
+          console.log("✅ [USER-UTTERANCE] Parallel processing completed")
         } else {
           console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
         }
