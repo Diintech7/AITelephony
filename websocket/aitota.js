@@ -1644,6 +1644,15 @@ class SimplifiedSmallestTTSProcessor {
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
 
+    // Check if this text is already in queue to prevent duplicates
+    const existingItem = this.pendingQueue.find(item => item.text === text && !item.processed)
+    if (existingItem) {
+      console.log("⚠️ [SMALLEST-TTS] Text already in queue, skipping duplicate")
+      return new Promise((resolve) => {
+        existingItem.resolve = resolve
+      })
+    }
+
     // Add to queue instead of processing immediately
     return new Promise((resolve, reject) => {
       this.pendingQueue.push({
@@ -1651,7 +1660,8 @@ class SimplifiedSmallestTTSProcessor {
         resolve,
         reject,
         preparing: false,
-        audioBase64: null
+        audioBase64: null,
+        processed: false
       })
       
       // Start processing queue if not already processing
@@ -1767,6 +1777,15 @@ class SimplifiedSmallestTTSProcessor {
     const timer = createTimer("SMALLEST_TTS_SYNTHESIS")
     
     try {
+      // Check if already processed
+      if (item.processed) {
+        console.log("⚠️ [SMALLEST-TTS] Item already processed, skipping")
+        item.resolve()
+        return
+      }
+      
+      item.processed = true
+      
       // Ensure WebSocket connection
       if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
         console.log("🔄 [SMALLEST-TTS] Connecting WebSocket...")
@@ -2100,11 +2119,11 @@ const setupUnifiedVoiceServer = (wss) => {
       if (ttsProcessor && isProcessing) {
         console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for new user input...")
         ttsProcessor.interrupt()
-        isProcessing = false
-        processingRequestId++
+            isProcessing = false
+            processingRequestId++
         // Wait a bit for the interrupt to take effect
         await new Promise(resolve => setTimeout(resolve, 100))
-      }
+          }
 
           if (is_final) {
             console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
@@ -2734,6 +2753,7 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramReady = false
       deepgramAudioQueue = []
       currentTTS = null
+      ttsProcessor = null
       currentLanguage = undefined
       processingRequestId = 0
       callLogger = null
