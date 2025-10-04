@@ -1785,6 +1785,7 @@ class SimplifiedSmallestTTSProcessor {
       }
       
       item.processed = true
+      console.log(`🔄 [SMALLEST-TTS] Processing: "${item.text.substring(0, 50)}..."`)
       
       // Ensure WebSocket connection
       if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
@@ -1858,8 +1859,8 @@ class SimplifiedSmallestTTSProcessor {
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
         
-        // Stream audio to SIP
-        await this.streamAudioOptimizedForSIP(audioBase64)
+        // Audio is already streamed in chunks, no need to stream again
+        console.log(`🎵 [SMALLEST-TTS] Audio was streamed in chunks, skipping duplicate streaming`)
         
         console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generated and streamed`)
         item.resolve()
@@ -2119,11 +2120,15 @@ const setupUnifiedVoiceServer = (wss) => {
       if (ttsProcessor && isProcessing) {
         console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for new user input...")
         ttsProcessor.interrupt()
-            isProcessing = false
-            processingRequestId++
+        isProcessing = false
+        processingRequestId++
         // Wait a bit for the interrupt to take effect
-        await new Promise(resolve => setTimeout(resolve, 100))
-          }
+        await new Promise(resolve => setTimeout(resolve, 200))
+        // Recreate TTS processor after interrupt to ensure clean state
+        console.log("🔄 [USER-UTTERANCE] Recreating TTS processor after interrupt...")
+        ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        currentTTS = ttsProcessor
+      }
 
           if (is_final) {
             console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
@@ -2180,8 +2185,11 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Create or reuse TTS processor
         if (!ttsProcessor) {
+          console.log("🔄 [USER-UTTERANCE] Creating new TTS processor...")
           ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
           currentTTS = ttsProcessor
+        } else {
+          console.log("🔄 [USER-UTTERANCE] Reusing existing TTS processor...")
         }
 
         aiResponse = await processWithOpenAIStream(
@@ -2194,9 +2202,21 @@ const setupUnifiedVoiceServer = (wss) => {
         // Process the complete AI response through TTS queue
         if (processingRequestId === currentRequestId && aiResponse) {
           try {
+            console.log(`🎤 [USER-UTTERANCE] Sending AI response to TTS: "${aiResponse.substring(0, 50)}..."`)
             await ttsProcessor.synthesizeAndStream(aiResponse)
+            console.log(`✅ [USER-UTTERANCE] TTS processing completed`)
           } catch (error) {
             console.log(`❌ [USER-UTTERANCE] TTS error: ${error.message}`)
+            // Try to recreate TTS processor if there's an error
+            console.log(`🔄 [USER-UTTERANCE] Recreating TTS processor due to error...`)
+            ttsProcessor = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            currentTTS = ttsProcessor
+            try {
+              await ttsProcessor.synthesizeAndStream(aiResponse)
+              console.log(`✅ [USER-UTTERANCE] TTS retry successful`)
+            } catch (retryError) {
+              console.log(`❌ [USER-UTTERANCE] TTS retry failed: ${retryError.message}`)
+            }
           }
         }
 
