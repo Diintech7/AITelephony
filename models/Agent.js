@@ -43,8 +43,13 @@ const agentSchema = new mongoose.Schema({
   },
   voiceServiceProvider: {
     type: String,
-    enum: ["sarvam", "elevenlabs"],
+    enum: ["sarvam", "elevenlabs", "smallest"],
     default: "sarvam",
+  },
+  voiceTier: {
+    type: String,
+    enum: ["basic", "premium", "advanced"],
+    default: "basic",
   },
   voiceId: { type: String }, // Store the actual voice ID for the selected service
   llmSelection: {

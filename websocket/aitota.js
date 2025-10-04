@@ -469,7 +469,7 @@ class EnhancedCallLogger {
       console.log("🎤 [GRACEFUL-END] Starting goodbye message TTS...")
       
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSmallestTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(this.currentLanguage, this.ws, this.streamSid, this.callLogger, this.agentConfig)
         
         // Start TTS synthesis but don't wait for completion
         tts.synthesizeAndStream(message).catch(err => 
@@ -564,7 +564,7 @@ class EnhancedCallLogger {
       // 2. Start TTS synthesis first to ensure message is sent (non-blocking, but wait for start)
       let ttsStarted = false
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSmallestTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(language, this.ws, this.streamSid, this.callLogger, this.agentConfig)
         
         // Start TTS and wait for it to begin
         try {
@@ -643,7 +643,7 @@ class EnhancedCallLogger {
       
       // 2. Start TTS synthesis and wait for completion
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const tts = new SimplifiedSmallestTTSProcessor(language, this.ws, this.streamSid, this.callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(language, this.ws, this.streamSid, this.callLogger, this.agentConfig)
         
         try {
           console.log(`⏱️ [CONTROLLED-TERMINATE] Starting TTS synthesis...`)
@@ -1498,11 +1498,12 @@ SUB_DISPOSITION: [exact sub-disposition or "N/A"]`
 
 // Simplified TTS processor using Smallest.ai Lightning v2 WebSocket
 class SimplifiedSmallestTTSProcessor {
-  constructor(language, ws, streamSid, callLogger = null) {
+  constructor(language, ws, streamSid, callLogger = null, agentConfig = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
+    this.agentConfig = agentConfig // Store agent config for voice selection
     this.isInterrupted = false
     this.currentAudioStreaming = null
     this.totalAudioBytes = 0
@@ -1515,6 +1516,8 @@ class SimplifiedSmallestTTSProcessor {
     this.isProcessing = false // Prevent multiple simultaneous requests
     this.audioQueue = [] // Queue for audio chunks to be sent to SIP
     this.isStreamingAudio = false // Prevent overlapping audio streaming
+    this.streamingRequests = new Set() // Track active streaming requests
+    this.completedRequests = new Set() // Track completed requests
   }
 
   interrupt() {
@@ -1715,8 +1718,45 @@ class SimplifiedSmallestTTSProcessor {
       await new Promise(resolve => setTimeout(resolve, 50))
 
       const requestId = ++this.requestId
+      
+      // Get voice ID from agent config or use default
+      let voiceId = "ryan" // Default fallback
+      if (this.agentConfig) {
+        if (this.agentConfig.voiceId) {
+          voiceId = this.agentConfig.voiceId
+          console.log(`🎤 [TTS-VOICE] Using voice ID from DB: ${voiceId}`)
+        } else if (this.agentConfig.voiceSelection) {
+          // Map voice selection to voice ID if voiceId is not set
+          const voiceMapping = {
+            "male-professional": "ryan",
+            "female-professional": "sarah", 
+            "male-friendly": "ryan",
+            "female-friendly": "sarah",
+            "neutral": "ryan",
+            "meera": "meera",
+            "pavithra": "pavithra",
+            "maitreyi": "maitreyi",
+            "arvind": "arvind",
+            "amol": "amol",
+            "amartya": "amartya",
+            "diya": "diya",
+            "neel": "neel",
+            "misha": "misha",
+            "vian": "vian",
+            "arjun": "arjun",
+            "maya": "maya",
+            "kumaran": "kumaran",
+            "monika": "monika",
+            "aahir": "aahir",
+            "kanika": "kanika"
+          }
+          voiceId = voiceMapping[this.agentConfig.voiceSelection] || "ryan"
+          console.log(`🎤 [TTS-VOICE] Mapped voice selection '${this.agentConfig.voiceSelection}' to voice ID: ${voiceId}`)
+        }
+      }
+      
       const request = {
-        voice_id: "ryan", // Static voice for now
+        voice_id: voiceId,
         text: text,
         max_buffer_flush_ms: 0,
         continue: false,
@@ -1827,8 +1867,46 @@ class SimplifiedSmallestTTSProcessor {
       timer.checkpoint("TTS_SETUP_DELAY_COMPLETED")
 
       const requestId = ++this.requestId
+      
+      // Get voice ID from agent config or use default
+      let voiceId = "ryan" // Default fallback
+      if (this.callLogger && this.callLogger.agentConfig) {
+        const agentConfig = this.callLogger.agentConfig
+        if (agentConfig.voiceId) {
+          voiceId = agentConfig.voiceId
+          console.log(`🎤 [TTS-VOICE] Using voice ID from DB: ${voiceId}`)
+        } else if (agentConfig.voiceSelection) {
+          // Map voice selection to voice ID if voiceId is not set
+          const voiceMapping = {
+            "male-professional": "ryan",
+            "female-professional": "sarah", 
+            "male-friendly": "ryan",
+            "female-friendly": "sarah",
+            "neutral": "ryan",
+            "meera": "meera",
+            "pavithra": "pavithra",
+            "maitreyi": "maitreyi",
+            "arvind": "arvind",
+            "amol": "amol",
+            "amartya": "amartya",
+            "diya": "diya",
+            "neel": "neel",
+            "misha": "misha",
+            "vian": "vian",
+            "arjun": "arjun",
+            "maya": "maya",
+            "kumaran": "kumaran",
+            "monika": "monika",
+            "aahir": "aahir",
+            "kanika": "kanika"
+          }
+          voiceId = voiceMapping[agentConfig.voiceSelection] || "ryan"
+          console.log(`🎤 [TTS-VOICE] Mapped voice selection '${agentConfig.voiceSelection}' to voice ID: ${voiceId}`)
+        }
+      }
+      
       const request = {
-        voice_id: "ryan",
+        voice_id: voiceId,
         text: item.text,
         max_buffer_flush_ms: 0,
         continue: false,
@@ -2259,7 +2337,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off LLM streaming and TTS
         let aiResponse = null
-        const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+        const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
         currentTTS = tts
         voiceTiming.checkpoint("TTS_PROCESSOR_CREATED")
 
@@ -2607,6 +2685,7 @@ const setupUnifiedVoiceServer = (wss) => {
             callLogger.ws = ws; // Store WebSocket reference
             callLogger.uniqueid = uniqueid; // Store uniqueid for outbound calls
             callLogger.currentLanguage = currentLanguage; // Set initial language
+            callLogger.agentConfig = agentConfig; // Store agent config for voice selection
 
             // Create initial call log entry immediately
             try {
@@ -2637,7 +2716,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
+            const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
             await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             break
