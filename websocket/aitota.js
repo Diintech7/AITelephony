@@ -1509,55 +1509,59 @@ class SimplifiedSmallestTTSProcessor {
 
   async connectToSmallest() {
     if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN) {
+      console.log("🎤 [SMALLEST-TTS] WebSocket already connected")
       return
     }
 
     try {
+      console.log("🎤 [SMALLEST-TTS] Establishing WebSocket connection...")
+      
       this.smallestWs = new WebSocket("wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream", {
         headers: {
           Authorization: `Bearer ${API_KEYS.smallest}`
         }
       })
 
-      this.smallestWs.onopen = () => {
-        console.log("🎤 [SMALLEST-TTS] WebSocket connection established")
-        this.smallestReady = true
-      }
-
-      this.smallestWs.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          this.handleSmallestResponse(data)
-        } catch (error) {
-          console.log("❌ [SMALLEST-TTS] Error parsing response:", error.message)
-        }
-      }
-
-      this.smallestWs.onerror = (error) => {
-        console.log("❌ [SMALLEST-TTS] WebSocket error:", error.message)
-        this.smallestReady = false
-      }
-
-      this.smallestWs.onclose = () => {
-        console.log("🔌 [SMALLEST-TTS] WebSocket connection closed")
-        this.smallestReady = false
-      }
-
       // Wait for connection to be ready
       await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Connection timeout")), 5000)
+        const timeout = setTimeout(() => {
+          console.log("❌ [SMALLEST-TTS] Connection timeout after 5 seconds")
+          reject(new Error("Connection timeout"))
+        }, 5000)
+
         this.smallestWs.onopen = () => {
+          console.log("🎤 [SMALLEST-TTS] WebSocket connection established")
+          this.smallestReady = true
           clearTimeout(timeout)
           resolve()
         }
+
         this.smallestWs.onerror = (error) => {
+          console.log("❌ [SMALLEST-TTS] WebSocket error:", error.message)
+          this.smallestReady = false
           clearTimeout(timeout)
           reject(error)
+        }
+
+        this.smallestWs.onclose = (event) => {
+          console.log("🔌 [SMALLEST-TTS] WebSocket connection closed:", event.code, event.reason)
+          this.smallestReady = false
+        }
+
+        this.smallestWs.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data)
+            console.log("📨 [SMALLEST-TTS] Received response:", JSON.stringify(data, null, 2))
+            this.handleSmallestResponse(data)
+          } catch (error) {
+            console.log("❌ [SMALLEST-TTS] Error parsing response:", error.message)
+          }
         }
       })
 
     } catch (error) {
       console.log("❌ [SMALLEST-TTS] Connection error:", error.message)
+      this.smallestReady = false
       throw error
     }
   }
@@ -1621,15 +1625,17 @@ class SimplifiedSmallestTTSProcessor {
         // Add request_id to the request
         const requestWithId = { ...request, request_id: requestId }
         
+        console.log(`📤 [SMALLEST-TTS] Sending request ${requestId}:`, JSON.stringify(requestWithId, null, 2))
         this.smallestWs.send(JSON.stringify(requestWithId))
         
-        // Timeout after 10 seconds
+        // Timeout after 5 seconds
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 10000)
+        }, 5000)
       })
 
       const audioBase64 = await audioPromise
@@ -1643,6 +1649,19 @@ class SimplifiedSmallestTTSProcessor {
     } catch (error) {
       if (!this.isInterrupted) {
         console.log(`❌ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+        // Try to reconnect and retry once
+        if (error.message.includes("timeout") || error.message.includes("Connection")) {
+          console.log("🔄 [SMALLEST-TTS] Attempting to reconnect and retry...")
+          this.smallestReady = false
+          this.smallestWs = null
+          try {
+            await this.connectToSmallest()
+            return await this.synthesizeAndStream(text)
+          } catch (retryError) {
+            console.log(`❌ [SMALLEST-TTS] Retry failed: ${retryError.message}`)
+            throw retryError
+          }
+        }
         throw error
       }
     }
@@ -1681,10 +1700,11 @@ class SimplifiedSmallestTTSProcessor {
         
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 10000)
+        }, 5000)
       })
 
       const audioBase64 = await audioPromise
