@@ -1555,6 +1555,7 @@ class SimplifiedSmallestTTSProcessor {
         this.smallestWs.onclose = (event) => {
           console.log("🔌 [SMALLEST-TTS] WebSocket connection closed:", event.code, event.reason)
           this.smallestReady = false
+          this.smallestWs = null
         }
 
         this.smallestWs.onmessage = (event) => {
@@ -1638,8 +1639,13 @@ class SimplifiedSmallestTTSProcessor {
     const timer = createTimer("SMALLEST_TTS_SYNTHESIS")
 
     try {
-      // Ensure WebSocket connection
-      if (!this.smallestReady) {
+      // Always ensure WebSocket connection is fresh for each request
+      if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
+        console.log("🔄 [SMALLEST-TTS] Reconnecting WebSocket for new request...")
+        if (this.smallestWs) {
+          this.smallestWs.close()
+          this.smallestWs = null
+        }
         await this.connectToSmallest()
       }
 
@@ -1647,7 +1653,7 @@ class SimplifiedSmallestTTSProcessor {
       this.pendingRequests.clear()
       
       // Wait a bit to ensure previous requests are cleared
-      await new Promise(resolve => setTimeout(resolve, 100))
+      await new Promise(resolve => setTimeout(resolve, 50))
 
       const requestId = ++this.requestId
       const request = {
@@ -1674,7 +1680,21 @@ class SimplifiedSmallestTTSProcessor {
         const requestWithId = { ...request, request_id: String(requestId) }
         
         console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${text.substring(0, 30)}..."`)
-        this.smallestWs.send(JSON.stringify(requestWithId))
+        
+        // Check WebSocket state before sending
+        if (this.smallestWs.readyState !== WebSocket.OPEN) {
+          console.log(`❌ [SMALLEST-TTS] WebSocket not open, state: ${this.smallestWs.readyState}`)
+          reject(new Error("WebSocket not ready"))
+          return
+        }
+        
+        try {
+          this.smallestWs.send(JSON.stringify(requestWithId))
+        } catch (sendError) {
+          console.log(`❌ [SMALLEST-TTS] Error sending request: ${sendError.message}`)
+          reject(sendError)
+          return
+        }
         
         // Timeout after 5 seconds for better reliability
         setTimeout(() => {
@@ -1722,13 +1742,21 @@ class SimplifiedSmallestTTSProcessor {
     const timer = createTimer("SMALLEST_TTS_PREPARE")
     
     try {
-      // Ensure WebSocket connection
-      if (!this.smallestReady) {
+      // Always ensure WebSocket connection is fresh for each request
+      if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
+        console.log("🔄 [SMALLEST-TTS] Reconnecting WebSocket for buffer request...")
+        if (this.smallestWs) {
+          this.smallestWs.close()
+          this.smallestWs = null
+        }
         await this.connectToSmallest()
       }
 
       // Clear any pending requests to prevent conflicts
       this.pendingRequests.clear()
+      
+      // Wait a bit to ensure previous requests are cleared
+      await new Promise(resolve => setTimeout(resolve, 50))
 
       const requestId = ++this.requestId
       const request = {
@@ -1750,7 +1778,21 @@ class SimplifiedSmallestTTSProcessor {
         this.pendingRequests.set(requestId, { resolve, reject, text, audioChunks: [] })
         
         const requestWithId = { ...request, request_id: String(requestId) }
-        this.smallestWs.send(JSON.stringify(requestWithId))
+        
+        // Check WebSocket state before sending
+        if (this.smallestWs.readyState !== WebSocket.OPEN) {
+          console.log(`❌ [SMALLEST-TTS] WebSocket not open, state: ${this.smallestWs.readyState}`)
+          reject(new Error("WebSocket not ready"))
+          return
+        }
+        
+        try {
+          this.smallestWs.send(JSON.stringify(requestWithId))
+        } catch (sendError) {
+          console.log(`❌ [SMALLEST-TTS] Error sending request: ${sendError.message}`)
+          reject(sendError)
+          return
+        }
         
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
@@ -2048,11 +2090,14 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          if (currentTTS && isProcessing) {
-            currentTTS.interrupt()
-            isProcessing = false
-            processingRequestId++
-          }
+      if (currentTTS && isProcessing) {
+        console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for new user input...")
+        currentTTS.interrupt()
+        isProcessing = false
+        processingRequestId++
+        // Wait a bit for the interrupt to take effect
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
 
           if (is_final) {
             console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
