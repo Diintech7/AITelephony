@@ -1551,7 +1551,8 @@ class SimplifiedSmallestTTSProcessor {
         this.smallestWs.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data)
-            console.log("📨 [SMALLEST-TTS] Received response:", JSON.stringify(data, null, 2))
+            // Log only essential info, not full response with base64
+            console.log(`📨 [SMALLEST-TTS] Response: ${data.status} for request ${data.request_id}`)
             this.handleSmallestResponse(data)
           } catch (error) {
             console.log("❌ [SMALLEST-TTS] Error parsing response:", error.message)
@@ -1576,17 +1577,16 @@ class SimplifiedSmallestTTSProcessor {
       const request = this.pendingRequests.get(numericRequestId)
       
       if (status === "chunk" && responseData?.audio) {
-        console.log(`📦 [SMALLEST-TTS] Received audio chunk for request ${request_id}`)
-        // Store audio chunk and stream immediately
+        // Store audio chunk and stream immediately (no logging for performance)
         if (!request.audioChunks) {
           request.audioChunks = []
         }
         request.audioChunks.push(responseData.audio)
         
-        // Stream the audio chunk immediately
+        // Stream the audio chunk immediately without waiting
         this.streamAudioOptimizedForSIP(responseData.audio)
-          .catch((error) => {
-            console.log(`❌ [SMALLEST-TTS] Error streaming chunk: ${error.message}`)
+          .catch(() => {
+            // Silent error handling for performance
           })
       } else if (status === "complete") {
         console.log(`✅ [SMALLEST-TTS] Request ${request_id} completed`)
@@ -1653,17 +1653,17 @@ class SimplifiedSmallestTTSProcessor {
         // Add request_id to the request (convert to string as required by API)
         const requestWithId = { ...request, request_id: String(requestId) }
         
-        console.log(`📤 [SMALLEST-TTS] Sending request ${requestId}:`, JSON.stringify(requestWithId, null, 2))
+        console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${text.substring(0, 30)}..."`)
         this.smallestWs.send(JSON.stringify(requestWithId))
         
-        // Timeout after 5 seconds
+        // Timeout after 3 seconds for faster failure detection
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 3 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 5000)
+        }, 3000)
       })
 
       const audioBase64 = await audioPromise
@@ -1728,11 +1728,11 @@ class SimplifiedSmallestTTSProcessor {
         
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 3 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 5000)
+        }, 3000)
       })
 
       const audioBase64 = await audioPromise
@@ -1806,11 +1806,11 @@ class SimplifiedSmallestTTSProcessor {
     let chunkIndex = 0
     let successfulChunks = 0
 
-    // One-time stream header log
-    try {
+    // Minimal logging for performance
+    if (chunkIndex === 0) {
       const estimatedMs = Math.floor(audioBuffer.length / BYTES_PER_MS)
-      console.log(`🎧 [SMALLEST-STREAM] Format=PCM s16le, Rate=${SAMPLE_RATE}Hz, Channels=1, Bytes=${audioBuffer.length}, EstDuration=${estimatedMs}ms, ChunkSize=${OPTIMAL_CHUNK_SIZE}`)
-    } catch (_) {}
+      console.log(`🎧 [SMALLEST-STREAM] Streaming ${audioBuffer.length} bytes (${estimatedMs}ms)`)
+    }
 
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
       const remaining = audioBuffer.length - position
@@ -1827,9 +1827,6 @@ class SimplifiedSmallestTTSProcessor {
 
       if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
-          if (chunkIndex === 0) {
-            console.log(`📤 [SMALLEST-STREAM] Sending first chunk: bytes=${chunk.length}, base64Len=${mediaMessage.media.payload.length}`)
-          }
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
         } catch (error) {
@@ -1850,7 +1847,10 @@ class SimplifiedSmallestTTSProcessor {
     }
 
     this.currentAudioStreaming = null
-    console.log(`✅ [SMALLEST-STREAM] Completed: sentChunks=${successfulChunks}, totalBytes=${audioBuffer.length}`)
+    // Minimal completion logging
+    if (successfulChunks > 0) {
+      console.log(`✅ [SMALLEST-STREAM] Sent ${successfulChunks} chunks`)
+    }
   }
 
   getStats() {
