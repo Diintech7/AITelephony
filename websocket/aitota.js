@@ -1486,16 +1486,24 @@ class SimplifiedSmallestTTSProcessor {
     this.smallestReady = false
     this.requestId = 0
     this.pendingRequests = new Map() // requestId -> { resolve, reject, text, audioChunks }
+    this.isProcessing = false // Prevent multiple simultaneous requests
+    this.audioQueue = [] // Queue for audio chunks to be sent to SIP
+    this.isStreamingAudio = false // Prevent overlapping audio streaming
   }
 
   interrupt() {
     this.isInterrupted = true
+    this.isProcessing = false
+    this.isStreamingAudio = false
+    
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true
     }
     
-    // Clear all pending requests
+    // Clear all pending requests and queues
     this.pendingRequests.clear()
+    this.audioQueue = []
+    this.pendingQueue = []
     
     // Close WebSocket connection properly
     if (this.smallestWs) {
@@ -1573,9 +1581,9 @@ class SimplifiedSmallestTTSProcessor {
     } catch (error) {
       console.log("❌ [SMALLEST-TTS] Connection error:", error.message)
       this.smallestReady = false
-      throw error
+        throw error
+      }
     }
-  }
 
   handleSmallestResponse(data) {
     const { request_id, status, data: responseData } = data
@@ -1636,106 +1644,21 @@ class SimplifiedSmallestTTSProcessor {
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
 
-    const timer = createTimer("SMALLEST_TTS_SYNTHESIS")
-
-    try {
-      // Always ensure WebSocket connection is fresh for each request
-      if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
-        console.log("🔄 [SMALLEST-TTS] Reconnecting WebSocket for new request...")
-        if (this.smallestWs) {
-          this.smallestWs.close()
-          this.smallestWs = null
-        }
-        await this.connectToSmallest()
-      }
-
-      // Clear any pending requests to prevent conflicts
-      this.pendingRequests.clear()
-      
-      // Wait a bit to ensure previous requests are cleared
-      await new Promise(resolve => setTimeout(resolve, 50))
-
-      const requestId = ++this.requestId
-      const request = {
-        voice_id: "ryan", // Static voice for now
-        text: text,
-        max_buffer_flush_ms: 0,
-        continue: false,
-        flush: false,
-        language: this.language === "hi" ? "hi" : "en",
-        sample_rate: 8000, // Updated to 8kHz
-        speed: 1,
-        consistency: 0.5,
-        enhancement: 1,
-        similarity: 0
-      }
-
-      console.log(`🕒 [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Requesting TTS for: "${text.substring(0, 50)}..."`)
-
-      // Send request and wait for response
-      const audioPromise = new Promise((resolve, reject) => {
-        this.pendingRequests.set(requestId, { resolve, reject, text, audioChunks: [] })
-        
-        // Add request_id to the request (convert to string as required by API)
-        const requestWithId = { ...request, request_id: String(requestId) }
-        
-        console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${text.substring(0, 30)}..."`)
-        
-        // Check WebSocket state before sending
-        if (this.smallestWs.readyState !== WebSocket.OPEN) {
-          console.log(`❌ [SMALLEST-TTS] WebSocket not open, state: ${this.smallestWs.readyState}`)
-          reject(new Error("WebSocket not ready"))
-          return
-        }
-        
-        try {
-          this.smallestWs.send(JSON.stringify(requestWithId))
-        } catch (sendError) {
-          console.log(`❌ [SMALLEST-TTS] Error sending request: ${sendError.message}`)
-          reject(sendError)
-          return
-        }
-        
-        // Timeout after 5 seconds for better reliability
-        setTimeout(() => {
-          if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
-            this.pendingRequests.delete(requestId)
-            reject(new Error("TTS request timeout"))
-          }
-        }, 5000)
+    // Add to queue instead of processing immediately
+    return new Promise((resolve, reject) => {
+      this.pendingQueue.push({
+        text,
+        resolve,
+        reject,
+        preparing: false,
+        audioBase64: null
       })
-
-      const audioBase64 = await audioPromise
       
-      if (audioBase64) {
-        const audioBuffer = Buffer.from(audioBase64, "base64")
-        this.totalAudioBytes += audioBuffer.length
-        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generated and streamed`)
+      // Start processing queue if not already processing
+      if (!this.isProcessing) {
+        this.processQueue()
       }
-
-    } catch (error) {
-      if (!this.isInterrupted) {
-        console.log(`❌ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
-        // Try to reconnect and retry once (faster recovery)
-        if (error.message.includes("timeout") || error.message.includes("Connection")) {
-          console.log("🔄 [SMALLEST-TTS] Quick retry...")
-          this.smallestReady = false
-          if (this.smallestWs) {
-            this.smallestWs.close()
-            this.smallestWs = null
-          }
-          try {
-            await this.connectToSmallest()
-            return await this.synthesizeAndStream(text)
-          } catch (retryError) {
-            console.log(`❌ [SMALLEST-TTS] Retry failed: ${retryError.message}`)
-            throw retryError
-          }
-        }
-        throw error
-      }
-    }
+    })
   }
 
   async synthesizeToBuffer(text) {
@@ -1805,7 +1728,7 @@ class SimplifiedSmallestTTSProcessor {
 
       const audioBase64 = await audioPromise
       console.log(`🕒 [SMALLEST-TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
-      return audioBase64
+    return audioBase64
 
     } catch (error) {
       console.log(`❌ [SMALLEST-TTS-PREPARE] ${timer.end()}ms - Error: ${error.message}`)
@@ -1813,53 +1736,135 @@ class SimplifiedSmallestTTSProcessor {
     }
   }
 
-  async enqueueText(text) {
-    if (this.isInterrupted) return
-    const item = { text, audioBase64: null, preparing: true }
-    this.pendingQueue.push(item)
-    ;(async () => {
-      try { 
-        item.audioBase64 = await this.synthesizeToBuffer(text) 
-      } catch (_) { 
-        item.audioBase64 = null 
-      } finally { 
-        item.preparing = false 
-      }
-    })()
-    if (!this.isProcessingQueue) {
-      this.processQueue().catch(() => {})
-    }
-  }
 
   async processQueue() {
-    if (this.isProcessingQueue) return
-    this.isProcessingQueue = true
+    if (this.isProcessing) return
+    this.isProcessing = true
+    
     try {
       while (!this.isInterrupted && this.pendingQueue.length > 0) {
-        const item = this.pendingQueue[0]
-        if (!item.audioBase64) {
-          let waited = 0
-          while (!this.isInterrupted && item.preparing && waited < 2000) {
-            await new Promise(r => setTimeout(r, 10)) // Faster polling
-            waited += 10
-          }
+        const item = this.pendingQueue.shift()
+        
+        if (this.isInterrupted) {
+          item.reject(new Error("TTS interrupted"))
+          continue
         }
-        if (this.isInterrupted) break
-        const audioBase64 = item.audioBase64
-        this.pendingQueue.shift()
-        if (audioBase64) {
-          await this.streamAudioOptimizedForSIP(audioBase64)
-          await new Promise(r => setTimeout(r, 30)) // Reduced delay for faster processing
+        
+        try {
+          // Process the TTS request
+          await this.processSingleTTSRequest(item)
+        } catch (error) {
+          console.log(`❌ [SMALLEST-TTS-QUEUE] Error processing item: ${error.message}`)
+          item.reject(error)
         }
       }
     } finally {
-      this.isProcessingQueue = false
+      this.isProcessing = false
+    }
+  }
+  
+  async processSingleTTSRequest(item) {
+    const timer = createTimer("SMALLEST_TTS_SYNTHESIS")
+    
+    try {
+      // Ensure WebSocket connection
+      if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
+        console.log("🔄 [SMALLEST-TTS] Connecting WebSocket...")
+        if (this.smallestWs) {
+          this.smallestWs.close()
+          this.smallestWs = null
+        }
+        await this.connectToSmallest()
+      }
+
+      // Clear any pending requests to prevent conflicts
+      this.pendingRequests.clear()
+      
+      // Wait a bit to ensure previous requests are cleared
+      await new Promise(resolve => setTimeout(resolve, 100))
+
+      const requestId = ++this.requestId
+      const request = {
+        voice_id: "ryan",
+        text: item.text,
+        max_buffer_flush_ms: 0,
+        continue: false,
+        flush: false,
+        language: this.language === "hi" ? "hi" : "en",
+        sample_rate: 8000,
+        speed: 1,
+        consistency: 0.5,
+        enhancement: 1,
+        similarity: 0
+      }
+
+      console.log(`🕒 [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Requesting TTS for: "${item.text.substring(0, 50)}..."`)
+
+      // Send request and wait for response
+      const audioPromise = new Promise((resolve, reject) => {
+        this.pendingRequests.set(requestId, { resolve, reject, text: item.text, audioChunks: [] })
+        
+        const requestWithId = { ...request, request_id: String(requestId) }
+        
+        console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${item.text.substring(0, 30)}..."`)
+        
+        // Check WebSocket state before sending
+        if (this.smallestWs.readyState !== WebSocket.OPEN) {
+          console.log(`❌ [SMALLEST-TTS] WebSocket not open, state: ${this.smallestWs.readyState}`)
+          reject(new Error("WebSocket not ready"))
+          return
+        }
+        
+        try {
+          this.smallestWs.send(JSON.stringify(requestWithId))
+        } catch (sendError) {
+          console.log(`❌ [SMALLEST-TTS] Error sending request: ${sendError.message}`)
+          reject(sendError)
+          return
+        }
+        
+        // Timeout after 8 seconds for better reliability
+        setTimeout(() => {
+          if (this.pendingRequests.has(requestId)) {
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 8 seconds`)
+            this.pendingRequests.delete(requestId)
+            reject(new Error("TTS request timeout"))
+          }
+        }, 8000)
+      })
+
+      const audioBase64 = await audioPromise
+      
+      if (audioBase64) {
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+        this.totalAudioBytes += audioBuffer.length
+        
+        // Stream audio to SIP
+        await this.streamAudioOptimizedForSIP(audioBase64)
+        
+        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generated and streamed`)
+        item.resolve()
+      } else {
+        item.reject(new Error("No audio received"))
+      }
+
+    } catch (error) {
+      console.log(`❌ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+      item.reject(error)
     }
   }
 
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
+    // Wait for any ongoing audio streaming to complete
+    while (this.isStreamingAudio && !this.isInterrupted) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    
+    if (this.isInterrupted) return
+    
+    this.isStreamingAudio = true
     const audioBuffer = Buffer.from(audioBase64, "base64")
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
@@ -1915,6 +1920,7 @@ class SimplifiedSmallestTTSProcessor {
     }
 
     this.currentAudioStreaming = null
+    this.isStreamingAudio = false
     // Minimal completion logging
     if (successfulChunks > 0) {
       console.log(`✅ [SMALLEST-STREAM] Sent ${successfulChunks} chunks`)
@@ -2090,14 +2096,14 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-      if (currentTTS && isProcessing) {
+          if (currentTTS && isProcessing) {
         console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for new user input...")
-        currentTTS.interrupt()
-        isProcessing = false
-        processingRequestId++
+            currentTTS.interrupt()
+            isProcessing = false
+            processingRequestId++
         // Wait a bit for the interrupt to take effect
         await new Promise(resolve => setTimeout(resolve, 100))
-      }
+          }
 
           if (is_final) {
             console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
@@ -2149,41 +2155,24 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log("🔍 [USER-UTTERANCE] Running AI detections + streaming...")
 
-        // Kick off LLM streaming and partial TTS
+        // Kick off LLM streaming and TTS
         let aiResponse = null
         const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
-        let sentIndex = 0
-        const MIN_TOKENS = 8
-        const MAX_TOKENS = 15
 
         aiResponse = await processWithOpenAIStream(
           text,
           conversationHistory,
           agentConfig,
-          userName,
-          async (partial) => {
-            if (processingRequestId !== currentRequestId) return
-            if (!partial || partial.length <= sentIndex) return
-            let pending = partial.slice(sentIndex)
-            while (pending.trim()) {
-              const tokens = pending.trim().split(/\s+/)
-              if (tokens.length < MIN_TOKENS) break
-              const take = Math.min(MAX_TOKENS, tokens.length)
-              const chunkText = tokens.slice(0, take).join(' ')
-              sentIndex += pending.indexOf(chunkText) + chunkText.length
-              try { await tts.enqueueText(chunkText) } catch (_) {}
-              pending = partial.slice(sentIndex)
-            }
-          }
+          userName
         )
 
-        // Final flush for short tail
-        if (processingRequestId === currentRequestId && aiResponse && aiResponse.length > sentIndex) {
-          const tail = aiResponse.slice(sentIndex).trim()
-          if (tail) {
-            try { await currentTTS.enqueueText(tail) } catch (_) {}
-            sentIndex = aiResponse.length
+        // Process the complete AI response through TTS queue
+        if (processingRequestId === currentRequestId && aiResponse) {
+          try {
+            await tts.synthesizeAndStream(aiResponse)
+          } catch (error) {
+            console.log(`❌ [USER-UTTERANCE] TTS error: ${error.message}`)
           }
         }
 
