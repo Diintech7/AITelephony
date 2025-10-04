@@ -1525,9 +1525,9 @@ class SimplifiedSmallestTTSProcessor {
       // Wait for connection to be ready
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
-          console.log("❌ [SMALLEST-TTS] Connection timeout after 5 seconds")
+          console.log("❌ [SMALLEST-TTS] Connection timeout after 3 seconds")
           reject(new Error("Connection timeout"))
-        }, 5000)
+        }, 3000)
 
         this.smallestWs.onopen = () => {
           console.log("🎤 [SMALLEST-TTS] WebSocket connection established")
@@ -1677,9 +1677,9 @@ class SimplifiedSmallestTTSProcessor {
     } catch (error) {
       if (!this.isInterrupted) {
         console.log(`❌ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
-        // Try to reconnect and retry once
+        // Try to reconnect and retry once (faster recovery)
         if (error.message.includes("timeout") || error.message.includes("Connection")) {
-          console.log("🔄 [SMALLEST-TTS] Attempting to reconnect and retry...")
+          console.log("🔄 [SMALLEST-TTS] Quick retry...")
           this.smallestReady = false
           this.smallestWs = null
           try {
@@ -1771,9 +1771,9 @@ class SimplifiedSmallestTTSProcessor {
         const item = this.pendingQueue[0]
         if (!item.audioBase64) {
           let waited = 0
-          while (!this.isInterrupted && item.preparing && waited < 5000) {
-            await new Promise(r => setTimeout(r, 20))
-            waited += 20
+          while (!this.isInterrupted && item.preparing && waited < 2000) {
+            await new Promise(r => setTimeout(r, 10)) // Faster polling
+            waited += 10
           }
         }
         if (this.isInterrupted) break
@@ -1781,7 +1781,7 @@ class SimplifiedSmallestTTSProcessor {
         this.pendingQueue.shift()
         if (audioBase64) {
           await this.streamAudioOptimizedForSIP(audioBase64)
-          await new Promise(r => setTimeout(r, 60))
+          await new Promise(r => setTimeout(r, 30)) // Reduced delay for faster processing
         }
       }
     } finally {
