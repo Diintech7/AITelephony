@@ -1485,7 +1485,7 @@ class SimplifiedSmallestTTSProcessor {
     this.smallestWs = null
     this.smallestReady = false
     this.requestId = 0
-    this.pendingRequests = new Map() // requestId -> { resolve, reject, text }
+    this.pendingRequests = new Map() // requestId -> { resolve, reject, text, audioChunks }
   }
 
   interrupt() {
@@ -1575,7 +1575,27 @@ class SimplifiedSmallestTTSProcessor {
     if (request_id && this.pendingRequests.has(numericRequestId)) {
       const request = this.pendingRequests.get(numericRequestId)
       
-      if (status === "success" && responseData?.audio) {
+      if (status === "chunk" && responseData?.audio) {
+        console.log(`📦 [SMALLEST-TTS] Received audio chunk for request ${request_id}`)
+        // Store audio chunk and stream immediately
+        if (!request.audioChunks) {
+          request.audioChunks = []
+        }
+        request.audioChunks.push(responseData.audio)
+        
+        // Stream the audio chunk immediately
+        this.streamAudioOptimizedForSIP(responseData.audio)
+          .catch((error) => {
+            console.log(`❌ [SMALLEST-TTS] Error streaming chunk: ${error.message}`)
+          })
+      } else if (status === "complete") {
+        console.log(`✅ [SMALLEST-TTS] Request ${request_id} completed`)
+        // Complete status means no more audio chunks, resolve with accumulated audio
+        const finalAudio = request.audioChunks ? request.audioChunks.join('') : ""
+        request.resolve(finalAudio)
+        this.pendingRequests.delete(numericRequestId)
+      } else if (status === "success" && responseData?.audio) {
+        console.log(`✅ [SMALLEST-TTS] Received success response for request ${request_id}`)
         // Convert base64 audio to PCM and stream
         this.streamAudioOptimizedForSIP(responseData.audio)
           .then(() => {
@@ -1590,6 +1610,8 @@ class SimplifiedSmallestTTSProcessor {
         console.log(`❌ [SMALLEST-TTS] Request ${request_id} failed: ${data.message || 'Unknown error'}`)
         request.reject(new Error(`Smallest.ai TTS error: ${data.message || 'Unknown error'}`))
         this.pendingRequests.delete(numericRequestId)
+      } else {
+        console.log(`⚠️ [SMALLEST-TTS] Unknown status for request ${request_id}: ${status}`)
       }
     } else {
       console.log(`⚠️ [SMALLEST-TTS] Received response for unknown request_id: ${request_id}`)
@@ -1626,7 +1648,7 @@ class SimplifiedSmallestTTSProcessor {
 
       // Send request and wait for response
       const audioPromise = new Promise((resolve, reject) => {
-        this.pendingRequests.set(requestId, { resolve, reject, text })
+        this.pendingRequests.set(requestId, { resolve, reject, text, audioChunks: [] })
         
         // Add request_id to the request (convert to string as required by API)
         const requestWithId = { ...request, request_id: String(requestId) }
@@ -1699,7 +1721,7 @@ class SimplifiedSmallestTTSProcessor {
 
       // Send request and wait for response
       const audioPromise = new Promise((resolve, reject) => {
-        this.pendingRequests.set(requestId, { resolve, reject, text })
+        this.pendingRequests.set(requestId, { resolve, reject, text, audioChunks: [] })
         
         const requestWithId = { ...request, request_id: String(requestId) }
         this.smallestWs.send(JSON.stringify(requestWithId))
