@@ -91,13 +91,39 @@ const getAgentWhatsappLink = (agent) => {
   }
 }
 
-// Performance timing helper
+// Performance timing helper with detailed logging
 const createTimer = (label) => {
   const start = Date.now()
+  const checkpoints = []
   return {
     start,
-    end: () => Date.now() - start,
-    checkpoint: (checkpointName) => Date.now() - start,
+    end: () => {
+      const duration = Date.now() - start
+      console.log(`⏱️ [TIMING] ${label}: ${duration}ms`)
+      return duration
+    },
+    checkpoint: (checkpointName) => {
+      const now = Date.now()
+      const elapsed = now - start
+      const sinceLastCheckpoint = checkpoints.length > 0 ? now - checkpoints[checkpoints.length - 1].time : elapsed
+      const checkpoint = {
+        name: checkpointName,
+        time: now,
+        elapsed,
+        sinceLast: sinceLastCheckpoint
+      }
+      checkpoints.push(checkpoint)
+      console.log(`⏱️ [CHECKPOINT] ${label}.${checkpointName}: ${elapsed}ms (+${sinceLastCheckpoint}ms)`)
+      return elapsed
+    },
+    getFullReport: () => {
+      const duration = Date.now() - start
+      console.log(`\n📊 [LATENCY-REPORT] ${label}: ${duration}ms total`)
+      checkpoints.forEach((cp, index) => {
+        console.log(`  ${index + 1}. ${cp.name}: ${cp.elapsed}ms (+${cp.sinceLast}ms)`)
+      })
+      return { duration, checkpoints }
+    }
   }
 }
 
@@ -1644,6 +1670,10 @@ class SimplifiedSmallestTTSProcessor {
   async synthesizeAndStream(text) {
     if (this.isInterrupted) return
 
+    // Start timing for individual TTS request
+    const ttsReqTiming = createTimer("TTS_INDIVIDUAL_REQUEST")
+    console.log(`🎤 [TTS-REQUEST-START] Text length: ${text.length} chars`)
+
     // Add to queue instead of processing immediately
     return new Promise((resolve, reject) => {
       this.pendingQueue.push({
@@ -1651,8 +1681,11 @@ class SimplifiedSmallestTTSProcessor {
         resolve,
         reject,
         preparing: false,
-        audioBase64: null
+        audioBase64: null,
+        timing: ttsReqTiming
       })
+      
+      ttsReqTiming.checkpoint("TTS_REQUEST_QUEUED")
       
       // Start processing queue if not already processing
       if (!this.isProcessing) {
@@ -1767,21 +1800,31 @@ class SimplifiedSmallestTTSProcessor {
     const timer = createTimer("SMALLEST_TTS_SYNTHESIS")
     
     try {
+      console.log(`🎤 [TTS-PROCESS-START] Processing: "${item.text.substring(0, 30)}..."`)
+      timer.checkpoint("TTS_PROCESS_START")
+      
       // Ensure WebSocket connection
       if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
         console.log("🔄 [SMALLEST-TTS] Connecting WebSocket...")
+        timer.checkpoint("TTS_WEBSOCKET_DISCONNECTED")
+        
         if (this.smallestWs) {
           this.smallestWs.close()
           this.smallestWs = null
         }
         await this.connectToSmallest()
+        timer.checkpoint("TTS_WEBSOCKET_CONNECTED")
+      } else {
+        timer.checkpoint("TTS_WEBSOCKET_READY")
       }
 
       // Clear any pending requests to prevent conflicts
       this.pendingRequests.clear()
+      timer.checkpoint("TTS_REQUESTS_CLEARED")
       
       // Wait a bit to ensure previous requests are cleared
       await new Promise(resolve => setTimeout(resolve, 100))
+      timer.checkpoint("TTS_SETUP_DELAY_COMPLETED")
 
       const requestId = ++this.requestId
       const request = {
@@ -1798,27 +1841,32 @@ class SimplifiedSmallestTTSProcessor {
         similarity: 0
       }
 
-      console.log(`🕒 [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Requesting TTS for: "${item.text.substring(0, 50)}..."`)
+      timer.checkpoint("TTS_REQUEST_CONFIGURED")
+      console.log(`🕒 [SMALLEST-TTS-SYNTHESIS] Requesting TTS for: "${item.text.substring(0, 50)}..."`)
 
       // Send request and wait for response
       const audioPromise = new Promise((resolve, reject) => {
-        this.pendingRequests.set(requestId, { resolve, reject, text: item.text, audioChunks: [] })
+        this.pendingRequests.set(requestId, { resolve, reject, text: item.text, audioChunks: [], timing: timer })
         
         const requestWithId = { ...request, request_id: String(requestId) }
         
+        timer.checkpoint("TTS_REQUEST_SENDING")
         console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${item.text.substring(0, 30)}..."`)
         
         // Check WebSocket state before sending
         if (this.smallestWs.readyState !== WebSocket.OPEN) {
           console.log(`❌ [SMALLEST-TTS] WebSocket not open, state: ${this.smallestWs.readyState}`)
+          timer.checkpoint("TTS_SEND_ERROR_WEBSOCKET_CLOSED")
           reject(new Error("WebSocket not ready"))
           return
         }
         
         try {
           this.smallestWs.send(JSON.stringify(requestWithId))
+          timer.checkpoint("TTS_REQUEST_SENT")
         } catch (sendError) {
           console.log(`❌ [SMALLEST-TTS] Error sending request: ${sendError.message}`)
+          timer.checkpoint("TTS_SEND_ERROR_UNKNOWN")
           reject(sendError)
           return
         }
@@ -1827,6 +1875,7 @@ class SimplifiedSmallestTTSProcessor {
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
             console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 8 seconds`)
+            timer.checkpoint("TTS_REQUEST_TIMEOUT")
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
@@ -1834,26 +1883,45 @@ class SimplifiedSmallestTTSProcessor {
       })
 
       const audioBase64 = await audioPromise
+      timer.checkpoint("TTS_API_RESPONSE_RECEIVED")
       
       if (audioBase64 === "COMPLETED") {
         // Audio was already streamed chunk by chunk, just resolve
-        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generation completed (already streamed)`)
+        timer.checkpoint("TTS_STREAMING_COMPLETED")
+        const report = timer.getFullReport()
+        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] Audio generation completed (already streamed) - Total: ${report.duration}ms`)
         item.resolve()
       } else if (audioBase64) {
+        timer.checkpoint("TTS_AUDIO_RECEIVED")
+        
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
+        timer.checkpoint("TTS_AUDIO_BUFFER_CREATED")
         
         // Stream audio to SIP (for non-streaming responses)
         await this.streamAudioOptimizedForSIP(audioBase64)
+        timer.checkpoint("TTS_AUDIO_STREAMED_TO_SIP")
         
-        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generated and streamed`)
+        const report = timer.getFullReport()
+        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] Audio generated and streamed - Total: ${report.duration}ms`)
+        
+        // Log detailed timing report
+        report.checkpoints.forEach((cp, index) => {
+          console.log(`   🎤 TTS Step ${index + 1} - ${cp.name}: +${cp.sinceLast}ms`)
+        })
+        
         item.resolve()
       } else {
+        timer.checkpoint("TTS_NO_AUDIO_RECEIVED")
+        const report = timer.getFullReport()
+        console.log(`❌ [SMALLEST-TTS-SYNTHESIS] No audio received - Total: ${report.duration}ms`)
         item.reject(new Error("No audio received"))
       }
 
     } catch (error) {
-      console.log(`❌ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Error: ${error.message}`)
+      timer.checkpoint("TTS_EXCEPTION_CUSTOMCAUGHT")
+      const report = timer.getFullReport()
+      console.log(`❌ [SMALLEST-TTS-SYNTHESIS] Error: ${error.message} - Total: ${report.duration}ms`)
       item.reject(error)
     }
   }
@@ -2143,18 +2211,24 @@ const setupUnifiedVoiceServer = (wss) => {
     const processUserUtterance = async (text) => {
       if (!text.trim() || text === lastProcessedText) return
 
+      // Start overall timing for voice-to-voice latency
+      const voiceTiming = createTimer("VOICE_TO_VOICE_LATENCY")
+      
       console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
       console.log("🗣️ [USER-UTTERANCE] Text:", text.trim())
       console.log("🗣️ [USER-UTTERANCE] Current Language:", currentLanguage)
+      voiceTiming.checkpoint("USER_TEXT_RECEIVED")
 
       if (currentTTS) {
         console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
         currentTTS.interrupt()
+        voiceTiming.checkpoint("PREVIOUS_TTS_INTERRUPTED")
       }
 
       isProcessing = true
       lastProcessedText = text
       const currentRequestId = ++processingRequestId
+      voiceTiming.checkpoint("PROCESSING_PREPARED")
 
       try {
         console.log("🔍 [USER-UTTERANCE] Running AI detections + streaming...")
@@ -2163,37 +2237,60 @@ const setupUnifiedVoiceServer = (wss) => {
         let aiResponse = null
         const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
+        voiceTiming.checkpoint("TTS_PROCESSOR_CREATED")
 
+        // Start LLM processing timing
+        const startLlmProcess = Date.now()
+        
         aiResponse = await processWithOpenAIStream(
           text,
           conversationHistory,
           agentConfig,
           userName
         )
+        
+        const llmDuration = Date.now() - startLlmProcess
+        console.log(`🧠 [LLM-TIMING] Generation completed in ${llmDuration}ms`)
+        voiceTiming.checkpoint("LLM_RESPONSE_GENERATED")
 
         // Process the complete AI response through TTS queue
         if (processingRequestId === currentRequestId && aiResponse) {
           try {
+            console.log("🎤 [TTS-START] Starting voice synthesis...")
+            const ttsStartTime = Date.now()
+            
             await tts.synthesizeAndStream(aiResponse)
+            
+            const ttsDuration = Date.now() - ttsStartTime
+            console.log(`🎤 [TTS-TIMING] Synthesis completed in ${ttsDuration}ms`)
+            voiceTiming.checkpoint("TTS_SYNTHESIS_COMPLETED")
           } catch (error) {
             console.log(`❌ [USER-UTTERANCE] TTS error: ${error.message}`)
+            voiceTiming.checkpoint("TTS_SYNTHESIS_ERROR")
           }
         }
 
         // Follow-up now handled inside processWithOpenAIStream
 
         // Save detections (lead status, WA request) in parallel (non-blocking)
+        const detectionStartTime = Date.now()
         ;(async () => {
           try {
             const [leadStatus, whatsappRequest] = await Promise.all([
               detectLeadStatusWithOpenAI(text, conversationHistory, currentLanguage),
               detectWhatsAppRequest(text, conversationHistory, currentLanguage),
             ])
+            const detectionDuration = Date.now() - detectionStartTime
+            console.log(`🔍 [DETECTION-TIMING] Status detection completed in ${detectionDuration}ms`)
+            voiceTiming.checkpoint("STATUS_DETECTION_COMPLETED")
+            
             if (callLogger) {
               callLogger.updateLeadStatus(leadStatus)
               if (whatsappRequest === "WHATSAPP_REQUEST") callLogger.markWhatsAppRequested()
             }
-          } catch (_) {}
+          } catch (_) {
+            voiceTiming.checkpoint("STATUS_DETECTION_ERROR")
+          }
         })()
 
         if (processingRequestId === currentRequestId && aiResponse) {
@@ -2205,12 +2302,25 @@ const setupUnifiedVoiceServer = (wss) => {
             { role: "assistant", content: aiResponse }
           )
           if (conversationHistory.length > 10) conversationHistory = conversationHistory.slice(-10)
-          console.log("✅ [USER-UTTERANCE] Processing completed")
+          
+          // Generate final voice-to-voice latency report
+          const report = voiceTiming.getFullReport()
+          console.log(`✅ [USER-UTTERANCE] Processing completed - Total Voice-to-Voice Latency: ${report.duration}ms`)
+          console.log(`\n📊 [VOICE-LATENCY-SUMMARY]`)
+          console.log(`   📝 Text Processing: ~50ms`)
+          console.log(`   🧠 LLM Generation: ${llmDuration}ms`)
+          console.log(`   🎤 TTS Synthesis: ${ttsDuration || 0}ms`)
+          console.log(`   📊 Overall Latency: ${report.duration}ms`)
+          console.log(`📊 [VOICE-LATENCY-SUMMARY]`)
         } else {
           console.log("⏭️ [USER-UTTERANCE] Processing skipped (newer request in progress)")
+          voiceTiming.checkpoint("PROCESSING_SKIPPED")
+          voiceTiming.getFullReport()
         }
       } catch (error) {
         console.log("❌ [USER-UTTERANCE] Error processing utterance:", error.message)
+        voiceTiming.checkpoint("PROCESSING_ERROR")
+        voiceTiming.getFullReport()
       } finally {
         if (processingRequestId === currentRequestId) {
           isProcessing = false
