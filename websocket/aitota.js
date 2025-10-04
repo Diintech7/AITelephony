@@ -1493,9 +1493,18 @@ class SimplifiedSmallestTTSProcessor {
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true
     }
-    if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN) {
-      this.smallestWs.close()
+    
+    // Clear all pending requests
+    this.pendingRequests.clear()
+    
+    // Close WebSocket connection properly
+    if (this.smallestWs) {
+      if (this.smallestWs.readyState === WebSocket.OPEN) {
+        this.smallestWs.close(1000, "TTS interrupted")
+      }
+      this.smallestWs = null
     }
+    this.smallestReady = false
   }
 
   reset(language) {
@@ -1614,7 +1623,12 @@ class SimplifiedSmallestTTSProcessor {
         console.log(`⚠️ [SMALLEST-TTS] Unknown status for request ${request_id}: ${status}`)
       }
     } else {
-      console.log(`⚠️ [SMALLEST-TTS] Received response for unknown request_id: ${request_id}`)
+      // Handle responses for unknown request IDs more gracefully
+      if (status === "complete" || status === "success") {
+        console.log(`⚠️ [SMALLEST-TTS] Received ${status} for unknown request_id: ${request_id} - ignoring`)
+      } else if (status === "error") {
+        console.log(`⚠️ [SMALLEST-TTS] Received error for unknown request_id: ${request_id} - ${data.message || 'Unknown error'}`)
+      }
     }
   }
 
@@ -1628,6 +1642,12 @@ class SimplifiedSmallestTTSProcessor {
       if (!this.smallestReady) {
         await this.connectToSmallest()
       }
+
+      // Clear any pending requests to prevent conflicts
+      this.pendingRequests.clear()
+      
+      // Wait a bit to ensure previous requests are cleared
+      await new Promise(resolve => setTimeout(resolve, 100))
 
       const requestId = ++this.requestId
       const request = {
@@ -1656,14 +1676,14 @@ class SimplifiedSmallestTTSProcessor {
         console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${text.substring(0, 30)}..."`)
         this.smallestWs.send(JSON.stringify(requestWithId))
         
-        // Timeout after 3 seconds for faster failure detection
+        // Timeout after 5 seconds for better reliability
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 3 seconds`)
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 3000)
+        }, 5000)
       })
 
       const audioBase64 = await audioPromise
@@ -1681,7 +1701,10 @@ class SimplifiedSmallestTTSProcessor {
         if (error.message.includes("timeout") || error.message.includes("Connection")) {
           console.log("🔄 [SMALLEST-TTS] Quick retry...")
           this.smallestReady = false
-          this.smallestWs = null
+          if (this.smallestWs) {
+            this.smallestWs.close()
+            this.smallestWs = null
+          }
           try {
             await this.connectToSmallest()
             return await this.synthesizeAndStream(text)
@@ -1703,6 +1726,9 @@ class SimplifiedSmallestTTSProcessor {
       if (!this.smallestReady) {
         await this.connectToSmallest()
       }
+
+      // Clear any pending requests to prevent conflicts
+      this.pendingRequests.clear()
 
       const requestId = ++this.requestId
       const request = {
@@ -1728,16 +1754,16 @@ class SimplifiedSmallestTTSProcessor {
         
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 3 seconds`)
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 3000)
+        }, 5000)
       })
 
       const audioBase64 = await audioPromise
       console.log(`🕒 [SMALLEST-TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
-    return audioBase64
+      return audioBase64
 
     } catch (error) {
       console.log(`❌ [SMALLEST-TTS-PREPARE] ${timer.end()}ms - Error: ${error.message}`)
@@ -2552,6 +2578,13 @@ const setupUnifiedVoiceServer = (wss) => {
               deepgramWs.close()
             }
             
+            // Clean up TTS processor
+            if (currentTTS) {
+              console.log("🛑 [SIP-STOP] Interrupting TTS processor...")
+              currentTTS.interrupt()
+              currentTTS = null
+            }
+            
             console.log("🛑 [SIP-STOP] ======================================")
             break
 
@@ -2639,6 +2672,13 @@ const setupUnifiedVoiceServer = (wss) => {
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         console.log("🔌 [SIP-CLOSE] Closing Deepgram connection...")
         deepgramWs.close()
+      }
+      
+      // Clean up TTS processor
+      if (currentTTS) {
+        console.log("🔌 [SIP-CLOSE] Interrupting TTS processor...")
+        currentTTS.interrupt()
+        currentTTS = null
       }
 
       console.log("🔌 [SIP-CLOSE] Resetting session state...")
