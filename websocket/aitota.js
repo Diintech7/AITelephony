@@ -1608,9 +1608,9 @@ class SimplifiedSmallestTTSProcessor {
           })
       } else if (status === "complete") {
         console.log(`✅ [SMALLEST-TTS] Request ${request_id} completed`)
-        // Complete status means no more audio chunks, resolve with accumulated audio
-        const finalAudio = request.audioChunks ? request.audioChunks.join('') : ""
-        request.resolve(finalAudio)
+        // Complete status means no more audio chunks, resolve without streaming again
+        // Audio was already streamed chunk by chunk above
+        request.resolve("COMPLETED")
         this.pendingRequests.delete(numericRequestId)
       } else if (status === "success" && responseData?.audio) {
         console.log(`✅ [SMALLEST-TTS] Received success response for request ${request_id}`)
@@ -1835,11 +1835,15 @@ class SimplifiedSmallestTTSProcessor {
 
       const audioBase64 = await audioPromise
       
-      if (audioBase64) {
+      if (audioBase64 === "COMPLETED") {
+        // Audio was already streamed chunk by chunk, just resolve
+        console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generation completed (already streamed)`)
+        item.resolve()
+      } else if (audioBase64) {
         const audioBuffer = Buffer.from(audioBase64, "base64")
         this.totalAudioBytes += audioBuffer.length
         
-        // Stream audio to SIP
+        // Stream audio to SIP (for non-streaming responses)
         await this.streamAudioOptimizedForSIP(audioBase64)
         
         console.log(`✅ [SMALLEST-TTS-SYNTHESIS] ${timer.end()}ms - Audio generated and streamed`)
