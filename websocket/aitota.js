@@ -1073,22 +1073,16 @@ const processWithOpenAI = async (
   }
 }
 
-// Streaming OpenAI completion with streaming TTS for reduced latency
+// Streaming OpenAI completion that emits partials via callback (reference: sanpbx-server.js)
 const processWithOpenAIStream = async (
   userMessage,
   conversationHistory,
   agentConfig,
   userName = null,
   onPartial = null,
-  ttsProcessor = null,
 ) => {
   const timer = createTimer("LLM_STREAMING")
   let accumulated = ""
-  let streamingTtsBuffer = ""
-  let lastTtsSent = ""
-  let wordCount = 0
-  const TTS_WORD_THRESHOLD = 8 // Send to TTS every 8 words for smooth streaming
-  
   try {
     if (!API_KEYS.openai) {
       console.warn("⚠️ [LLM-STREAM] OPENAI_API_KEY not set; skipping generation")
@@ -1143,25 +1137,6 @@ const processWithOpenAIStream = async (
     const decoder = new TextDecoder("utf-8")
     let buffer = ""
 
-    // Helper function to send text to TTS when we have enough words
-    const sendToTTSIfReady = async (text) => {
-      if (!ttsProcessor || !text.trim()) return
-      
-      const words = text.trim().split(/\s+/)
-      wordCount = words.length
-      
-      // Send to TTS when we have enough words and it's different from last sent
-      if (wordCount >= TTS_WORD_THRESHOLD && text !== lastTtsSent) {
-        console.log(`🎤 [STREAMING-TTS] Sending ${wordCount} words to TTS: "${text.substring(0, 50)}..."`)
-        lastTtsSent = text
-        
-        // Send to TTS without waiting (fire and forget for streaming)
-        ttsProcessor.synthesizeAndStream(text).catch(err => 
-          console.log(`⚠️ [STREAMING-TTS] Error: ${err.message}`)
-        )
-      }
-    }
-
     while (true) {
       const { value, done } = await reader.read()
       if (done) break
@@ -1181,31 +1156,12 @@ const processWithOpenAIStream = async (
             const delta = chunk.choices?.[0]?.delta?.content || ""
             if (delta) {
               accumulated += delta
-              streamingTtsBuffer += delta
-              
-              // Check if we have a complete word or sentence boundary
-              if (delta.includes(' ') || delta.includes('.') || delta.includes('!') || delta.includes('?')) {
-                await sendToTTSIfReady(streamingTtsBuffer.trim())
-              }
-              
               if (typeof onPartial === "function") {
                 try { await onPartial(accumulated) } catch (_) {}
               }
             }
           } catch (_) {}
         }
-      }
-    }
-
-    // Send any remaining text to TTS
-    if (streamingTtsBuffer.trim() && streamingTtsBuffer !== lastTtsSent) {
-      console.log(`🎤 [STREAMING-TTS] Sending final ${wordCount} words to TTS: "${streamingTtsBuffer.trim().substring(0, 50)}..."`)
-      lastTtsSent = streamingTtsBuffer.trim()
-      
-      if (ttsProcessor) {
-        ttsProcessor.synthesizeAndStream(streamingTtsBuffer.trim()).catch(err => 
-          console.log(`⚠️ [STREAMING-TTS] Final error: ${err.message}`)
-        )
       }
     }
 
@@ -1559,8 +1515,6 @@ class SimplifiedSmallestTTSProcessor {
     this.isProcessing = false // Prevent multiple simultaneous requests
     this.audioQueue = [] // Queue for audio chunks to be sent to SIP
     this.isStreamingAudio = false // Prevent overlapping audio streaming
-    this.streamingRequests = new Set() // Track active streaming requests
-    this.completedRequests = new Set() // Track completed requests
   }
 
   interrupt() {
@@ -1576,8 +1530,6 @@ class SimplifiedSmallestTTSProcessor {
     this.pendingRequests.clear()
     this.audioQueue = []
     this.pendingQueue = []
-    this.streamingRequests.clear()
-    this.completedRequests.clear()
     
     // Close WebSocket connection properly
     if (this.smallestWs) {
@@ -1720,29 +1672,17 @@ class SimplifiedSmallestTTSProcessor {
 
     // Start timing for individual TTS request
     const ttsReqTiming = createTimer("TTS_INDIVIDUAL_REQUEST")
-    const requestId = ++this.requestId
-    console.log(`🎤 [TTS-REQUEST-START] Request ${requestId} - Text length: ${text.length} chars`)
-
-    // Track this as a streaming request
-    this.streamingRequests.add(requestId)
+    console.log(`🎤 [TTS-REQUEST-START] Text length: ${text.length} chars`)
 
     // Add to queue instead of processing immediately
     return new Promise((resolve, reject) => {
       this.pendingQueue.push({
         text,
-        resolve: () => {
-          this.streamingRequests.delete(requestId)
-          this.completedRequests.add(requestId)
-          resolve()
-        },
-        reject: (error) => {
-          this.streamingRequests.delete(requestId)
-          reject(error)
-        },
+        resolve,
+        reject,
         preparing: false,
         audioBase64: null,
-        timing: ttsReqTiming,
-        requestId
+        timing: ttsReqTiming
       })
       
       ttsReqTiming.checkpoint("TTS_REQUEST_QUEUED")
@@ -2062,23 +2002,7 @@ class SimplifiedSmallestTTSProcessor {
   getStats() {
     return {
       totalAudioBytes: this.totalAudioBytes,
-      activeStreamingRequests: this.streamingRequests.size,
-      completedRequests: this.completedRequests.size,
     }
-  }
-
-  // Check if all streaming requests are complete
-  isStreamingComplete() {
-    return this.streamingRequests.size === 0
-  }
-
-  // Wait for all streaming to complete
-  async waitForStreamingComplete(timeoutMs = 5000) {
-    const startTime = Date.now()
-    while (this.streamingRequests.size > 0 && (Date.now() - startTime) < timeoutMs) {
-      await new Promise(resolve => setTimeout(resolve, 100))
-    }
-    return this.streamingRequests.size === 0
   }
 }
 
@@ -2333,7 +2257,7 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log("🔍 [USER-UTTERANCE] Running AI detections + streaming...")
 
-        // Kick off LLM streaming with streaming TTS for reduced latency
+        // Kick off LLM streaming and TTS
         let aiResponse = null
         const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger)
         currentTTS = tts
@@ -2342,36 +2266,27 @@ const setupUnifiedVoiceServer = (wss) => {
         // Start LLM processing timing
         const startLlmProcess = Date.now()
         
-        console.log("🎤 [STREAMING-TTS] Starting streaming TTS for reduced latency...")
-        const ttsStartTime = Date.now()
-        
         aiResponse = await processWithOpenAIStream(
           text,
           conversationHistory,
           agentConfig,
-          userName,
-          null, // onPartial callback
-          tts    // Pass TTS processor for streaming
+          userName
         )
         
         const llmDuration = Date.now() - startLlmProcess
         console.log(`🧠 [LLM-TIMING] Generation completed in ${llmDuration}ms`)
         voiceTiming.checkpoint("LLM_RESPONSE_GENERATED")
 
-        // Wait for streaming TTS to complete
+        // Process the complete AI response through TTS queue
         if (processingRequestId === currentRequestId && aiResponse) {
           try {
-            console.log("🎤 [STREAMING-TTS] Waiting for all streaming requests to complete...")
+            console.log("🎤 [TTS-START] Starting voice synthesis...")
+            const ttsStartTime = Date.now()
             
-            // Wait for all streaming TTS requests to complete
-            const streamingComplete = await tts.waitForStreamingComplete(8000) // 8 second timeout
+            await tts.synthesizeAndStream(aiResponse)
             
             const ttsDuration = Date.now() - ttsStartTime
-            if (streamingComplete) {
-              console.log(`🎤 [TTS-TIMING] All streaming synthesis completed in ${ttsDuration}ms`)
-            } else {
-              console.log(`⚠️ [TTS-TIMING] Streaming synthesis timed out after ${ttsDuration}ms`)
-            }
+            console.log(`🎤 [TTS-TIMING] Synthesis completed in ${ttsDuration}ms`)
             voiceTiming.checkpoint("TTS_SYNTHESIS_COMPLETED")
           } catch (error) {
             console.log(`❌ [USER-UTTERANCE] TTS error: ${error.message}`)
