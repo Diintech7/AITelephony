@@ -128,6 +128,41 @@ const QUICK_RESPONSES = {
   "that's it": "Great! Feel free to call back if you need anything else.",
 }
 
+// Sentence utilities
+const splitIntoSentences = (text) => {
+  try {
+    if (!text) return []
+    // Split on ., !, ? while keeping Unicode and avoiding empty fragments
+    const parts = String(text)
+      .replace(/\s+/g, ' ')
+      .split(/(?<=[.!?])\s+/)
+      .map(s => s.trim())
+      .filter(Boolean)
+    return parts
+  } catch (_) {
+    return [String(text || '').trim()].filter(Boolean)
+  }
+}
+
+const limitSentences = (text, maxSentences = 3) => {
+  try {
+    const sentences = splitIntoSentences(text)
+    return sentences.slice(0, Math.max(1, Math.min(maxSentences, sentences.length))).join(' ')
+  } catch (_) {
+    return String(text || '').trim()
+  }
+}
+
+const smoothGreeting = (text, maxSentences = 2) => {
+  try {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim()
+    if (!normalized) return 'Hello! How can I help you today?'
+    return limitSentences(normalized, maxSentences)
+  } catch (_) {
+    return 'Hello! How can I help you today?'
+  }
+}
+
 // Helpers
 function extractDigits(value) {
   if (!value) return ""
@@ -1763,41 +1798,10 @@ const setupSanPbxWebSocketServer = (ws) => {
       let aiResponse = null
       const tts = createTtsProcessor(ws, streamId, callLogger)
       currentTTS = tts
-      let sentenceBuffer = ""
-      const sentenceQueue = []
-      let isSentenceProcessing = false
-      const getSentenceRegex = (lang) => {
-        const l = (agentConfig?.language || lang || 'en').toLowerCase()
-        if (l === 'hi') return /[।!?]+/
-        return /[.!?]+/
-      }
-      const sentenceRegex = getSentenceRegex(currentLanguage)
-      const processSentenceQueue = async () => {
-        if (isSentenceProcessing) return
-        isSentenceProcessing = true
-        try {
-          while (processingRequestId === currentRequestId && sentenceQueue.length > 0) {
-            // Batch 1-3 sentences depending on total length
-            const batch = []
-            const first = sentenceQueue[0] || ''
-            const second = sentenceQueue[1] || ''
-            const third = sentenceQueue[2] || ''
-            if (sentenceQueue.length >= 3 && (first.length + second.length + third.length) < 150) {
-              batch.push(sentenceQueue.shift(), sentenceQueue.shift(), sentenceQueue.shift())
-            } else if (sentenceQueue.length >= 2 && (first.length + second.length < 120 || first.length < 20 || second.length < 20)) {
-              batch.push(sentenceQueue.shift(), sentenceQueue.shift())
-            } else {
-              batch.push(sentenceQueue.shift())
-            }
-            const chunkText = batch.filter(Boolean).join(' ').trim()
-            if (chunkText) {
-              try { await tts.enqueueText(chunkText) } catch (_) {}
-            }
-          }
-        } finally {
-          isSentenceProcessing = false
-        }
-      }
+      // Sentence-based streaming with 1-3 sentences max
+      let lastLen = 0
+      let queuedSentences = 0
+      let carry = ""
       aiResponse = await processWithOpenAIStream(
         text,
         conversationHistory,
@@ -1805,33 +1809,36 @@ const setupSanPbxWebSocketServer = (ws) => {
         userName,
         async (partial) => {
           if (processingRequestId !== currentRequestId) return
-          if (!partial) return
-          // Append to buffer and extract complete sentences by regex
-          const newPortion = partial.slice(sentenceBuffer.length)
-          if (!newPortion) return
-          sentenceBuffer += newPortion
-          let match
-          // Extract sentences ending with punctuation
-          while ((match = sentenceRegex.exec(sentenceBuffer)) !== null) {
-            const endIndex = match.index + match[0].length
-            const completeSentence = sentenceBuffer.slice(0, endIndex).trim()
-            if (completeSentence) sentenceQueue.push(completeSentence)
-            sentenceBuffer = sentenceBuffer.slice(endIndex)
-            // Reset regex lastIndex for new buffer
-            sentenceRegex.lastIndex = 0
+          if (!partial || partial.length <= lastLen) return
+          if (queuedSentences >= 3) return
+          const delta = carry + partial.slice(lastLen)
+          const sentences = splitIntoSentences(delta)
+          // If delta doesn't end with terminator, keep last as carry
+          const endsWithTerminator = /[.!?]\s*$/.test(delta)
+          const complete = endsWithTerminator ? sentences : sentences.slice(0, -1)
+          for (const s of complete) {
+            if (queuedSentences >= 3) break
+            const trimmed = s.trim()
+            if (trimmed) {
+              try { await tts.enqueueText(trimmed) } catch (_) {}
+              queuedSentences++
+            }
           }
-          if (sentenceQueue.length > 0 && !isSentenceProcessing) {
-            processSentenceQueue().catch(() => {})
-          }
+          carry = endsWithTerminator ? "" : (sentences[sentences.length - 1] || "")
+          lastLen = partial.length
         }
       )
 
-      // Final flush: send any remaining short tail (below MIN_TOKENS)
-      if (processingRequestId === currentRequestId && aiResponse && aiResponse.length > sentIndex) {
-        const tail = aiResponse.slice(sentIndex).trim()
-        if (tail) {
-          sentenceQueue.push(tail)
-          try { await processSentenceQueue() } catch (_) {}
+      // Final flush for remaining carry as a sentence (respect 1-3 cap)
+      if (processingRequestId === currentRequestId && carry && queuedSentences < 3) {
+        const remaining = splitIntoSentences(carry)
+        for (const s of remaining) {
+          if (queuedSentences >= 3) break
+          const trimmed = s.trim()
+          if (trimmed) {
+            try { await currentTTS.enqueueText(trimmed) } catch (_) {}
+            queuedSentences++
+          }
         }
       }
       
@@ -1855,6 +1862,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       // }
 
       if (processingRequestId === currentRequestId && aiResponse) {
+        // Limit to 1-3 sentences like aitota.js
+        aiResponse = limitSentences(aiResponse, 3)
         console.log("🤖 [USER-UTTERANCE] AI Response (streamed):", aiResponse)
         // Do NOT TTS the full response here – partials already queued
         
@@ -1908,6 +1917,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (this.currentAudioStreaming) {
         this.currentAudioStreaming.interrupt = true
       }
+      // Clear FIFO queue on interruption for proper interpretation
+      try { this.pendingQueue = [] } catch (_) {}
     }
 
     reset() {
@@ -2883,10 +2894,10 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("🎯 [SANPBX-CALL-SETUP] CallSID:", callId)
 
           // Send greeting first to avoid STT echo/disturbance, then connect STT
-          let greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
+          let greeting = smoothGreeting(agentConfig.firstMessage || "Hello! How can I help you today?", 2)
           if (sessionUserName && sessionUserName.trim()) {
-            const base = agentConfig.firstMessage || "How can I help you today?"
-            greeting = `Hello ${sessionUserName.trim()}! ${base}`
+            const base = smoothGreeting(agentConfig.firstMessage || "How can I help you today?", 2)
+            greeting = smoothGreeting(`Hello ${sessionUserName.trim()}! ${base}`, 2)
           }
 
           console.log("🎯 [SANPBX-CALL-SETUP] Greeting Message:", greeting)
