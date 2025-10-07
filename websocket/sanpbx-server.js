@@ -1757,7 +1757,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       
       // Use streaming path immediately (like testing2) so partials can play
       let aiResponse = null
-      const tts = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
+      const tts = createTtsProcessor(ws, streamId, callLogger)
       currentTTS = tts
       let sentIndex = 0
       const MIN_TOKENS = 10
@@ -2249,6 +2249,15 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.currentAudioStreaming = streamingSession
       const CHUNK_SIZE = 320
       let position = 0
+      // Pre-roll one silence chunk to avoid first-chunk clipping on SIP
+      try {
+        const silence = Buffer.alloc(CHUNK_SIZE)
+        const silenceMsg = { event: "reverse-media", payload: silence.toString("base64"), streamId: this.streamSid, channelId: channelId, callId: callId }
+        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+          this.ws.send(JSON.stringify(silenceMsg))
+          await new Promise(r => setTimeout(r, 20))
+        }
+      } catch (_) {}
       while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
         const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
