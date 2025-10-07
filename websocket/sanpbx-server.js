@@ -12,6 +12,7 @@ const API_KEYS = {
   sarvam: process.env.SARVAM_API_KEY,
   openai: process.env.OPENAI_API_KEY,
   whatsapp: process.env.WHATSAPP_TOKEN,
+  smallest: process.env.SMALLEST_API_KEY,
 }
 
 // SanPBX API configuration
@@ -2056,6 +2057,111 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
   }
 
+  // Minimal Smallest.ai TTS processor for SanPBX transport
+  class SimplifiedSmallestTTSProcessor {
+    constructor(ws, streamSid, callLogger = null) {
+      this.ws = ws
+      this.streamSid = streamSid
+      this.callLogger = callLogger
+      this.isInterrupted = false
+      this.currentAudioStreaming = null
+    }
+
+    interrupt() {
+      this.isInterrupted = true
+      if (this.currentAudioStreaming) {
+        this.currentAudioStreaming.interrupt = true
+      }
+    }
+
+    async synthesizeToBuffer(text) {
+      if (!API_KEYS.smallest) {
+        throw new Error("Smallest API key not configured")
+      }
+      // Use Smallest lightning REST endpoint (PCM 8k if available); fallback to WAV
+      const resp = await fetch("https://waves-api.smallest.ai/api/v1/lightning-v2/get_speech", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${API_KEYS.smallest}`,
+        },
+        body: JSON.stringify({
+          text,
+          // Voice id/name can be mapped from agent config if needed later
+          format: "wav"
+        })
+      })
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => "")
+        throw new Error(`Smallest API error: ${resp.status}${t ? ` - ${t}` : ""}`)
+      }
+      const data = await resp.json()
+      const audioBase64 = data?.audio || data?.audios?.[0] || null
+      if (!audioBase64) {
+        throw new Error("No audio data received from Smallest API")
+      }
+      return audioBase64
+    }
+
+    async enqueueText(text) {
+      if (this.isInterrupted) return
+      try {
+        const audioBase64 = await this.synthesizeToBuffer(text)
+        if (this.isInterrupted) return
+        const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
+        await this.streamAudioOptimizedForSIP(pcmBase64)
+      } catch (e) {
+        if (!this.isInterrupted) {
+          console.log(`[SMALLEST-TTS] Error: ${e.message}`)
+        }
+      }
+    }
+
+    async synthesizeAndStream(text) {
+      return this.enqueueText(text)
+    }
+
+    async streamAudioOptimizedForSIP(audioBase64) {
+      if (this.isInterrupted) return
+      const audioBuffer = Buffer.from(audioBase64, "base64")
+      const streamingSession = { interrupt: false }
+      this.currentAudioStreaming = streamingSession
+
+      const CHUNK_SIZE = 320
+      let position = 0
+      while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+        const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
+        const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
+        const mediaMessage = {
+          event: "reverse-media",
+          payload: padded.toString("base64"),
+          streamId: this.streamSid,
+          channelId: channelId,
+          callId: callId,
+        }
+        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
+          try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) { break }
+        } else { break }
+        position += CHUNK_SIZE
+        if (position < audioBuffer.length && !this.isInterrupted) {
+          await new Promise(r => setTimeout(r, 20))
+        }
+      }
+      this.currentAudioStreaming = null
+    }
+
+    getStats() { return {} }
+  }
+
+  // TTS factory to choose provider per agent
+  const createTtsProcessor = (ws, streamSid, callLogger) => {
+    const provider = (ws.sessionAgentConfig?.voiceServiceProvider || ws.sessionAgentConfig?.ttsSelection || "sarvam").toLowerCase()
+    if (provider === "smallest") {
+      return new SimplifiedSmallestTTSProcessor(ws, streamSid, callLogger)
+    }
+    return new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
+  }
+
   /**
    * Optimized AI response with parallel processing
    */
@@ -2197,8 +2303,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           if (delta.length >= 60) return true
           return /[.!?]\s?$/.test(curr)
         }
-        const tts = new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
-        currentTTS = tts
+        const tts = createTtsProcessor(ws, streamSid, callLogger)
+        const ttsProcessorA = createTtsProcessor(ws, streamSid, callLogger)
+        currentTTS = ttsProcessorA
+        const ttsProcessorB = createTtsProcessor(ws, streamSid, callLogger)
+        currentTTS = ttsProcessorB
 
         const finalResponse = await processWithOpenAIStream(
           transcript,
@@ -2574,7 +2683,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
 
           console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
-          currentTTS = new SimplifiedSarvamTTSProcessor(ws, streamId, callLogger)
+          currentTTS = createTtsProcessor(ws, streamId, callLogger)
           await currentTTS.synthesizeAndStream(greeting)
           console.log("✅ [SANPBX-TTS] Greeting TTS completed")
           break
