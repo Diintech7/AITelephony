@@ -323,16 +323,23 @@ const normalizeLeadStatus = (value, fallback = 'maybe') => {
 };
 
 const VALID_SARVAM_VOICES = new Set([
-  'anushka', 'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh',
-  'aditya', 'isha', 'ritu', 'chirag', 'harsh', 'sakshi', 'priya', 'neha',
-  'rahul', 'pooja', 'rohan', 'simran', 'kavya', 'anjali', 'sneha', 'kiran',
-  'vikram', 'rajesh', 'sunita', 'tara', 'anirudh', 'kriti', 'ishaan'
+  "abhilash","anushka","meera","pavithra","maitreyi","arvind","amol","amartya","diya","neel","misha","vian","arjun","maya","manisha","vidya","arya","karun","hitesh"
 ])
 
-const getValidSarvamVoice = (voiceSelection = "anushka") => {
+const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   const normalized = (voiceSelection || "").toString().trim().toLowerCase()
   if (VALID_SARVAM_VOICES.has(normalized)) return normalized
-  return "anushka"
+  const voiceMapping = {
+    "male-professional": "arvind",
+    "female-professional": "pavithra",
+    "male-friendly": "amol",
+    "female-friendly": "maya",
+    neutral: "pavithra",
+    default: "pavithra",
+    male: "arvind",
+    female: "pavithra",
+  }
+  return voiceMapping[normalized] || "pavithra"
 }
 
 // Intelligent lead status detection using OpenAI
@@ -1537,13 +1544,13 @@ const setupSanPbxWebSocketServer = (ws) => {
         body: JSON.stringify({
           inputs: [text],
           target_language_code: getSarvamLanguage(language),
-          speaker: "anushka",
+          speaker: getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra"),
           pitch: 0,
           pace: 1.1,
           loudness: 1.0,
           speech_sample_rate: 8000, // FIXED: 8kHz to match SanIPPBX format
           enable_preprocessing: true,
-          model: "bulbul:v1",
+          model: "bulbul:v2",
         }),
         signal: controller.signal,
       })
@@ -1845,7 +1852,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.streamSid = streamSid
       this.callLogger = callLogger
       this.sarvamLanguage = getSarvamLanguage((ws.sessionAgentConfig?.language || 'en').toLowerCase())
-      this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "anushka")
+      this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
       this.isInterrupted = false
       this.currentAudioStreaming = null
       this.totalAudioBytes = 0
@@ -1880,13 +1887,13 @@ const setupSanPbxWebSocketServer = (ws) => {
           body: JSON.stringify({
             inputs: [text],
             target_language_code: this.sarvamLanguage,
-            speaker: "anushka",
+            speaker: this.voice,
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
             speech_sample_rate: 8000,
             enable_preprocessing: true,
-            model: "bulbul:v1",
+            model: "bulbul:v2",
           }),
         })
 
@@ -1935,13 +1942,13 @@ const setupSanPbxWebSocketServer = (ws) => {
         body: JSON.stringify({
           inputs: [text],
           target_language_code: this.sarvamLanguage,
-          speaker: "anushka",
+          speaker: this.voice,
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
           speech_sample_rate: 8000,
           enable_preprocessing: true,
-          model: "bulbul:v1",
+          model: "bulbul:v2",
         }),
       })
       if (!response.ok) {
