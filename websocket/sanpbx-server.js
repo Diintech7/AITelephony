@@ -1535,7 +1535,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       const timeoutId = setTimeout(() => controller.abort(), 3500)
 
       // Resolve final language to use for Sarvam
-      const langToUse = (language || ws.sessionAgentConfig?.language || "en").toLowerCase()
+      const langToUse = "en"
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -1881,15 +1881,21 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       const timer = createTimer("TTS_SYNTHESIS")
       try {
+        // Auto-detect language from text (fallback to session)
+        const devanagari = /[\u0900-\u097F]/
+        const baseLang = (this.ws.sessionAgentConfig?.language || 'en').toLowerCase()
+        const effectiveLang = devanagari.test(text) ? 'hi' : baseLang
+        const targetLangCode = getSarvamLanguage(effectiveLang)
+
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "API-Subscription-Key": API_KEYS.sarvam,
           },
-          // Minimal payload to avoid 400s due to strict validation
           body: JSON.stringify({
             inputs: [text],
+            target_language_code: targetLangCode,
             speaker: this.voice,
             speech_sample_rate: 8000
           }),
@@ -1897,7 +1903,8 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         if (!response.ok || this.isInterrupted) {
           if (!this.isInterrupted) {
-            const errorText = (() => { try { return response && typeof response.text === 'function' ? undefined : undefined } catch(_) { return undefined } })()
+            let errorText = ''
+            try { errorText = await response.text() } catch(_) {}
             console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}${errorText ? ` - ${errorText}` : ''}`)
             throw new Error(`Sarvam API error: ${response.status}`)
           }
@@ -1932,15 +1939,19 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     async synthesizeToBuffer(text) {
       const timer = createTimer("TTS_PREPARE")
+      const devanagari = /[\u0900-\u097F]/
+      const baseLang = (this.ws.sessionAgentConfig?.language || 'en').toLowerCase()
+      const effectiveLang = devanagari.test(text) ? 'hi' : baseLang
+      const targetLangCode = getSarvamLanguage(effectiveLang)
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "API-Subscription-Key": API_KEYS.sarvam,
         },
-        // Minimal payload to avoid 400s due to strict validation
         body: JSON.stringify({
           inputs: [text],
+          target_language_code: targetLangCode,
           speaker: this.voice,
           speech_sample_rate: 8000
         }),
