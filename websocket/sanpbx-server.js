@@ -2149,6 +2149,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       const req = this.pendingRequests.get(Number(rid))
       if (!req) return
       const status = msg?.status || msg?.type
+      // Minimal visibility
+      try { if (status) console.log(`[SMALLEST-TTS] onmessage status=${status} rid=${rid}`) } catch (_) {}
       if (status === 'audio_chunk' || status === 'chunk') {
         // Stream chunk immediately (support both msg.audio and msg.data.audio)
         const incomingAudio = (typeof msg.audio === 'string') ? msg.audio : (typeof msg.data?.audio === 'string' ? msg.data.audio : null)
@@ -2156,7 +2158,8 @@ const setupSanPbxWebSocketServer = (ws) => {
           if (!req.audioChunks) req.audioChunks = []
           req.audioChunks.push(incomingAudio)
           // Fire-and-forget streaming of this chunk
-          this.streamAudioOptimizedForSIP(incomingAudio).catch(() => {})
+          const pcmChunk = extractPcmLinear16Mono8kBase64(incomingAudio)
+          this.streamAudioOptimizedForSIP(pcmChunk).catch(() => {})
         }
       } else if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
         const combined = req.audioChunks.join('')
@@ -2179,6 +2182,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           // Pass through selected voice if present
           ...(this.ws?.sessionAgentConfig?.voiceId ? { voice: this.ws.sessionAgentConfig.voiceId } : {}),
         }
+        try { console.log(`[SMALLEST-TTS] send request ${payload.request_id}, voice=${payload.voice || 'default'}`) } catch (_) {}
         try { this.smallestWs.send(JSON.stringify(payload)) } catch (e) { reject(e) }
       })
     }
