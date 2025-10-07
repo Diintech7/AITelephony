@@ -1534,6 +1534,9 @@ const setupSanPbxWebSocketServer = (ws) => {
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 3500)
 
+      // Resolve final language to use for Sarvam
+      const langToUse = (language || ws.sessionAgentConfig?.language || "en").toLowerCase()
+
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -1543,7 +1546,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: getSarvamLanguage(language),
+          target_language_code: getSarvamLanguage(langToUse),
           speaker: getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra"),
           pitch: 0,
           pace: 1.1,
