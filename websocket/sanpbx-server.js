@@ -1550,7 +1550,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           loudness: 1.0,
           speech_sample_rate: 8000, // FIXED: 8kHz to match SanIPPBX format
           enable_preprocessing: true,
-          model: "bulbul:v2",
+          model: "bulbul:v1",
         }),
         signal: controller.signal,
       })
@@ -1893,7 +1893,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             loudness: 1.0,
             speech_sample_rate: 8000,
             enable_preprocessing: true,
-            model: "bulbul:v2",
+            model: "bulbul:v1",
           }),
         })
 
@@ -1948,7 +1948,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           loudness: 1.0,
           speech_sample_rate: 8000,
           enable_preprocessing: true,
-          model: "bulbul:v2",
+          model: "bulbul:v1",
         }),
       })
       if (!response.ok) {
