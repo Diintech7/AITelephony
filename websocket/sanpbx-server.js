@@ -2152,7 +2152,12 @@ const setupSanPbxWebSocketServer = (ws) => {
       const id = ++this.requestId
       return new Promise((resolve, reject) => {
         this.pendingRequests.set(id, { resolve, reject, audioChunks: [] })
-        const payload = { request_id: String(id), text }
+        const payload = {
+          request_id: String(id),
+          text,
+          // Pass through selected voice if present
+          ...(this.ws?.sessionAgentConfig?.voiceId ? { voice: this.ws.sessionAgentConfig.voiceId } : {}),
+        }
         try { this.smallestWs.send(JSON.stringify(payload)) } catch (e) { reject(e) }
       })
     }
@@ -2365,10 +2370,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           return /[.!?]\s?$/.test(curr)
         }
         const tts = createTtsProcessor(ws, streamSid, callLogger)
-        const ttsProcessorA = createTtsProcessor(ws, streamSid, callLogger)
-        currentTTS = ttsProcessorA
-        const ttsProcessorB = createTtsProcessor(ws, streamSid, callLogger)
-        currentTTS = ttsProcessorB
+        currentTTS = tts
 
         const finalResponse = await processWithOpenAIStream(
           transcript,
@@ -2569,7 +2571,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 1: Match by DID (for inbound calls)
             if (!agent && didValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(didValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection voiceServiceProvider voiceId language callerId whatsappEnabled whatsapplink depositions details qa")
                 .lean()
               if (agent) matchReason = "callerId==DID"
             }
@@ -2577,7 +2579,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Priority 2: Match by CallerID (for outbound calls)
             if (!agent && callerIdValue) {
               agent = await Agent.findOne({ isActive: true, callerId: String(callerIdValue) })
-                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
+                .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection voiceServiceProvider voiceId language callerId whatsappEnabled whatsapplink depositions details qa")
                 .lean()
               if (agent) matchReason = "callerId==CallerID"
             }
@@ -2586,7 +2588,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             if (!agent) {
               try {
                 const candidates = await Agent.find({ isActive: true, callingNumber: { $exists: true } })
-                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection language callerId whatsappEnabled whatsapplink depositions details qa")
+                  .select("_id clientId agentName callingNumber sttSelection ttsSelection llmSelection systemPrompt firstMessage voiceSelection voiceServiceProvider voiceId language callerId whatsappEnabled whatsapplink depositions details qa")
                   .lean()
                 agent = candidates.find((a) => last10Digits(a.callingNumber) === toLast || last10Digits(a.callingNumber) === fromLast) || null
                 if (agent) matchReason = "callingNumber(last10)==to/from"
