@@ -2086,42 +2086,12 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     async streamAudioOptimizedForSIP(audioBase64) {
       if (this.isInterrupted) return
-
-      const audioBuffer = Buffer.from(audioBase64, "base64")
-      const streamingSession = { interrupt: false }
-      this.currentAudioStreaming = streamingSession
-
-      const SAMPLE_RATE = 8000
-      const BYTES_PER_SAMPLE = 2
-      const CHUNK_SIZE = 320 // 20ms @ 8kHz mono 16-bit
-
-      let position = 0
-      while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
-        const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
-        const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
-        const mediaMessage = {
-          event: "reverse-media",
-          payload: padded.toString("base64"),
-          streamId: this.streamSid,
-          channelId: channelId,
-          callId: callId,
-        }
-        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-          try {
-            this.ws.send(JSON.stringify(mediaMessage))
-          } catch (_) {
-            break
-          }
-        } else {
-          break
-        }
-        position += CHUNK_SIZE
-        if (position < audioBuffer.length && !this.isInterrupted) {
-          await new Promise(r => setTimeout(r, 20))
-        }
+      // Route through central SIP queue to serialize playback
+      try {
+        await enqueueSipAudio(audioBase64)
+      } finally {
+        this.currentAudioStreaming = null
       }
-
-      this.currentAudioStreaming = null
     }
 
     getStats() {
@@ -2233,9 +2203,9 @@ const setupSanPbxWebSocketServer = (ws) => {
         if (incomingAudio) {
           if (!req.audioChunks) req.audioChunks = []
           req.audioChunks.push(incomingAudio)
-          // Fire-and-forget streaming of this chunk
+          // Route through central SIP queue
           const pcmChunk = extractPcmLinear16Mono8kBase64(incomingAudio)
-          this.streamAudioOptimizedForSIP(pcmChunk).catch(() => {})
+          enqueueSipAudio(pcmChunk).catch(() => {})
         }
   	  } else if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
   	    // We already streamed chunks live; avoid double-streaming the combined audio
@@ -2351,14 +2321,12 @@ const setupSanPbxWebSocketServer = (ws) => {
           await new Promise(r => setTimeout(r, 20))
         }
       } catch (_) {}
-  	  while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+   	  while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
   	    if (currentGeneration !== this.generation) break
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
         const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
-        const mediaMessage = { event: "reverse-media", payload: padded.toString("base64"), streamId: this.streamSid, channelId: channelId, callId: callId }
-        if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
-          try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) { break }
-        } else { break }
+        // Route through central SIP queue
+        try { await enqueueSipAudio(padded.toString("base64")) } catch (_) { break }
         position += CHUNK_SIZE
         if (position < audioBuffer.length && !this.isInterrupted) await new Promise(r => setTimeout(r, 20))
       }
