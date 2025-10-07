@@ -1073,6 +1073,237 @@ const processWithOpenAI = async (
   }
 }
 
+// Enhanced streaming OpenAI completion with sentence-based TTS processing
+class StreamingLLMProcessor {
+  constructor(language, ws, streamSid, callLogger, agentConfig) {
+    this.language = language
+    this.ws = ws
+    this.streamSid = streamSid
+    this.callLogger = callLogger
+    this.agentConfig = agentConfig
+    this.sentenceQueue = [] // FIFO queue for complete sentences
+    this.currentBuffer = "" // Buffer for incomplete sentences
+    this.isProcessing = false
+    this.ttsProcessor = null
+    this.sentencePatterns = this.getSentencePatterns(language)
+  }
+
+  getSentencePatterns(language) {
+    const patterns = {
+      en: /[.!?]+/,
+      hi: /[।!?]+/,
+      bn: /[।!?]+/,
+      ta: /[।!?]+/,
+      te: /[।!?]+/,
+      mr: /[।!?]+/,
+      gu: /[।!?]+/,
+      kn: /[।!?]+/,
+      ml: /[।!?]+/,
+      pa: /[।!?]+/,
+      or: /[।!?]+/,
+      as: /[।!?]+/,
+      ur: /[۔!?]+/
+    }
+    return patterns[language] || patterns.en
+  }
+
+  async processStreamingResponse(userMessage, conversationHistory, userName = null) {
+    const timer = createTimer("STREAMING_LLM_PROCESSING")
+    let accumulated = ""
+    
+    try {
+      if (!API_KEYS.openai) {
+        console.warn("⚠️ [LLM-STREAM] OPENAI_API_KEY not set; skipping generation")
+        return null
+      }
+
+      const basePrompt = (this.agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
+      const firstMessage = (this.agentConfig?.firstMessage || "").trim()
+      const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+      const policyBlock = [
+        "Answer strictly using the information provided above.",
+        "If specifics (address/phone/timings) are missing, say you don't have that info.",
+        "End with a brief follow-up question.",
+        "Keep reply under 100 tokens.",
+        "dont give any fornts or styles in it or symbols in it",
+        "in which language you get the transcript in same language give response in same language",
+        "give follow up question at end of every response in the same language they ask question"
+      ].join(" ")
+      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+      const personalizationMessage = userName && userName.trim()
+        ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
+        : null
+
+      const messages = [
+        { role: "system", content: systemPrompt },
+        ...(personalizationMessage ? [personalizationMessage] : []),
+        ...conversationHistory.slice(-6),
+        { role: "user", content: userMessage },
+      ]
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${API_KEYS.openai}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages,
+          max_tokens: 120,
+          temperature: 0.3,
+          stream: true,
+        }),
+      })
+
+      if (!response.ok || !response.body) {
+        console.error(`❌ [LLM-STREAM] ${timer.end()}ms - HTTP ${response.status}`)
+        return null
+      }
+
+      // Initialize TTS processor
+      this.ttsProcessor = new SimplifiedSmallestTTSProcessor(
+        this.language, 
+        this.ws, 
+        this.streamSid, 
+        this.callLogger, 
+        this.agentConfig
+      )
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder("utf-8")
+      let buffer = ""
+
+      console.log("🔄 [STREAMING-LLM] Starting streaming response processing...")
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split(/\r?\n/)
+        buffer = lines.pop() || ""
+        
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          if (trimmed === "data: [DONE]") {
+            // Process any remaining buffer as final sentence
+            if (this.currentBuffer.trim()) {
+              await this.processCompleteSentence(this.currentBuffer.trim())
+            }
+            break
+          }
+          if (trimmed.startsWith("data:")) {
+            const jsonStr = trimmed.slice(5).trim()
+            try {
+              const chunk = JSON.parse(jsonStr)
+              const delta = chunk.choices?.[0]?.delta?.content || ""
+              if (delta) {
+                accumulated += delta
+                await this.processToken(delta)
+              }
+            } catch (_) {}
+          }
+        }
+      }
+
+      console.log(`🕒 [STREAMING-LLM] ${timer.end()}ms - Streaming completed (${accumulated.length} chars)`)
+      return (accumulated || '').trim() || null
+    } catch (error) {
+      console.error(`❌ [STREAMING-LLM] ${timer.end()}ms - Error: ${error.message}`)
+      return accumulated || null
+    }
+  }
+
+  async processToken(token) {
+    this.currentBuffer += token
+    
+    // Check for sentence completion
+    const sentenceMatch = this.currentBuffer.match(this.sentencePatterns)
+    if (sentenceMatch) {
+      const sentenceEndIndex = sentenceMatch.index + sentenceMatch[0].length
+      const completeSentence = this.currentBuffer.substring(0, sentenceEndIndex).trim()
+      
+      if (completeSentence) {
+        // Add to FIFO queue
+        this.sentenceQueue.push(completeSentence)
+        console.log(`📝 [SENTENCE-QUEUE] Added sentence: "${completeSentence}"`)
+        
+        // Process queue if not already processing
+        if (!this.isProcessing) {
+          await this.processSentenceQueue()
+        }
+      }
+      
+      // Update buffer with remaining text
+      this.currentBuffer = this.currentBuffer.substring(sentenceEndIndex)
+    }
+  }
+
+  async processCompleteSentence(sentence) {
+    if (sentence.trim()) {
+      this.sentenceQueue.push(sentence.trim())
+      console.log(`📝 [SENTENCE-QUEUE] Added final sentence: "${sentence.trim()}"`)
+      
+      if (!this.isProcessing) {
+        await this.processSentenceQueue()
+      }
+    }
+  }
+
+  async processSentenceQueue() {
+    if (this.isProcessing || this.sentenceQueue.length === 0) return
+    
+    this.isProcessing = true
+    console.log(`🔄 [SENTENCE-QUEUE] Processing ${this.sentenceQueue.length} sentences in FIFO order`)
+    
+    try {
+      while (this.sentenceQueue.length > 0) {
+        const sentence = this.sentenceQueue.shift() // FIFO - remove first item
+        console.log(`🎤 [SENTENCE-TTS] Processing: "${sentence}"`)
+        
+        if (this.ttsProcessor && !this.ttsProcessor.isInterrupted) {
+          try {
+            await this.ttsProcessor.synthesizeAndStream(sentence)
+            console.log(`✅ [SENTENCE-TTS] Completed: "${sentence}"`)
+          } catch (error) {
+            console.log(`❌ [SENTENCE-TTS] Error processing sentence: ${error.message}`)
+            // Continue with next sentence even if one fails
+          }
+        } else {
+          console.log(`⚠️ [SENTENCE-TTS] TTS processor interrupted, stopping queue processing`)
+          break
+        }
+      }
+    } finally {
+      this.isProcessing = false
+      console.log(`✅ [SENTENCE-QUEUE] Queue processing completed`)
+    }
+  }
+
+  // Method to interrupt the streaming processor
+  interrupt() {
+    console.log(`🛑 [STREAMING-LLM] Interrupting streaming processor...`)
+    if (this.ttsProcessor) {
+      this.ttsProcessor.interrupt()
+    }
+    this.isProcessing = false
+    this.sentenceQueue = [] // Clear remaining sentences
+    this.currentBuffer = ""
+  }
+
+  // Method to get current status
+  getStatus() {
+    return {
+      isProcessing: this.isProcessing,
+      queueLength: this.sentenceQueue.length,
+      currentBuffer: this.currentBuffer,
+      hasTTSProcessor: !!this.ttsProcessor
+    }
+  }
+}
+
 // Streaming OpenAI completion that emits partials via callback (reference: sanpbx-server.js)
 const processWithOpenAIStream = async (
   userMessage,
@@ -2203,7 +2434,6 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        deepgramUrl.searchParams.append("endpointing", "300")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -2253,7 +2483,14 @@ const setupUnifiedVoiceServer = (wss) => {
           if (currentTTS && isProcessing) {
             console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for new user input...")
             sttTimer.checkpoint("STT_DETECTED_UNTERRUPTION_NEEDED")
-            currentTTS.interrupt()
+            
+            // Handle both regular TTS and streaming processor interruptions
+            if (currentTTS.interrupt) {
+              currentTTS.interrupt()
+            } else if (currentTTS.ttsProcessor && currentTTS.ttsProcessor.interrupt) {
+              currentTTS.ttsProcessor.interrupt()
+            }
+            
             isProcessing = false
             processingRequestId++
             // Wait a bit for the interrupt to take effect
@@ -2335,41 +2572,29 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log("🔍 [USER-UTTERANCE] Running AI detections + streaming...")
 
-        // Kick off LLM streaming and TTS
+        // Kick off streaming LLM processing with sentence-based TTS
         let aiResponse = null
-        const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
-        currentTTS = tts
-        voiceTiming.checkpoint("TTS_PROCESSOR_CREATED")
+        const streamingProcessor = new StreamingLLMProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
+        currentTTS = streamingProcessor.ttsProcessor
+        voiceTiming.checkpoint("STREAMING_PROCESSOR_CREATED")
 
         // Start LLM processing timing
         const startLlmProcess = Date.now()
         
-        aiResponse = await processWithOpenAIStream(
+        aiResponse = await streamingProcessor.processStreamingResponse(
           text,
           conversationHistory,
-          agentConfig,
           userName
         )
         
         const llmDuration = Date.now() - startLlmProcess
-        console.log(`🧠 [LLM-TIMING] Generation completed in ${llmDuration}ms`)
+        console.log(`🧠 [LLM-TIMING] Streaming generation completed in ${llmDuration}ms`)
         voiceTiming.checkpoint("LLM_RESPONSE_GENERATED")
 
-        // Process the complete AI response through TTS queue
+        // The streaming processor handles TTS automatically as sentences are completed
         if (processingRequestId === currentRequestId && aiResponse) {
-          try {
-            console.log("🎤 [TTS-START] Starting voice synthesis...")
-            const ttsStartTime = Date.now()
-            
-            await tts.synthesizeAndStream(aiResponse)
-            
-            const ttsDuration = Date.now() - ttsStartTime
-            console.log(`🎤 [TTS-TIMING] Synthesis completed in ${ttsDuration}ms`)
-            voiceTiming.checkpoint("TTS_SYNTHESIS_COMPLETED")
-          } catch (error) {
-            console.log(`❌ [USER-UTTERANCE] TTS error: ${error.message}`)
-            voiceTiming.checkpoint("TTS_SYNTHESIS_ERROR")
-          }
+          console.log("✅ [STREAMING-LLM] Response processing completed with sentence-based TTS")
+          voiceTiming.checkpoint("STREAMING_TTS_COMPLETED")
         }
 
         // Follow-up now handled inside processWithOpenAIStream
