@@ -323,23 +323,16 @@ const normalizeLeadStatus = (value, fallback = 'maybe') => {
 };
 
 const VALID_SARVAM_VOICES = new Set([
-  "abhilash","anushka","meera","pavithra","maitreyi","arvind","amol","amartya","diya","neel","misha","vian","arjun","maya","manisha","vidya","arya","karun","hitesh"
+  'anushka', 'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh',
+  'aditya', 'isha', 'ritu', 'chirag', 'harsh', 'sakshi', 'priya', 'neha',
+  'rahul', 'pooja', 'rohan', 'simran', 'kavya', 'anjali', 'sneha', 'kiran',
+  'vikram', 'rajesh', 'sunita', 'tara', 'anirudh', 'kriti', 'ishaan'
 ])
 
-const getValidSarvamVoice = (voiceSelection = "pavithra") => {
+const getValidSarvamVoice = (voiceSelection = "anushka") => {
   const normalized = (voiceSelection || "").toString().trim().toLowerCase()
   if (VALID_SARVAM_VOICES.has(normalized)) return normalized
-  const voiceMapping = {
-    "male-professional": "arvind",
-    "female-professional": "pavithra",
-    "male-friendly": "amol",
-    "female-friendly": "maya",
-    neutral: "pavithra",
-    default: "pavithra",
-    male: "arvind",
-    female: "pavithra",
-  }
-  return voiceMapping[normalized] || "pavithra"
+  return "anushka"
 }
 
 // Intelligent lead status detection using OpenAI
@@ -1852,7 +1845,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.streamSid = streamSid
       this.callLogger = callLogger
       this.sarvamLanguage = getSarvamLanguage((ws.sessionAgentConfig?.language || 'en').toLowerCase())
-      this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra")
+      this.voice = getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "anushka")
       this.isInterrupted = false
       this.currentAudioStreaming = null
       this.totalAudioBytes = 0
