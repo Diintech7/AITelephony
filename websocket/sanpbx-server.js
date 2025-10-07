@@ -1763,9 +1763,41 @@ const setupSanPbxWebSocketServer = (ws) => {
       let aiResponse = null
       const tts = createTtsProcessor(ws, streamId, callLogger)
       currentTTS = tts
-      let sentIndex = 0
-      const MIN_TOKENS = 10
-      const MAX_TOKENS = 22
+      let sentenceBuffer = ""
+      const sentenceQueue = []
+      let isSentenceProcessing = false
+      const getSentenceRegex = (lang) => {
+        const l = (agentConfig?.language || lang || 'en').toLowerCase()
+        if (l === 'hi') return /[।!?]+/
+        return /[.!?]+/
+      }
+      const sentenceRegex = getSentenceRegex(currentLanguage)
+      const processSentenceQueue = async () => {
+        if (isSentenceProcessing) return
+        isSentenceProcessing = true
+        try {
+          while (processingRequestId === currentRequestId && sentenceQueue.length > 0) {
+            // Batch 1-3 sentences depending on total length
+            const batch = []
+            const first = sentenceQueue[0] || ''
+            const second = sentenceQueue[1] || ''
+            const third = sentenceQueue[2] || ''
+            if (sentenceQueue.length >= 3 && (first.length + second.length + third.length) < 150) {
+              batch.push(sentenceQueue.shift(), sentenceQueue.shift(), sentenceQueue.shift())
+            } else if (sentenceQueue.length >= 2 && (first.length + second.length < 120 || first.length < 20 || second.length < 20)) {
+              batch.push(sentenceQueue.shift(), sentenceQueue.shift())
+            } else {
+              batch.push(sentenceQueue.shift())
+            }
+            const chunkText = batch.filter(Boolean).join(' ').trim()
+            if (chunkText) {
+              try { await tts.enqueueText(chunkText) } catch (_) {}
+            }
+          }
+        } finally {
+          isSentenceProcessing = false
+        }
+      }
       aiResponse = await processWithOpenAIStream(
         text,
         conversationHistory,
@@ -1773,17 +1805,23 @@ const setupSanPbxWebSocketServer = (ws) => {
         userName,
         async (partial) => {
           if (processingRequestId !== currentRequestId) return
-          if (!partial || partial.length <= sentIndex) return
-          // Process in 5–8 token chunks
-          let pending = partial.slice(sentIndex)
-          while (pending.trim()) {
-            const tokens = pending.trim().split(/\s+/)
-            if (tokens.length < MIN_TOKENS) break
-            const take = Math.min(MAX_TOKENS, tokens.length)
-            const chunkText = tokens.slice(0, take).join(' ')
-            sentIndex += pending.indexOf(chunkText) + chunkText.length
-            try { await tts.enqueueText(chunkText) } catch (_) {}
-            pending = partial.slice(sentIndex)
+          if (!partial) return
+          // Append to buffer and extract complete sentences by regex
+          const newPortion = partial.slice(sentenceBuffer.length)
+          if (!newPortion) return
+          sentenceBuffer += newPortion
+          let match
+          // Extract sentences ending with punctuation
+          while ((match = sentenceRegex.exec(sentenceBuffer)) !== null) {
+            const endIndex = match.index + match[0].length
+            const completeSentence = sentenceBuffer.slice(0, endIndex).trim()
+            if (completeSentence) sentenceQueue.push(completeSentence)
+            sentenceBuffer = sentenceBuffer.slice(endIndex)
+            // Reset regex lastIndex for new buffer
+            sentenceRegex.lastIndex = 0
+          }
+          if (sentenceQueue.length > 0 && !isSentenceProcessing) {
+            processSentenceQueue().catch(() => {})
           }
         }
       )
@@ -1792,8 +1830,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (processingRequestId === currentRequestId && aiResponse && aiResponse.length > sentIndex) {
         const tail = aiResponse.slice(sentIndex).trim()
         if (tail) {
-          try { await currentTTS.enqueueText(tail) } catch (_) {}
-          sentIndex = aiResponse.length
+          sentenceQueue.push(tail)
+          try { await processSentenceQueue() } catch (_) {}
         }
       }
       
