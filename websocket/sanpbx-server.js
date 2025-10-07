@@ -2079,10 +2079,14 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.pendingRequests = new Map() // id -> { resolve, reject, audioChunks: [] }
       this.isProcessingQueue = false
       this.pendingQueue = [] // text FIFO
+  	  this.recentTexts = new Set()
+  	  this.lastQueuedText = null
+  	  this.generation = 0
     }
 
     interrupt() {
       this.isInterrupted = true
+  	  this.generation++
       if (this.currentAudioStreaming) {
         this.currentAudioStreaming.interrupt = true
       }
@@ -2165,9 +2169,9 @@ const setupSanPbxWebSocketServer = (ws) => {
           const pcmChunk = extractPcmLinear16Mono8kBase64(incomingAudio)
           this.streamAudioOptimizedForSIP(pcmChunk).catch(() => {})
         }
-      } else if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
-        const combined = req.audioChunks.join('')
-        req.resolve(combined)
+  	  } else if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
+  	    // We already streamed chunks live; avoid double-streaming the combined audio
+  	    try { req.resolve('ALREADY_STREAMED') } catch (_) {}
         this.pendingRequests.delete(Number(rid))
       } else if (status === 'error') {
         // Retry once per policy
@@ -2212,6 +2216,19 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     async enqueueText(text) {
       if (this.isInterrupted) return
+  	  try {
+  	    const normalized = String(text || '').trim()
+  	    if (!normalized) return
+  	    if (this.lastQueuedText && this.lastQueuedText === normalized) return
+  	    if (this.recentTexts.has(normalized)) return
+  	    this.lastQueuedText = normalized
+  	    this.recentTexts.add(normalized)
+  	    // keep recentTexts small
+  	    if (this.recentTexts.size > 8) {
+  	      const first = this.recentTexts.values().next().value
+  	      this.recentTexts.delete(first)
+  	    }
+  	  } catch (_) {}
       this.pendingQueue.push(text)
       if (!this.isProcessingQueue) this.processQueue().catch(() => {})
     }
@@ -2223,8 +2240,10 @@ const setupSanPbxWebSocketServer = (ws) => {
     async processQueue() {
       if (this.isProcessingQueue) return
       this.isProcessingQueue = true
+  	  const startedGeneration = this.generation
       try {
-        while (!this.isInterrupted && this.pendingQueue.length > 0) {
+  	    while (!this.isInterrupted && this.pendingQueue.length > 0) {
+  	      if (startedGeneration !== this.generation) break
           const text = this.pendingQueue.shift()
           let audioBase64 = null
           try {
@@ -2235,7 +2254,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             audioBase64 = null
           }
           if (this.isInterrupted) break
-          if (audioBase64) {
+  	      // Skip streaming if chunks were already streamed live
+  	      if (audioBase64 && audioBase64 !== 'ALREADY_STREAMED') {
             const pcm = extractPcmLinear16Mono8kBase64(audioBase64)
             await this.streamAudioOptimizedForSIP(pcm)
             await new Promise(r => setTimeout(r, 60))
@@ -2251,6 +2271,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       const audioBuffer = Buffer.from(audioBase64, "base64")
       const streamingSession = { interrupt: false }
       this.currentAudioStreaming = streamingSession
+  	  const currentGeneration = this.generation
       const CHUNK_SIZE = 320
       let position = 0
       // Pre-roll one silence chunk to avoid first-chunk clipping on SIP
@@ -2262,7 +2283,8 @@ const setupSanPbxWebSocketServer = (ws) => {
           await new Promise(r => setTimeout(r, 20))
         }
       } catch (_) {}
-      while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+  	  while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+  	    if (currentGeneration !== this.generation) break
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
         const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
         const mediaMessage = { event: "reverse-media", payload: padded.toString("base64"), streamId: this.streamSid, channelId: channelId, callId: callId }
