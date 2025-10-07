@@ -2057,14 +2057,21 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
   }
 
-  // Minimal Smallest.ai TTS processor for SanPBX transport
-  class SimplifiedSmallestTTSProcessor {
+  // WebSocket-based Smallest.ai TTS processor (mirrors aitota.js behavior)
+  class SimplifiedSmallestWSTTSProcessor {
     constructor(ws, streamSid, callLogger = null) {
       this.ws = ws
       this.streamSid = streamSid
       this.callLogger = callLogger
       this.isInterrupted = false
       this.currentAudioStreaming = null
+      this.smallestWs = null
+      this.smallestReady = false
+      this.keepAliveTimer = null
+      this.requestId = 0
+      this.pendingRequests = new Map() // id -> { resolve, reject, audioChunks: [] }
+      this.isProcessingQueue = false
+      this.pendingQueue = [] // text FIFO
     }
 
     interrupt() {
@@ -2072,53 +2079,118 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (this.currentAudioStreaming) {
         this.currentAudioStreaming.interrupt = true
       }
+      if (this.keepAliveTimer) {
+        clearInterval(this.keepAliveTimer)
+        this.keepAliveTimer = null
+      }
+      try { if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN) this.smallestWs.close(1000, "interrupted") } catch (_) {}
+      this.smallestWs = null
+      this.smallestReady = false
+      this.pendingRequests.clear()
+      this.pendingQueue = []
     }
 
-    async synthesizeToBuffer(text) {
-      if (!API_KEYS.smallest) {
-        throw new Error("Smallest API key not configured")
-      }
-      // Use Smallest lightning REST endpoint (PCM 8k if available); fallback to WAV
-      const resp = await fetch("https://waves-api.smallest.ai/api/v1/lightning-v2/get_speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${API_KEYS.smallest}`,
-        },
-        body: JSON.stringify({
-          text,
-          // Voice id/name can be mapped from agent config if needed later
-          format: "wav"
-        })
+    startKeepAlive() {
+      if (this.keepAliveTimer) clearInterval(this.keepAliveTimer)
+      this.keepAliveTimer = setInterval(() => {
+        if (!this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN || this.isInterrupted) return
+        try {
+          if (typeof this.smallestWs.ping === 'function') this.smallestWs.ping()
+          else this.smallestWs.send(JSON.stringify({ type: "ping" }))
+        } catch (_) {}
+      }, 30000)
+    }
+
+    async connectToSmallest() {
+      if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN) return
+      if (!API_KEYS.smallest) throw new Error("Smallest API key not configured")
+      await new Promise((resolve, reject) => {
+        try {
+          const wsConn = new WebSocket("wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream", {
+            headers: { Authorization: `Bearer ${API_KEYS.smallest}` },
+          })
+          this.smallestWs = wsConn
+          const timeout = setTimeout(() => reject(new Error("Smallest WS connect timeout")), 4000)
+          wsConn.onopen = () => {
+            clearTimeout(timeout)
+            this.smallestReady = true
+            this.startKeepAlive()
+            resolve()
+          }
+          wsConn.onmessage = (evt) => {
+            try { this.handleSmallestMessage(JSON.parse(evt.data)) } catch (_) {}
+          }
+          wsConn.onclose = () => {
+            this.smallestReady = false
+            if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
+          }
+          wsConn.onerror = () => {}
+        } catch (e) { reject(e) }
       })
-      if (!resp.ok) {
-        const t = await resp.text().catch(() => "")
-        throw new Error(`Smallest API error: ${resp.status}${t ? ` - ${t}` : ""}`)
+    }
+
+    handleSmallestMessage(msg) {
+      const rid = msg?.request_id
+      if (!rid) return
+      const req = this.pendingRequests.get(Number(rid))
+      if (!req) return
+      const status = msg?.status || msg?.type
+      if (status === 'audio_chunk' || status === 'chunk') {
+        if (typeof msg.audio === 'string') req.audioChunks.push(msg.audio)
+      } else if (status === 'completed' || status === 'done' || status === 'success') {
+        const combined = req.audioChunks.join('')
+        req.resolve(combined)
+        this.pendingRequests.delete(Number(rid))
+      } else if (status === 'error') {
+        req.reject(new Error(msg?.message || 'Smallest error'))
+        this.pendingRequests.delete(Number(rid))
       }
-      const data = await resp.json()
-      const audioBase64 = data?.audio || data?.audios?.[0] || null
-      if (!audioBase64) {
-        throw new Error("No audio data received from Smallest API")
-      }
-      return audioBase64
+    }
+
+    async processSingle(text) {
+      await this.connectToSmallest()
+      const id = ++this.requestId
+      return new Promise((resolve, reject) => {
+        this.pendingRequests.set(id, { resolve, reject, audioChunks: [] })
+        const payload = { request_id: String(id), text }
+        try { this.smallestWs.send(JSON.stringify(payload)) } catch (e) { reject(e) }
+      })
     }
 
     async enqueueText(text) {
       if (this.isInterrupted) return
-      try {
-        const audioBase64 = await this.synthesizeToBuffer(text)
-        if (this.isInterrupted) return
-        const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
-        await this.streamAudioOptimizedForSIP(pcmBase64)
-      } catch (e) {
-        if (!this.isInterrupted) {
-          console.log(`[SMALLEST-TTS] Error: ${e.message}`)
-        }
-      }
+      this.pendingQueue.push(text)
+      if (!this.isProcessingQueue) this.processQueue().catch(() => {})
     }
 
     async synthesizeAndStream(text) {
       return this.enqueueText(text)
+    }
+
+    async processQueue() {
+      if (this.isProcessingQueue) return
+      this.isProcessingQueue = true
+      try {
+        while (!this.isInterrupted && this.pendingQueue.length > 0) {
+          const text = this.pendingQueue.shift()
+          let audioBase64 = null
+          try {
+            audioBase64 = await this.processSingle(text)
+          } catch (e) {
+            if (this.isInterrupted) break
+            console.log(`[SMALLEST-TTS] WS synth error: ${e.message}`)
+            audioBase64 = null
+          }
+          if (this.isInterrupted) break
+          if (audioBase64) {
+            const pcm = extractPcmLinear16Mono8kBase64(audioBase64)
+            await this.streamAudioOptimizedForSIP(pcm)
+            await new Promise(r => setTimeout(r, 60))
+          }
+        }
+      } finally {
+        this.isProcessingQueue = false
+      }
     }
 
     async streamAudioOptimizedForSIP(audioBase64) {
@@ -2126,38 +2198,27 @@ const setupSanPbxWebSocketServer = (ws) => {
       const audioBuffer = Buffer.from(audioBase64, "base64")
       const streamingSession = { interrupt: false }
       this.currentAudioStreaming = streamingSession
-
       const CHUNK_SIZE = 320
       let position = 0
       while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
         const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
-        const mediaMessage = {
-          event: "reverse-media",
-          payload: padded.toString("base64"),
-          streamId: this.streamSid,
-          channelId: channelId,
-          callId: callId,
-        }
+        const mediaMessage = { event: "reverse-media", payload: padded.toString("base64"), streamId: this.streamSid, channelId: channelId, callId: callId }
         if (this.ws.readyState === WebSocket.OPEN && !this.isInterrupted) {
           try { this.ws.send(JSON.stringify(mediaMessage)) } catch (_) { break }
         } else { break }
         position += CHUNK_SIZE
-        if (position < audioBuffer.length && !this.isInterrupted) {
-          await new Promise(r => setTimeout(r, 20))
-        }
+        if (position < audioBuffer.length && !this.isInterrupted) await new Promise(r => setTimeout(r, 20))
       }
       this.currentAudioStreaming = null
     }
-
-    getStats() { return {} }
   }
 
   // TTS factory to choose provider per agent
   const createTtsProcessor = (ws, streamSid, callLogger) => {
     const provider = (ws.sessionAgentConfig?.voiceServiceProvider || ws.sessionAgentConfig?.ttsSelection || "sarvam").toLowerCase()
     if (provider === "smallest") {
-      return new SimplifiedSmallestTTSProcessor(ws, streamSid, callLogger)
+      return new SimplifiedSmallestWSTTSProcessor(ws, streamSid, callLogger)
     }
     return new SimplifiedSarvamTTSProcessor(ws, streamSid, callLogger)
   }
