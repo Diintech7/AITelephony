@@ -1910,6 +1910,9 @@ class SimplifiedSmallestTTSProcessor {
           this.smallestReady = false
           this.smallestWs = null
           
+          // Stop keep-alive timer
+          this.stopKeepAlive()
+          
           // Auto-reconnect if not interrupted and within retry limit
           if (!this.isInterrupted && event.code !== 1000 && this.connectionRetryCount < this.maxRetries) {
             console.log("🔄 [SMALLEST-TTS] Attempting to reconnect in 2 seconds...")
@@ -1950,22 +1953,30 @@ class SimplifiedSmallestTTSProcessor {
       clearInterval(this.keepAliveTimer)
     }
     
-    // Send ping every 30 seconds to keep connection alive
-    this.keepAliveTimer = setInterval(() => {
+    // Send a small TTS request every 45 seconds to keep connection alive
+    this.keepAliveTimer = setInterval(async () => {
       if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
-          // Send a ping message to keep connection alive
-          this.smallestWs.ping()
-          console.log("🏓 [SMALLEST-TTS] Keep-alive ping sent")
+          // Send a minimal TTS request to keep connection alive
+          const keepAliveRequest = {
+            text: " ", // Single space to minimize processing
+            voice_id: "ryan",
+            model_id: "eleven_turbo_v2_5",
+            output_format: "pcm_16000",
+            stream: true
+          }
+          
+          this.smallestWs.send(JSON.stringify(keepAliveRequest))
+          console.log("🏓 [SMALLEST-TTS] Keep-alive request sent")
         } catch (error) {
-          console.log("❌ [SMALLEST-TTS] Keep-alive ping failed:", error.message)
+          console.log("❌ [SMALLEST-TTS] Keep-alive request failed:", error.message)
         }
       } else {
         // Clear timer if connection is not open
         clearInterval(this.keepAliveTimer)
         this.keepAliveTimer = null
       }
-    }, 30000) // 30 seconds
+    }, 45000) // 45 seconds
   }
 
   stopKeepAlive() {
@@ -1977,9 +1988,9 @@ class SimplifiedSmallestTTSProcessor {
 
   async retryRequest(requestId, request) {
     if (this.connectionRetryCount >= this.maxRetries) {
-      console.log(`❌ [SMALLEST-TTS] Max retries reached for request ${requestId}, rejecting`)
-      request.reject(new Error("TTS request failed after maximum retries"))
-      this.pendingRequests.delete(requestId)
+      console.log(`❌ [SMALLEST-TTS] Max retries reached for request ${requestId}, creating fallback audio`)
+      // Create a fallback audio instead of rejecting
+      this.createFallbackAudio(request.text, request)
       return
     }
 
@@ -2001,10 +2012,32 @@ class SimplifiedSmallestTTSProcessor {
     } catch (error) {
       console.log(`❌ [SMALLEST-TTS] Retry failed for request ${requestId}:`, error.message)
       if (this.connectionRetryCount >= this.maxRetries) {
-        request.reject(error)
-        this.pendingRequests.delete(requestId)
+        // Create fallback audio instead of rejecting
+        this.createFallbackAudio(request.text, request)
       }
     }
+  }
+
+  createFallbackAudio(text, request) {
+    console.log(`🔧 [SMALLEST-TTS] Creating fallback audio for: "${text.substring(0, 30)}..."`)
+    
+    // Create a simple beep or silence as fallback
+    // This ensures the conversation flow continues even if TTS fails
+    const fallbackAudio = Buffer.alloc(1600) // 100ms of silence at 8kHz
+    fallbackAudio.fill(0)
+    
+    // Stream the fallback audio
+    this.streamAudioOptimizedForSIP(fallbackAudio.toString('base64'))
+      .then(() => {
+        console.log(`✅ [SMALLEST-TTS] Fallback audio sent for: "${text.substring(0, 30)}..."`)
+        request.resolve("FALLBACK_COMPLETED")
+        this.pendingRequests.delete(request.requestId)
+      })
+      .catch(error => {
+        console.log(`❌ [SMALLEST-TTS] Fallback audio failed:`, error.message)
+        request.reject(error)
+        this.pendingRequests.delete(request.requestId)
+      })
   }
 
   handleSmallestResponse(data) {
@@ -2069,6 +2102,20 @@ class SimplifiedSmallestTTSProcessor {
     // Start timing for individual TTS request
     const ttsReqTiming = createTimer("TTS_INDIVIDUAL_REQUEST")
     console.log(`🎤 [TTS-REQUEST-START] Text length: ${text.length} chars`)
+
+    // Ensure connection is healthy before processing
+    if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
+      console.log("🔄 [SMALLEST-TTS] Connection not ready, reconnecting...")
+      try {
+        await this.connectToSmallest()
+        ttsReqTiming.checkpoint("TTS_CONNECTION_RECONNECTED")
+      } catch (error) {
+        console.log("❌ [SMALLEST-TTS] Failed to reconnect:", error.message)
+        // Continue with fallback audio
+        this.createFallbackAudio(text, { text, resolve: () => {}, reject: () => {} })
+        return
+      }
+    }
 
     // Add to queue instead of processing immediately
     return new Promise((resolve, reject) => {
@@ -2236,7 +2283,7 @@ class SimplifiedSmallestTTSProcessor {
       console.log(`🎤 [TTS-PROCESS-START] Processing: "${item.text.substring(0, 30)}..."`)
       timer.checkpoint("TTS_PROCESS_START")
       
-      // Ensure WebSocket connection
+      // Ensure WebSocket connection is healthy
       if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
         console.log("🔄 [SMALLEST-TTS] Connecting WebSocket...")
         timer.checkpoint("TTS_WEBSOCKET_DISCONNECTED")
@@ -2248,6 +2295,8 @@ class SimplifiedSmallestTTSProcessor {
         await this.connectToSmallest()
         timer.checkpoint("TTS_WEBSOCKET_CONNECTED")
       } else {
+        // Test connection health
+        console.log("✅ [SMALLEST-TTS] WebSocket connection is healthy")
         timer.checkpoint("TTS_WEBSOCKET_READY")
       }
 
