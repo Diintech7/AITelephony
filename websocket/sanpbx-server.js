@@ -2480,8 +2480,10 @@ const setupSanPbxWebSocketServer = (ws) => {
         let lastLen = 0
         const shouldFlush = (prev, curr) => {
           const delta = curr.slice(prev)
-          if (delta.length >= 60) return true
-          return /[.!?]\s?$/.test(curr)
+          // Flush only on sentence boundary to avoid mid-sentence cuts
+          if (/[.!?]\s?$/.test(curr)) return true
+          // Fallback: if the delta is very long, allow a flush to prevent latency
+          return delta.length >= 140
         }
         const tts = createTtsProcessor(ws, streamSid, callLogger)
         currentTTS = tts
@@ -2842,10 +2844,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("🎯 [SANPBX-CALL-SETUP] StreamSID:", streamId)
           console.log("🎯 [SANPBX-CALL-SETUP] CallSID:", callId)
 
-          // Connect to Deepgram for speech recognition
-          await connectToDeepgram()
-
-          // Send greeting after call is established
+          // Send greeting first to avoid STT echo/disturbance, then connect STT
           let greeting = agentConfig.firstMessage || "Hello! How can I help you today?"
           if (sessionUserName && sessionUserName.trim()) {
             const base = agentConfig.firstMessage || "How can I help you today?"
@@ -2863,6 +2862,9 @@ const setupSanPbxWebSocketServer = (ws) => {
           currentTTS = createTtsProcessor(ws, streamId, callLogger)
           await currentTTS.synthesizeAndStream(greeting)
           console.log("✅ [SANPBX-TTS] Greeting TTS completed")
+
+          // Now connect to Deepgram for speech recognition after greeting
+          await connectToDeepgram()
           break
         }
 
