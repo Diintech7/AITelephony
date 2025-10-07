@@ -1233,6 +1233,33 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
   }
 
+  // Central SIP audio FIFO queue to serialize all reverse-media sends
+  const sipAudioQueue = []
+  let isSipStreaming = false
+  const enqueueSipAudio = async (pcmBase64) => {
+    try {
+      if (!pcmBase64 || !pcmBase64.trim()) return
+      sipAudioQueue.push(pcmBase64)
+      if (!isSipStreaming) {
+        processSipAudioQueue().catch(() => {})
+      }
+    } catch (_) {}
+  }
+  const processSipAudioQueue = async () => {
+    if (isSipStreaming) return
+    isSipStreaming = true
+    try {
+      while (sipAudioQueue.length > 0) {
+        const audioItem = sipAudioQueue.shift()
+        try { await streamAudioToSanIPPBX(audioItem) } catch (_) {}
+        // tiny gap between items to avoid boundary artifacts
+        await new Promise(r => setTimeout(r, 40))
+      }
+    } finally {
+      isSipStreaming = false
+    }
+  }
+
   // Simple TTS queue to serialize chunk playback and avoid overlaps
   let ttsQueue = []
   let ttsBusy = false
@@ -1618,15 +1645,15 @@ const setupSanPbxWebSocketServer = (ws) => {
       // Convert WAV (if provided) to raw PCM 16-bit mono 8kHz before streaming
       const pcmBase64 = extractPcmLinear16Mono8kBase64(audioBase64)
 
-      // Stream audio in SanIPPBX format (reverse-media)
-      await streamAudioToSanIPPBX(pcmBase64)
+      // Enqueue audio to central SIP queue to ensure one-by-one playback
+      await enqueueSipAudio(pcmBase64)
       
     } catch (error) {
       console.error("[TTS] Error:", error.message)
 
       // Send simple silence as fallback
       const fallbackAudio = Buffer.alloc(8000).toString("base64") // 1 second of silence
-      await streamAudioToSanIPPBX(fallbackAudio)
+      await enqueueSipAudio(fallbackAudio)
     }
   }
 
