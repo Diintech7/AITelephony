@@ -1209,6 +1209,11 @@ class StreamingLLMProcessor {
       }
 
       console.log(`🕒 [STREAMING-LLM] ${timer.end()}ms - Streaming completed (${accumulated.length} chars)`)
+
+      // Ensure any leftover sentences are flushed to TTS (including single last sentence)
+      try {
+        await this.flushAllPending()
+      } catch (_) {}
       return (accumulated || '').trim() || null
     } catch (error) {
       console.error(`❌ [STREAMING-LLM] ${timer.end()}ms - Error: ${error.message}`)
@@ -1321,6 +1326,37 @@ class StreamingLLMProcessor {
     } finally {
       this.isProcessing = false
       console.log(`✅ [SENTENCE-QUEUE] Queue processing completed`)
+    }
+  }
+
+  // Force flush any pending sentences, even if only one remains
+  async flushAllPending() {
+    if (this.currentBuffer.trim()) {
+      this.sentenceQueue.push(this.currentBuffer.trim())
+      this.currentBuffer = ""
+    }
+    if (this.sentenceQueue.length === 0) return
+    const wasProcessing = this.isProcessing
+    try {
+      // Temporarily force processing regardless of batching heuristics
+      this.isProcessing = false
+      while (this.sentenceQueue.length > 0) {
+        const batch = []
+        // Drain up to 3 sentences, or whatever remains
+        for (let i = 0; i < 3 && this.sentenceQueue.length > 0; i++) {
+          batch.push(this.sentenceQueue.shift())
+        }
+        const combinedText = batch.join(' ')
+        if (this.ttsProcessor && !this.ttsProcessor.isInterrupted && combinedText.trim()) {
+          try {
+            await this.ttsProcessor.synthesizeAndStream(combinedText)
+          } catch (_) {}
+        } else {
+          break
+        }
+      }
+    } finally {
+      this.isProcessing = wasProcessing && this.sentenceQueue.length > 0
     }
   }
 
