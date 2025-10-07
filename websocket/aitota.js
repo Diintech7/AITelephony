@@ -1953,30 +1953,27 @@ class SimplifiedSmallestTTSProcessor {
       clearInterval(this.keepAliveTimer)
     }
     
-    // Send a small TTS request every 45 seconds to keep connection alive
-    this.keepAliveTimer = setInterval(async () => {
+    // Use WebSocket ping frames every 30 seconds to keep connection alive
+    this.keepAliveTimer = setInterval(() => {
       if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
         try {
-          // Send a minimal TTS request to keep connection alive
-          const keepAliveRequest = {
-            text: " ", // Single space to minimize processing
-            voice_id: "ryan",
-            model_id: "eleven_turbo_v2_5",
-            output_format: "pcm_16000",
-            stream: true
+          if (typeof this.smallestWs.ping === "function") {
+            this.smallestWs.ping()
+            console.log("🏓 [SMALLEST-TTS] Keep-alive ping sent")
+          } else {
+            // Fallback: send a lightweight noop message if ping is unavailable
+            this.smallestWs.send(JSON.stringify({ type: "ping" }))
+            console.log("🏓 [SMALLEST-TTS] Keep-alive noop sent")
           }
-          
-          this.smallestWs.send(JSON.stringify(keepAliveRequest))
-          console.log("🏓 [SMALLEST-TTS] Keep-alive request sent")
         } catch (error) {
-          console.log("❌ [SMALLEST-TTS] Keep-alive request failed:", error.message)
+          console.log("❌ [SMALLEST-TTS] Keep-alive ping failed:", error.message)
         }
       } else {
         // Clear timer if connection is not open
         clearInterval(this.keepAliveTimer)
         this.keepAliveTimer = null
       }
-    }, 45000) // 45 seconds
+    }, 30000)
   }
 
   stopKeepAlive() {
