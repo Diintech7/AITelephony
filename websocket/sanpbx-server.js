@@ -22,9 +22,9 @@ const SANPBX_API_CONFIG = {
   disconnectEndpoint: "/calldisconnect"
 }
 
-// Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
-  console.error("❌ Missing required API keys in environment variables")
+// Validate API keys (require Deepgram + OpenAI, and at least one TTS: Sarvam or Smallest)
+if (!API_KEYS.deepgram || !API_KEYS.openai || (!API_KEYS.sarvam && !API_KEYS.smallest)) {
+  console.error("❌ Missing required API keys: need DEEPGRAM_API_KEY, OPENAI_API_KEY, and either SARVAM_API_KEY or SMALLEST_API_KEY")
   process.exit(1)
 }
 
@@ -1214,7 +1214,11 @@ const setupSanPbxWebSocketServer = (ws) => {
     try {
       while (ttsQueue.length > 0) {
         const item = ttsQueue.shift()
-        await synthesizeAndStreamAudio(item.text, item.language)
+        try {
+          const tts = createTtsProcessor(ws, streamId, callLogger)
+          currentTTS = tts
+          await tts.synthesizeAndStream(item.text)
+        } catch (_) {}
       }
     } finally {
       ttsBusy = false
@@ -1537,9 +1541,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
-        headers: {
+      headers: {
           "Content-Type": "application/json",
-          "API-Subscription-Key": SARVAM_API_KEY,
+          "API-Subscription-Key": API_KEYS.sarvam,
           Connection: "keep-alive",
         },
         body: JSON.stringify({
@@ -2350,7 +2354,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          Authorization: `Bearer ${API_KEYS.openai}`,
         },
         body: JSON.stringify({
           model: "gpt-4o-mini",
@@ -2442,7 +2446,11 @@ const setupSanPbxWebSocketServer = (ws) => {
         } catch (_) {}
         // Live update after AI response
         await updateLiveCallLog()
-        await synthesizeAndStreamAudio(quickResponse)
+        try {
+          const tts = createTtsProcessor(ws, streamId, callLogger)
+          currentTTS = tts
+          await tts.synthesizeAndStream(quickResponse)
+        } catch (_) {}
         console.log(`[PROCESS] TTS finished for quick response.`)
       } else if (isResponseActive(responseId)) {
         console.log(`[PROCESS] Getting AI response (streaming) for: "${transcript}"`)
