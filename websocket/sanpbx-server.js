@@ -1537,7 +1537,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         body: JSON.stringify({
           inputs: [text],
           target_language_code: getSarvamLanguage(language),
-          speaker: getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra"),
+          speaker: "anushka",
           pitch: 0,
           pace: 1.1,
           loudness: 1.0,
