@@ -1814,8 +1814,8 @@ class SimplifiedSmallestTTSProcessor {
     this.requestId = 0
     this.pendingRequests = new Map() // requestId -> { resolve, reject, text, audioChunks }
     this.isProcessing = false // Prevent multiple simultaneous requests
-    this.audioQueue = [] // Queue for audio chunks to be sent to SIP
-    this.isStreamingAudio = false // Prevent overlapping audio streaming
+    this.audioQueue = [] // Queue for audio items to be sent to SIP
+    this.isProcessingSIPQueue = false // Prevent overlapping SIP audio processing
     this.streamingRequests = new Set() // Track active streaming requests
     this.completedRequests = new Set() // Track completed requests
   }
@@ -1823,7 +1823,7 @@ class SimplifiedSmallestTTSProcessor {
   interrupt() {
     this.isInterrupted = true
     this.isProcessing = false
-    this.isStreamingAudio = false
+    this.isProcessingSIPQueue = false
     
     if (this.currentAudioStreaming) {
       this.currentAudioStreaming.interrupt = true
@@ -2307,19 +2307,61 @@ class SimplifiedSmallestTTSProcessor {
   async streamAudioOptimizedForSIP(audioBase64) {
     if (this.isInterrupted) return
 
-    // Wait for any ongoing audio streaming to complete
-    while (this.isStreamingAudio && !this.isInterrupted) {
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
+    // Add to SIP audio queue instead of streaming immediately
+    const audioBuffer = Buffer.from(audioBase64, "base64")
+    const estimatedMs = Math.floor(audioBuffer.length / ((8000 * 2) / 1000))
     
+    console.log(`🎧 [SIP-AUDIO-QUEUE] Adding ${audioBuffer.length} bytes (${estimatedMs}ms) to queue`)
+    
+    // Add to queue with proper timing
+    this.audioQueue.push({
+      buffer: audioBuffer,
+      timestamp: Date.now(),
+      estimatedDuration: estimatedMs
+    })
+    
+    // Start processing queue if not already processing
+    if (!this.isProcessingSIPQueue) {
+      this.processSIPAudioQueue()
+    }
+  }
+
+  async processSIPAudioQueue() {
+    if (this.isProcessingSIPQueue || this.audioQueue.length === 0) return
+    
+    this.isProcessingSIPQueue = true
+    console.log(`🔄 [SIP-AUDIO-QUEUE] Processing ${this.audioQueue.length} audio items in queue`)
+    
+    try {
+      while (this.audioQueue.length > 0 && !this.isInterrupted) {
+        const audioItem = this.audioQueue.shift()
+        
+        if (this.isInterrupted) {
+          console.log(`🛑 [SIP-AUDIO-QUEUE] Interrupted, stopping queue processing`)
+          break
+        }
+        
+        await this.streamSingleAudioItem(audioItem)
+        
+        // Small delay between audio items to prevent overlap
+        if (this.audioQueue.length > 0) {
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+      }
+    } finally {
+      this.isProcessingSIPQueue = false
+      console.log(`✅ [SIP-AUDIO-QUEUE] Queue processing completed`)
+    }
+  }
+
+  async streamSingleAudioItem(audioItem) {
     if (this.isInterrupted) return
     
-    this.isStreamingAudio = true
-    const audioBuffer = Buffer.from(audioBase64, "base64")
+    const { buffer: audioBuffer, estimatedDuration } = audioItem
     const streamingSession = { interrupt: false }
     this.currentAudioStreaming = streamingSession
 
-    const SAMPLE_RATE = 8000 // Updated to 8kHz
+    const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
     // Use 20ms chunks at 8kHz, 16-bit mono → 20ms * 16 bytes/ms = 320 bytes
@@ -2329,11 +2371,7 @@ class SimplifiedSmallestTTSProcessor {
     let chunkIndex = 0
     let successfulChunks = 0
 
-    // Minimal logging for performance
-    if (chunkIndex === 0) {
-      const estimatedMs = Math.floor(audioBuffer.length / BYTES_PER_MS)
-      console.log(`🎧 [SMALLEST-STREAM] Streaming ${audioBuffer.length} bytes (${estimatedMs}ms)`)
-    }
+    console.log(`🎧 [SIP-AUDIO-ITEM] Streaming ${audioBuffer.length} bytes (${estimatedDuration}ms) in ${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)} chunks`)
 
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
       const remaining = audioBuffer.length - position
@@ -2353,12 +2391,15 @@ class SimplifiedSmallestTTSProcessor {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
         } catch (error) {
+          console.log(`❌ [SIP-AUDIO-ITEM] Error sending chunk ${chunkIndex}: ${error.message}`)
           break
         }
       } else {
+        console.log(`❌ [SIP-AUDIO-ITEM] WebSocket not ready, stopping stream`)
         break
       }
 
+      // Proper timing between chunks
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
         const delayMs = Math.max(chunkDurationMs - 2, 10)
@@ -2370,16 +2411,21 @@ class SimplifiedSmallestTTSProcessor {
     }
 
     this.currentAudioStreaming = null
-    this.isStreamingAudio = false
-    // Minimal completion logging
+    
     if (successfulChunks > 0) {
-      console.log(`✅ [SMALLEST-STREAM] Sent ${successfulChunks} chunks`)
+      console.log(`✅ [SIP-AUDIO-ITEM] Completed ${successfulChunks} chunks`)
+    } else {
+      console.log(`⚠️ [SIP-AUDIO-ITEM] No chunks sent`)
     }
   }
 
   getStats() {
     return {
       totalAudioBytes: this.totalAudioBytes,
+      audioQueueLength: this.audioQueue.length,
+      isProcessingSIPQueue: this.isProcessingSIPQueue,
+      pendingQueueLength: this.pendingQueue.length,
+      isProcessing: this.isProcessing
     }
   }
 }
