@@ -1230,8 +1230,10 @@ class StreamingLLMProcessor {
         this.sentenceQueue.push(completeSentence)
         console.log(`📝 [SENTENCE-QUEUE] Added sentence: "${completeSentence}"`)
         
-        // Process queue if not already processing
-        if (!this.isProcessing) {
+        // Check if we should process now (2-3 sentences or if sentences are short)
+        const shouldProcess = this.shouldProcessSentences()
+        
+        if (shouldProcess && !this.isProcessing) {
           await this.processSentenceQueue()
         }
       }
@@ -1241,12 +1243,46 @@ class StreamingLLMProcessor {
     }
   }
 
+  // Determine if we should process sentences now
+  shouldProcessSentences() {
+    if (this.sentenceQueue.length === 0) return false
+    
+    // Always process if we have 3 or more sentences
+    if (this.sentenceQueue.length >= 3) {
+      console.log(`📝 [SENTENCE-BATCH] Processing 3+ sentences (${this.sentenceQueue.length})`)
+      return true
+    }
+    
+    // Process if we have 2 sentences and at least one is short (less than 20 chars)
+    if (this.sentenceQueue.length >= 2) {
+      const hasShortSentence = this.sentenceQueue.some(sentence => sentence.length < 20)
+      if (hasShortSentence) {
+        console.log(`📝 [SENTENCE-BATCH] Processing 2 sentences (one is short)`)
+        return true
+      }
+    }
+    
+    // Process if we have 2 sentences and total length is reasonable (less than 100 chars)
+    if (this.sentenceQueue.length >= 2) {
+      const totalLength = this.sentenceQueue.reduce((sum, sentence) => sum + sentence.length, 0)
+      if (totalLength < 100) {
+        console.log(`📝 [SENTENCE-BATCH] Processing 2 sentences (total length: ${totalLength} chars)`)
+        return true
+      }
+    }
+    
+    return false
+  }
+
   async processCompleteSentence(sentence) {
     if (sentence.trim()) {
       this.sentenceQueue.push(sentence.trim())
       console.log(`📝 [SENTENCE-QUEUE] Added final sentence: "${sentence.trim()}"`)
       
-      if (!this.isProcessing) {
+      // Check if we should process now (2-3 sentences or if sentences are short)
+      const shouldProcess = this.shouldProcessSentences()
+      
+      if (shouldProcess && !this.isProcessing) {
         await this.processSentenceQueue()
       }
     }
@@ -1260,16 +1296,22 @@ class StreamingLLMProcessor {
     
     try {
       while (this.sentenceQueue.length > 0) {
-        const sentence = this.sentenceQueue.shift() // FIFO - remove first item
-        console.log(`🎤 [SENTENCE-TTS] Processing: "${sentence}"`)
+        // Determine how many sentences to process together (2-3 sentences)
+        const sentencesToProcess = this.getSentencesToProcess()
+        
+        if (sentencesToProcess.length === 0) break
+        
+        // Join sentences with a space
+        const combinedText = sentencesToProcess.join(' ')
+        console.log(`🎤 [SENTENCE-TTS] Processing ${sentencesToProcess.length} sentences: "${combinedText}"`)
         
         if (this.ttsProcessor && !this.ttsProcessor.isInterrupted) {
           try {
-            await this.ttsProcessor.synthesizeAndStream(sentence)
-            console.log(`✅ [SENTENCE-TTS] Completed: "${sentence}"`)
+            await this.ttsProcessor.synthesizeAndStream(combinedText)
+            console.log(`✅ [SENTENCE-TTS] Completed ${sentencesToProcess.length} sentences`)
           } catch (error) {
-            console.log(`❌ [SENTENCE-TTS] Error processing sentence: ${error.message}`)
-            // Continue with next sentence even if one fails
+            console.log(`❌ [SENTENCE-TTS] Error processing sentences: ${error.message}`)
+            // Continue with next batch even if one fails
           }
         } else {
           console.log(`⚠️ [SENTENCE-TTS] TTS processor interrupted, stopping queue processing`)
@@ -1280,6 +1322,33 @@ class StreamingLLMProcessor {
       this.isProcessing = false
       console.log(`✅ [SENTENCE-QUEUE] Queue processing completed`)
     }
+  }
+
+  // Get sentences to process together (2-3 sentences)
+  getSentencesToProcess() {
+    const sentences = []
+    
+    // Always take at least 2 sentences if available
+    const minSentences = Math.min(2, this.sentenceQueue.length)
+    for (let i = 0; i < minSentences; i++) {
+      sentences.push(this.sentenceQueue.shift())
+    }
+    
+    // Take a 3rd sentence if:
+    // 1. We have more sentences available AND
+    // 2. The total length would be reasonable (less than 150 chars) AND
+    // 3. Either we have 3+ sentences total OR the current batch is short
+    if (this.sentenceQueue.length > 0) {
+      const currentLength = sentences.reduce((sum, s) => sum + s.length, 0)
+      const nextSentence = this.sentenceQueue[0]
+      
+      if (currentLength + nextSentence.length < 150) {
+        sentences.push(this.sentenceQueue.shift())
+        console.log(`📝 [SENTENCE-BATCH] Taking 3rd sentence (total length: ${currentLength + nextSentence.length} chars)`)
+      }
+    }
+    
+    return sentences
   }
 
   // Method to interrupt the streaming processor
