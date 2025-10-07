@@ -2175,12 +2175,31 @@ const setupSanPbxWebSocketServer = (ws) => {
       await this.connectToSmallest()
       const id = ++this.requestId
       return new Promise((resolve, reject) => {
-        this.pendingRequests.set(id, { resolve, reject, audioChunks: [] })
+        this.pendingRequests.set(id, { resolve, reject, audioChunks: [], text })
+
+        // Build payload mirroring aitota.js
+        const agentCfg = this.ws?.sessionAgentConfig || {}
+        let voiceId = agentCfg.voiceId || 'ryan'
+        if (!voiceId && agentCfg.voiceSelection) {
+          const voiceMap = { 'male-professional': 'ryan', 'female-professional': 'sarah', 'male-friendly': 'ryan', 'female-friendly': 'sarah', 'neutral': 'ryan' }
+          voiceId = voiceMap[String(agentCfg.voiceSelection).toLowerCase()] || 'ryan'
+        }
+        const lang2 = (agentCfg.language || 'en').toLowerCase()
+        const language = lang2 === 'hi' ? 'hi' : 'en'
+
         const payload = {
           request_id: String(id),
-          text,
-          // Pass through selected voice if present
-          ...(this.ws?.sessionAgentConfig?.voiceId ? { voice: this.ws.sessionAgentConfig.voiceId } : {}),
+          voice_id: voiceId,
+          text: text,
+          max_buffer_flush_ms: 0,
+          continue: false,
+          flush: false,
+          language,
+          sample_rate: 8000,
+          speed: 1,
+          consistency: 0.5,
+          enhancement: 1,
+          similarity: 0,
         }
         try { console.log(`[SMALLEST-TTS] send request ${payload.request_id}, voice=${payload.voice || 'default'}`) } catch (_) {}
         try { this.smallestWs.send(JSON.stringify(payload)) } catch (e) { reject(e) }
