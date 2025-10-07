@@ -1538,7 +1538,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "API-Subscription-Key": SARVAM_API_KEY,
+          "API-Subscription-Key": API_KEYS.sarvam,
           Connection: "keep-alive",
         },
         body: JSON.stringify({
