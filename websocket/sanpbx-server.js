@@ -1534,20 +1534,17 @@ const setupSanPbxWebSocketServer = (ws) => {
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 3500)
 
-      // Resolve final language to use for Sarvam
-      const langToUse = "en"
-
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
+          "API-Subscription-Key": SARVAM_API_KEY,
           Connection: "keep-alive",
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: getSarvamLanguage(langToUse),
-          speaker: "anushka",
+          target_language_code: getSarvamLanguage(language),
+          speaker: getValidSarvamVoice(ws.sessionAgentConfig?.voiceSelection || "pavithra"),
           pitch: 0,
           pace: 1.1,
           loudness: 1.0,
@@ -1881,12 +1878,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       const timer = createTimer("TTS_SYNTHESIS")
       try {
-        // Auto-detect language from text (fallback to session)
-        const devanagari = /[\u0900-\u097F]/
-        const baseLang = (this.ws.sessionAgentConfig?.language || 'en').toLowerCase()
-        const effectiveLang = devanagari.test(text) ? 'hi' : baseLang
-        const targetLangCode = getSarvamLanguage(effectiveLang)
-
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
           method: "POST",
           headers: {
@@ -1895,17 +1886,20 @@ const setupSanPbxWebSocketServer = (ws) => {
           },
           body: JSON.stringify({
             inputs: [text],
-            target_language_code: targetLangCode,
-            speaker: "anushka",
-            speech_sample_rate: 8000
+            target_language_code: this.sarvamLanguage,
+            speaker: this.voice,
+            pitch: 0,
+            pace: 1.0,
+            loudness: 1.0,
+            speech_sample_rate: 8000,
+            enable_preprocessing: true,
+            model: "bulbul:v2",
           }),
         })
 
         if (!response.ok || this.isInterrupted) {
           if (!this.isInterrupted) {
-            let errorText = ''
-            try { errorText = await response.text() } catch(_) {}
-            console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}${errorText ? ` - ${errorText}` : ''}`)
+            console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
             throw new Error(`Sarvam API error: ${response.status}`)
           }
           return
@@ -1939,10 +1933,6 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     async synthesizeToBuffer(text) {
       const timer = createTimer("TTS_PREPARE")
-      const devanagari = /[\u0900-\u097F]/
-      const baseLang = (this.ws.sessionAgentConfig?.language || 'en').toLowerCase()
-      const effectiveLang = devanagari.test(text) ? 'hi' : baseLang
-      const targetLangCode = getSarvamLanguage(effectiveLang)
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
         headers: {
@@ -1951,15 +1941,18 @@ const setupSanPbxWebSocketServer = (ws) => {
         },
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: targetLangCode,
-          speaker: "anushka",
-          speech_sample_rate: 8000
+          target_language_code: this.sarvamLanguage,
+          speaker: this.voice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 8000,
+          enable_preprocessing: true,
+          model: "bulbul:v2",
         }),
       })
       if (!response.ok) {
-        let errBody = ''
-        try { errBody = await response.text() } catch(_) {}
-        console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}${errBody ? ` - ${errBody}` : ''}`)
+        console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
         throw new Error(`Sarvam API error: ${response.status}`)
       }
       const responseData = await response.json()
