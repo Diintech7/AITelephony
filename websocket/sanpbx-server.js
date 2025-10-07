@@ -1798,9 +1798,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       let aiResponse = null
       const tts = createTtsProcessor(ws, streamId, callLogger)
       currentTTS = tts
-      // Sentence-based streaming with 1-3 sentences max
+      // Sentence-based streaming (enqueue each complete sentence as it forms)
       let lastLen = 0
-      let queuedSentences = 0
       let carry = ""
       aiResponse = await processWithOpenAIStream(
         text,
@@ -1810,18 +1809,15 @@ const setupSanPbxWebSocketServer = (ws) => {
         async (partial) => {
           if (processingRequestId !== currentRequestId) return
           if (!partial || partial.length <= lastLen) return
-          if (queuedSentences >= 3) return
           const delta = carry + partial.slice(lastLen)
           const sentences = splitIntoSentences(delta)
           // If delta doesn't end with terminator, keep last as carry
           const endsWithTerminator = /[.!?]\s*$/.test(delta)
           const complete = endsWithTerminator ? sentences : sentences.slice(0, -1)
           for (const s of complete) {
-            if (queuedSentences >= 3) break
             const trimmed = s.trim()
             if (trimmed) {
               try { await tts.enqueueText(trimmed) } catch (_) {}
-              queuedSentences++
             }
           }
           carry = endsWithTerminator ? "" : (sentences[sentences.length - 1] || "")
@@ -1829,15 +1825,13 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
       )
 
-      // Final flush for remaining carry as a sentence (respect 1-3 cap)
-      if (processingRequestId === currentRequestId && carry && queuedSentences < 3) {
+      // Final flush for remaining carry as a sentence
+      if (processingRequestId === currentRequestId && carry) {
         const remaining = splitIntoSentences(carry)
         for (const s of remaining) {
-          if (queuedSentences >= 3) break
           const trimmed = s.trim()
           if (trimmed) {
             try { await currentTTS.enqueueText(trimmed) } catch (_) {}
-            queuedSentences++
           }
         }
       }
@@ -1862,8 +1856,6 @@ const setupSanPbxWebSocketServer = (ws) => {
       // }
 
       if (processingRequestId === currentRequestId && aiResponse) {
-        // Limit to 1-3 sentences like aitota.js
-        aiResponse = limitSentences(aiResponse, 3)
         console.log("🤖 [USER-UTTERANCE] AI Response (streamed):", aiResponse)
         // Do NOT TTS the full response here – partials already queued
         
@@ -2894,10 +2886,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("🎯 [SANPBX-CALL-SETUP] CallSID:", callId)
 
           // Send greeting first to avoid STT echo/disturbance, then connect STT
-          let greeting = smoothGreeting(agentConfig.firstMessage || "Hello! How can I help you today?", 2)
+          // For first message: play full greeting at once (no sentence limiting)
+          let greeting = String(agentConfig.firstMessage || "Hello! How can I help you today?").replace(/\s+/g, ' ').trim()
           if (sessionUserName && sessionUserName.trim()) {
-            const base = smoothGreeting(agentConfig.firstMessage || "How can I help you today?", 2)
-            greeting = smoothGreeting(`Hello ${sessionUserName.trim()}! ${base}`, 2)
+            const base = String(agentConfig.firstMessage || "How can I help you today?").replace(/\s+/g, ' ').trim()
+            greeting = `Hello ${sessionUserName.trim()}! ${base}`.replace(/\s+/g, ' ').trim()
           }
 
           console.log("🎯 [SANPBX-CALL-SETUP] Greeting Message:", greeting)
