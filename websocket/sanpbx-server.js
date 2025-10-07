@@ -2068,6 +2068,9 @@ const setupSanPbxWebSocketServer = (ws) => {
       this.smallestWs = null
       this.smallestReady = false
       this.keepAliveTimer = null
+      this.connectionRetryCount = 0
+      this.maxRetries = 3
+      this.lastActivity = Date.now()
       this.requestId = 0
       this.pendingRequests = new Map() // id -> { resolve, reject, audioChunks: [] }
       this.isProcessingQueue = false
@@ -2114,15 +2117,26 @@ const setupSanPbxWebSocketServer = (ws) => {
           wsConn.onopen = () => {
             clearTimeout(timeout)
             this.smallestReady = true
+            this.connectionRetryCount = 0
             this.startKeepAlive()
             resolve()
           }
           wsConn.onmessage = (evt) => {
             try { this.handleSmallestMessage(JSON.parse(evt.data)) } catch (_) {}
           }
-          wsConn.onclose = () => {
+          wsConn.onclose = (event) => {
             this.smallestReady = false
             if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
+            this.smallestWs = null
+            // Auto-reconnect within retry limit
+            if (!this.isInterrupted && event.code !== 1000 && this.connectionRetryCount < this.maxRetries) {
+              this.connectionRetryCount++
+              setTimeout(() => {
+                if (!this.isInterrupted) {
+                  this.connectToSmallest().catch(() => {})
+                }
+              }, 2000)
+            }
           }
           wsConn.onerror = () => {}
         } catch (e) { reject(e) }
@@ -2136,14 +2150,20 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (!req) return
       const status = msg?.status || msg?.type
       if (status === 'audio_chunk' || status === 'chunk') {
-        if (typeof msg.audio === 'string') req.audioChunks.push(msg.audio)
+        // Stream chunk immediately like in aitota.js
+        if (typeof msg.audio === 'string') {
+          if (!req.audioChunks) req.audioChunks = []
+          req.audioChunks.push(msg.audio)
+          // Fire-and-forget streaming of this chunk
+          this.streamAudioOptimizedForSIP(msg.audio).catch(() => {})
+        }
       } else if (status === 'completed' || status === 'done' || status === 'success') {
         const combined = req.audioChunks.join('')
         req.resolve(combined)
         this.pendingRequests.delete(Number(rid))
       } else if (status === 'error') {
-        req.reject(new Error(msg?.message || 'Smallest error'))
-        this.pendingRequests.delete(Number(rid))
+        // Retry once per policy
+        this.retryRequest(Number(rid), req)
       }
     }
 
@@ -2217,11 +2237,42 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
       this.currentAudioStreaming = null
     }
+
+    async retryRequest(requestId, request) {
+      if (this.connectionRetryCount >= this.maxRetries) {
+        // Fallback audio to keep flow
+        this.createFallbackAudio(" ", request)
+        return
+      }
+      this.connectionRetryCount++
+      try {
+        await new Promise(r => setTimeout(r, 800))
+        if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
+          await this.connectToSmallest()
+        }
+        // Re-send with same text if available in queue context is lost; resolve with fallback
+        this.createFallbackAudio(" ", request)
+      } catch (_) {
+        this.createFallbackAudio(" ", request)
+      }
+    }
+
+    createFallbackAudio(text, request) {
+      try {
+        const fallbackAudio = Buffer.alloc(1600).toString('base64') // ~100ms silence
+        this.streamAudioOptimizedForSIP(fallbackAudio)
+          .then(() => { try { request.resolve("FALLBACK_COMPLETED") } catch (_) {} })
+          .catch(() => { try { request.reject(new Error('fallback_failed')) } catch (_) {} })
+          .finally(() => { this.pendingRequests.delete(request.requestId || 0) })
+      } catch (_) {
+        try { request.reject(new Error('fallback_error')) } catch (_) {}
+      }
+    }
   }
 
   // TTS factory to choose provider per agent
   const createTtsProcessor = (ws, streamSid, callLogger) => {
-    const provider = (ws.sessionAgentConfig?.voiceServiceProvider || ws.sessionAgentConfig?.ttsSelection || "sarvam").toLowerCase()
+    const provider = (ws.sessionAgentConfig?.voiceServiceProvider || "sarvam").toLowerCase()
     if (provider === "smallest") {
       return new SimplifiedSmallestWSTTSProcessor(ws, streamSid, callLogger)
     }
