@@ -1887,22 +1887,18 @@ const setupSanPbxWebSocketServer = (ws) => {
             "Content-Type": "application/json",
             "API-Subscription-Key": API_KEYS.sarvam,
           },
+          // Minimal payload to avoid 400s due to strict validation
           body: JSON.stringify({
             inputs: [text],
-            target_language_code: this.sarvamLanguage,
             speaker: this.voice,
-            pitch: 0,
-            pace: 1.0,
-            loudness: 1.0,
-            speech_sample_rate: 8000,
-            enable_preprocessing: true,
-            model: "bulbul:v1",
+            speech_sample_rate: 8000
           }),
         })
 
         if (!response.ok || this.isInterrupted) {
           if (!this.isInterrupted) {
-            console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}`)
+            const errorText = (() => { try { return response && typeof response.text === 'function' ? undefined : undefined } catch(_) { return undefined } })()
+            console.log(`❌ [TTS-SYNTHESIS] ${timer.end()}ms - Error: ${response.status}${errorText ? ` - ${errorText}` : ''}`)
             throw new Error(`Sarvam API error: ${response.status}`)
           }
           return
@@ -1942,20 +1938,17 @@ const setupSanPbxWebSocketServer = (ws) => {
           "Content-Type": "application/json",
           "API-Subscription-Key": API_KEYS.sarvam,
         },
+        // Minimal payload to avoid 400s due to strict validation
         body: JSON.stringify({
           inputs: [text],
-          target_language_code: this.sarvamLanguage,
           speaker: this.voice,
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.0,
-          speech_sample_rate: 8000,
-          enable_preprocessing: true,
-          model: "bulbul:v1",
+          speech_sample_rate: 8000
         }),
       })
       if (!response.ok) {
-        console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}`)
+        let errBody = ''
+        try { errBody = await response.text() } catch(_) {}
+        console.log(`❌ [TTS-PREPARE] ${timer.end()}ms - Error: ${response.status}${errBody ? ` - ${errBody}` : ''}`)
         throw new Error(`Sarvam API error: ${response.status}`)
       }
       const responseData = await response.json()
