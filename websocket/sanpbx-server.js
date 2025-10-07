@@ -2201,7 +2201,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           enhancement: 1,
           similarity: 0,
         }
-        try { console.log(`[SMALLEST-TTS] send request ${payload.request_id}, voice=${payload.voice || 'default'}`) } catch (_) {}
+        try { console.log(`[SMALLEST-TTS] send request ${payload.request_id}, voice_id=${payload.voice_id}, lang=${payload.language}`) } catch (_) {}
         try { this.smallestWs.send(JSON.stringify(payload)) } catch (e) { reject(e) }
       })
     }
