@@ -2150,14 +2150,15 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (!req) return
       const status = msg?.status || msg?.type
       if (status === 'audio_chunk' || status === 'chunk') {
-        // Stream chunk immediately like in aitota.js
-        if (typeof msg.audio === 'string') {
+        // Stream chunk immediately (support both msg.audio and msg.data.audio)
+        const incomingAudio = (typeof msg.audio === 'string') ? msg.audio : (typeof msg.data?.audio === 'string' ? msg.data.audio : null)
+        if (incomingAudio) {
           if (!req.audioChunks) req.audioChunks = []
-          req.audioChunks.push(msg.audio)
+          req.audioChunks.push(incomingAudio)
           // Fire-and-forget streaming of this chunk
-          this.streamAudioOptimizedForSIP(msg.audio).catch(() => {})
+          this.streamAudioOptimizedForSIP(incomingAudio).catch(() => {})
         }
-      } else if (status === 'completed' || status === 'done' || status === 'success') {
+      } else if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
         const combined = req.audioChunks.join('')
         req.resolve(combined)
         this.pendingRequests.delete(Number(rid))
