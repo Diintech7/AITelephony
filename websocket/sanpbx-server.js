@@ -1880,7 +1880,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           body: JSON.stringify({
             inputs: [text],
             target_language_code: this.sarvamLanguage,
-            speaker: this.voice,
+            speaker: "anushka",
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
@@ -1935,7 +1935,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         body: JSON.stringify({
           inputs: [text],
           target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
+          speaker: "anushka",
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
