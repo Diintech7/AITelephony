@@ -1818,6 +1818,9 @@ class SimplifiedSmallestTTSProcessor {
     this.isProcessingSIPQueue = false // Prevent overlapping SIP audio processing
     this.streamingRequests = new Set() // Track active streaming requests
     this.completedRequests = new Set() // Track completed requests
+    this.audioBuffer = Buffer.alloc(0) // Buffer for smooth audio streaming
+    this.lastAudioTime = 0 // Track last audio chunk time
+    this.audioGapThreshold = 200 // Minimum gap between audio items (ms)
   }
 
   interrupt() {
@@ -1833,6 +1836,8 @@ class SimplifiedSmallestTTSProcessor {
     this.pendingRequests.clear()
     this.audioQueue = []
     this.pendingQueue = []
+    this.audioBuffer = Buffer.alloc(0)
+    this.lastAudioTime = 0
     
     // Close WebSocket connection properly
     if (this.smallestWs) {
@@ -2313,6 +2318,16 @@ class SimplifiedSmallestTTSProcessor {
     
     console.log(`🎧 [SIP-AUDIO-QUEUE] Adding ${audioBuffer.length} bytes (${estimatedMs}ms) to queue`)
     
+    // Ensure proper gap between audio items
+    const currentTime = Date.now()
+    const timeSinceLastAudio = currentTime - this.lastAudioTime
+    
+    if (timeSinceLastAudio < this.audioGapThreshold) {
+      const requiredDelay = this.audioGapThreshold - timeSinceLastAudio
+      console.log(`⏱️ [SIP-AUDIO-QUEUE] Ensuring ${requiredDelay}ms gap before next audio`)
+      await new Promise(resolve => setTimeout(resolve, requiredDelay))
+    }
+    
     // Add to queue with proper timing
     this.audioQueue.push({
       buffer: audioBuffer,
@@ -2333,6 +2348,7 @@ class SimplifiedSmallestTTSProcessor {
     console.log(`🔄 [SIP-AUDIO-QUEUE] Processing ${this.audioQueue.length} audio items in queue`)
     
     try {
+      let itemIndex = 0
       while (this.audioQueue.length > 0 && !this.isInterrupted) {
         const audioItem = this.audioQueue.shift()
         
@@ -2341,12 +2357,24 @@ class SimplifiedSmallestTTSProcessor {
           break
         }
         
+        console.log(`🎧 [SIP-AUDIO-QUEUE] Processing item ${itemIndex + 1}/${this.audioQueue.length + 1} (${audioItem.estimatedDuration}ms)`)
+        
+        // Add a small delay before starting each audio item to ensure clean separation
+        if (itemIndex > 0) {
+          console.log(`⏱️ [SIP-AUDIO-QUEUE] Waiting 100ms before next audio item...`)
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        
         await this.streamSingleAudioItem(audioItem)
         
-        // Small delay between audio items to prevent overlap
+        // Enhanced delay between audio items to prevent audio disturbance
         if (this.audioQueue.length > 0) {
-          await new Promise(resolve => setTimeout(resolve, 50))
+          const delayMs = Math.max(150, audioItem.estimatedDuration * 0.1) // 10% of audio duration or 150ms minimum
+          console.log(`⏱️ [SIP-AUDIO-QUEUE] Waiting ${delayMs}ms before next audio item...`)
+          await new Promise(resolve => setTimeout(resolve, delayMs))
         }
+        
+        itemIndex++
       }
     } finally {
       this.isProcessingSIPQueue = false
@@ -2364,25 +2392,34 @@ class SimplifiedSmallestTTSProcessor {
     const SAMPLE_RATE = 8000
     const BYTES_PER_SAMPLE = 2
     const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000
-    // Use 20ms chunks at 8kHz, 16-bit mono → 20ms * 16 bytes/ms = 320 bytes
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS)
+    
+    // Use larger, more stable chunks to reduce disturbance
+    // 40ms chunks at 8kHz, 16-bit mono → 40ms * 16 bytes/ms = 640 bytes
+    const STABLE_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS)
+    
+    // Ensure chunk size is even for proper audio alignment
+    const OPTIMAL_CHUNK_SIZE = STABLE_CHUNK_SIZE - (STABLE_CHUNK_SIZE % 2)
 
     let position = 0
     let chunkIndex = 0
     let successfulChunks = 0
+    let lastChunkTime = Date.now()
 
-    console.log(`🎧 [SIP-AUDIO-ITEM] Streaming ${audioBuffer.length} bytes (${estimatedDuration}ms) in ${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)} chunks`)
+    console.log(`🎧 [SIP-AUDIO-ITEM] Streaming ${audioBuffer.length} bytes (${estimatedDuration}ms) in ${Math.ceil(audioBuffer.length / OPTIMAL_CHUNK_SIZE)} stable chunks`)
 
     while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
       const remaining = audioBuffer.length - position
       const chunkSize = Math.min(OPTIMAL_CHUNK_SIZE, remaining)
       const chunk = audioBuffer.slice(position, position + chunkSize)
 
+      // Ensure chunk is properly aligned and padded if needed
+      const alignedChunk = this.alignAudioChunk(chunk, OPTIMAL_CHUNK_SIZE)
+
       const mediaMessage = {
         event: "media",
         streamSid: this.streamSid,
         media: {
-          payload: chunk.toString("base64"),
+          payload: alignedChunk.toString("base64"),
         },
       }
 
@@ -2390,6 +2427,11 @@ class SimplifiedSmallestTTSProcessor {
         try {
           this.ws.send(JSON.stringify(mediaMessage))
           successfulChunks++
+          
+          // Log progress every 10 chunks to avoid spam
+          if (chunkIndex % 10 === 0) {
+            console.log(`🎧 [SIP-AUDIO-ITEM] Progress: ${chunkIndex} chunks sent`)
+          }
         } catch (error) {
           console.log(`❌ [SIP-AUDIO-ITEM] Error sending chunk ${chunkIndex}: ${error.message}`)
           break
@@ -2399,11 +2441,21 @@ class SimplifiedSmallestTTSProcessor {
         break
       }
 
-      // Proper timing between chunks
+      // Enhanced timing control to prevent audio disturbance
       if (position + chunkSize < audioBuffer.length && !this.isInterrupted) {
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS)
-        const delayMs = Math.max(chunkDurationMs - 2, 10)
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        const chunkDurationMs = Math.floor(alignedChunk.length / BYTES_PER_MS)
+        const currentTime = Date.now()
+        const timeSinceLastChunk = currentTime - lastChunkTime
+        
+        // Calculate precise delay to maintain consistent timing
+        const targetDelay = Math.max(chunkDurationMs - 5, 15) // Minimum 15ms delay
+        const actualDelay = Math.max(targetDelay - timeSinceLastChunk, 5) // Minimum 5ms
+        
+        if (actualDelay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, actualDelay))
+        }
+        
+        lastChunkTime = Date.now()
       }
 
       position += chunkSize
@@ -2411,12 +2463,29 @@ class SimplifiedSmallestTTSProcessor {
     }
 
     this.currentAudioStreaming = null
+    this.lastAudioTime = Date.now() // Update last audio time
     
     if (successfulChunks > 0) {
-      console.log(`✅ [SIP-AUDIO-ITEM] Completed ${successfulChunks} chunks`)
+      console.log(`✅ [SIP-AUDIO-ITEM] Completed ${successfulChunks} chunks (${Math.round((Date.now() - lastChunkTime) / 1000)}s total)`)
     } else {
       console.log(`⚠️ [SIP-AUDIO-ITEM] No chunks sent`)
     }
+  }
+
+  // Align audio chunk to prevent audio disturbance
+  alignAudioChunk(chunk, targetSize) {
+    if (chunk.length === targetSize) {
+      return chunk
+    }
+    
+    if (chunk.length < targetSize) {
+      // Pad with silence (zeros) to maintain consistent chunk size
+      const padding = Buffer.alloc(targetSize - chunk.length, 0)
+      return Buffer.concat([chunk, padding])
+    }
+    
+    // If chunk is larger, truncate (shouldn't happen with our logic)
+    return chunk.slice(0, targetSize)
   }
 
   getStats() {
@@ -2751,7 +2820,7 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log(`\n📊 [VOICE-LATENCY-SUMMARY]`)
           console.log(`   📝 Text Processing: ~50ms`)
           console.log(`   🧠 LLM Generation: ${llmDuration}ms`)
-          console.log(`   🎤 TTS Synthesis: ${ttsDuration || 0}ms`)
+          console.log(`   🎤 TTS Synthesis: ~200ms (estimated)`)
           console.log(`   📊 Overall Latency: ${report.duration}ms`)
           console.log(`📊 [VOICE-LATENCY-SUMMARY]`)
         } else {
