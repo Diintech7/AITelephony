@@ -2794,6 +2794,8 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
+        // Match sanpbx endpointing to get quicker finalization
+        deepgramUrl.searchParams.append("endpointing", "300")
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -2837,31 +2839,25 @@ const setupUnifiedVoiceServer = (wss) => {
         const is_final = data.is_final
 
         if (transcript?.trim()) {
-          // Timing for interruption handling
-          const interruptStartTime = Date.now()
-          
-          if (currentTTS && isProcessing) {
-            console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for new user input...")
-            sttTimer.checkpoint("STT_DETECTED_UNTERRUPTION_NEEDED")
-            
-            // Handle both regular TTS and streaming processor interruptions
-            if (currentTTS.interrupt) {
-              currentTTS.interrupt()
-            } else if (currentTTS.ttsProcessor && currentTTS.ttsProcessor.interrupt) {
-              currentTTS.ttsProcessor.interrupt()
-            }
-            
-            isProcessing = false
-            processingRequestId++
-            // Wait a bit for the interrupt to take effect
-            await new Promise(resolve => setTimeout(resolve, 100))
-            const interruptDuration = Date.now() - interruptStartTime
-            sttTimer.checkpoint(`STT_INTERRUPTION_COMPLETED_${interruptDuration}ms`)
-          } else {
-            sttTimer.checkpoint("STT_NO_INTERRUPTION_NEEDED")
-          }
-
           if (is_final) {
+            // Only interrupt active TTS on final user utterance to avoid cutting AI speech on interim echoes
+            const interruptStartTime = Date.now()
+            if (currentTTS && isProcessing) {
+              console.log("🛑 [USER-UTTERANCE] Interrupting current TTS for final user input...")
+              sttTimer.checkpoint("STT_DETECTED_UNTERRUPTION_NEEDED")
+              if (currentTTS.interrupt) {
+                currentTTS.interrupt()
+              } else if (currentTTS.ttsProcessor && currentTTS.ttsProcessor.interrupt) {
+                currentTTS.ttsProcessor.interrupt()
+              }
+              isProcessing = false
+              processingRequestId++
+              await new Promise(resolve => setTimeout(resolve, 100))
+              const interruptDuration = Date.now() - interruptStartTime
+              sttTimer.checkpoint(`STT_INTERRUPTION_COMPLETED_${interruptDuration}ms`)
+            } else {
+              sttTimer.checkpoint("STT_NO_INTERRUPTION_NEEDED")
+            }
             sttTimer.checkpoint("STT_FINAL_TRANSCRIPT_RECEIVED")
             const sttDuration = sttTimer.end()
             console.log(`🕒 [STT-TRANSCRIPTION] ${sttDuration}ms - Text: "${transcript.trim()}"`)
@@ -2935,7 +2931,8 @@ const setupUnifiedVoiceServer = (wss) => {
         // Kick off streaming LLM processing with sentence-based TTS
         let aiResponse = null
         const streamingProcessor = new StreamingLLMProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
-        currentTTS = streamingProcessor.ttsProcessor
+        // Track the processor itself so interrupt() always cancels any in-flight TTS batches
+        currentTTS = streamingProcessor
         voiceTiming.checkpoint("STREAMING_PROCESSOR_CREATED")
 
         // Start LLM processing timing
