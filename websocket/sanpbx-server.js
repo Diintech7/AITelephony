@@ -1896,7 +1896,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           body: JSON.stringify({
             inputs: [text],
             target_language_code: targetLangCode,
-            speaker: this.voice,
+            speaker: "anushka",
             speech_sample_rate: 8000
           }),
         })
@@ -1952,7 +1952,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         body: JSON.stringify({
           inputs: [text],
           target_language_code: targetLangCode,
-          speaker: this.voice,
+          speaker: "anushka",
           speech_sample_rate: 8000
         }),
       })
