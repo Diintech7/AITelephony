@@ -1821,6 +1821,10 @@ class SimplifiedSmallestTTSProcessor {
     this.audioBuffer = Buffer.alloc(0) // Buffer for smooth audio streaming
     this.lastAudioTime = 0 // Track last audio chunk time
     this.audioGapThreshold = 200 // Minimum gap between audio items (ms)
+    this.keepAliveTimer = null // Keep-alive timer
+    this.lastActivity = Date.now() // Track last activity
+    this.connectionRetryCount = 0 // Track connection retry attempts
+    this.maxRetries = 3 // Maximum retry attempts
   }
 
   interrupt() {
@@ -1838,6 +1842,9 @@ class SimplifiedSmallestTTSProcessor {
     this.pendingQueue = []
     this.audioBuffer = Buffer.alloc(0)
     this.lastAudioTime = 0
+    
+    // Stop keep-alive timer
+    this.stopKeepAlive()
     
     // Close WebSocket connection properly
     if (this.smallestWs) {
@@ -1876,14 +1883,18 @@ class SimplifiedSmallestTTSProcessor {
       // Wait for connection to be ready
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
-          console.log("❌ [SMALLEST-TTS] Connection timeout after 3 seconds")
+          console.log("❌ [SMALLEST-TTS] Connection timeout after 5 seconds")
           reject(new Error("Connection timeout"))
-        }, 3000)
+        }, 5000)
 
         this.smallestWs.onopen = () => {
           console.log("🎤 [SMALLEST-TTS] WebSocket connection established")
           this.smallestReady = true
+          this.connectionRetryCount = 0 // Reset retry count on successful connection
           clearTimeout(timeout)
+          
+          // Start keep-alive mechanism
+          this.startKeepAlive()
           resolve()
         }
 
@@ -1898,6 +1909,20 @@ class SimplifiedSmallestTTSProcessor {
           console.log("🔌 [SMALLEST-TTS] WebSocket connection closed:", event.code, event.reason)
           this.smallestReady = false
           this.smallestWs = null
+          
+          // Auto-reconnect if not interrupted and within retry limit
+          if (!this.isInterrupted && event.code !== 1000 && this.connectionRetryCount < this.maxRetries) {
+            console.log("🔄 [SMALLEST-TTS] Attempting to reconnect in 2 seconds...")
+            setTimeout(() => {
+              if (!this.isInterrupted) {
+                this.connectToSmallest().catch(err => 
+                  console.log("❌ [SMALLEST-TTS] Reconnection failed:", err.message)
+                )
+              }
+            }, 2000)
+          } else if (this.connectionRetryCount >= this.maxRetries) {
+            console.log("❌ [SMALLEST-TTS] Max reconnection attempts reached")
+          }
         }
 
         this.smallestWs.onmessage = (event) => {
@@ -1915,9 +1940,72 @@ class SimplifiedSmallestTTSProcessor {
     } catch (error) {
       console.log("❌ [SMALLEST-TTS] Connection error:", error.message)
       this.smallestReady = false
-        throw error
+      throw error
+    }
+  }
+
+  startKeepAlive() {
+    // Clear existing keep-alive timer
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer)
+    }
+    
+    // Send ping every 30 seconds to keep connection alive
+    this.keepAliveTimer = setInterval(() => {
+      if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN && !this.isInterrupted) {
+        try {
+          // Send a ping message to keep connection alive
+          this.smallestWs.ping()
+          console.log("🏓 [SMALLEST-TTS] Keep-alive ping sent")
+        } catch (error) {
+          console.log("❌ [SMALLEST-TTS] Keep-alive ping failed:", error.message)
+        }
+      } else {
+        // Clear timer if connection is not open
+        clearInterval(this.keepAliveTimer)
+        this.keepAliveTimer = null
+      }
+    }, 30000) // 30 seconds
+  }
+
+  stopKeepAlive() {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer)
+      this.keepAliveTimer = null
+    }
+  }
+
+  async retryRequest(requestId, request) {
+    if (this.connectionRetryCount >= this.maxRetries) {
+      console.log(`❌ [SMALLEST-TTS] Max retries reached for request ${requestId}, rejecting`)
+      request.reject(new Error("TTS request failed after maximum retries"))
+      this.pendingRequests.delete(requestId)
+      return
+    }
+
+    this.connectionRetryCount++
+    console.log(`🔄 [SMALLEST-TTS] Retrying request ${requestId} (attempt ${this.connectionRetryCount}/${this.maxRetries})`)
+    
+    try {
+      // Wait a bit before retrying
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      
+      // Reconnect if needed
+      if (!this.smallestReady || !this.smallestWs || this.smallestWs.readyState !== WebSocket.OPEN) {
+        await this.connectToSmallest()
+      }
+      
+      // Retry the request
+      await this.processSingleTTSRequest(request.text, request.voiceId)
+      
+    } catch (error) {
+      console.log(`❌ [SMALLEST-TTS] Retry failed for request ${requestId}:`, error.message)
+      if (this.connectionRetryCount >= this.maxRetries) {
+        request.reject(error)
+        this.pendingRequests.delete(requestId)
       }
     }
+  }
 
   handleSmallestResponse(data) {
     const { request_id, status, data: responseData } = data
@@ -1960,8 +2048,8 @@ class SimplifiedSmallestTTSProcessor {
           })
       } else if (status === "error") {
         console.log(`❌ [SMALLEST-TTS] Request ${request_id} failed: ${data.message || 'Unknown error'}`)
-        request.reject(new Error(`Smallest.ai TTS error: ${data.message || 'Unknown error'}`))
-        this.pendingRequests.delete(numericRequestId)
+        // Try to retry the request instead of immediately rejecting
+        this.retryRequest(numericRequestId, request)
       } else {
         console.log(`⚠️ [SMALLEST-TTS] Unknown status for request ${request_id}: ${status}`)
       }
@@ -2163,12 +2251,18 @@ class SimplifiedSmallestTTSProcessor {
         timer.checkpoint("TTS_WEBSOCKET_READY")
       }
 
-      // Clear any pending requests to prevent conflicts
-      this.pendingRequests.clear()
-      timer.checkpoint("TTS_REQUESTS_CLEARED")
+      // Don't clear pending requests unnecessarily - let them complete naturally
+      // Only clear if there are too many pending requests (more than 5)
+      if (this.pendingRequests.size > 5) {
+        console.log("🧹 [SMALLEST-TTS] Clearing excess pending requests")
+        this.pendingRequests.clear()
+        timer.checkpoint("TTS_REQUESTS_CLEARED")
+      } else {
+        timer.checkpoint("TTS_REQUESTS_PRESERVED")
+      }
       
-      // Wait a bit to ensure previous requests are cleared
-      await new Promise(resolve => setTimeout(resolve, 100))
+      // Small delay to ensure connection is stable
+      await new Promise(resolve => setTimeout(resolve, 50))
       timer.checkpoint("TTS_SETUP_DELAY_COMPLETED")
 
       const requestId = ++this.requestId
