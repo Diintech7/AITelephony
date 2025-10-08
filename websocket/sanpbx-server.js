@@ -17,8 +17,9 @@ const API_KEYS = {
 
 // SanPBX API configuration
 const SANPBX_API_CONFIG = {
-  baseUrl: "https://dialer.sansoftwares.com/pbxadmin/sanpbxapi",
-  apiToken: process.env.SANPBX_API_TOKEN || "abcdefgf123456789", // Use environment variable for security
+  baseUrl: "https://clouduat28.sansoftwares.com/pbxadmin/sanpbxapi",
+  accessToken: "e4b197411fd53012607649f23a6d28f9",
+  genTokenEndpoint: "/gentoken",
   disconnectEndpoint: "/calldisconnect"
 }
 
@@ -444,19 +445,29 @@ Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on th
   }
 }
 
-// Intelligent call disconnection detection using OpenAI
-const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
-  const timer = createTimer("DISCONNECTION_DETECTION")
+// Enhanced auto disposition detection using OpenAI
+const detectAutoDisposition = async (userMessage, conversationHistory, detectedLanguage) => {
+  const timer = createTimer("AUTO_DISPOSITION_DETECTION")
   try {
-    const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
-- "thank you", "thanks", "bye", "goodbye", "end call", "hang up"
-- "hold on", "wait", "not available", "busy", "call back later"
-- "not interested", "no thanks", "stop calling"
-- Any indication they want to end the conversation
+    const dispositionPrompt = `Analyze the user's response and conversation context to determine if the call should be terminated. Look for:
+
+TERMINATE CALL if user shows:
+- "not interested", "no thanks", "stop calling", "don't want", "not needed"
+- "busy", "hold on", "wait", "call back later", "not available"
+- "bye", "goodbye", "end call", "hang up", "thank you" (as closing)
+- "wrong number", "not the right person"
+- Any clear indication they want to end the conversation
+
+CONTINUE CALL if user shows:
+- Asking questions about the service/product
+- Showing interest or engagement
+- Requesting more information
+- "yes", "maybe", "tell me more", "how does it work"
 
 User message: "${userMessage}"
+Recent conversation: ${conversationHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join(' | ')}
 
-Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they want to continue.`
+Return ONLY: "TERMINATE" if call should be ended, or "CONTINUE" if conversation should continue.`
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -467,7 +478,7 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: disconnectionPrompt },
+          { role: "system", content: dispositionPrompt },
         ],
         max_tokens: 10,
         temperature: 0.1,
@@ -475,24 +486,29 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
     })
 
     if (!response.ok) {
-      console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      console.log(`❌ [AUTO-DISPOSITION] ${timer.end()}ms - Error: ${response.status}`)
       return "CONTINUE" // Default to continue on error
     }
 
     const data = await response.json()
     const result = data.choices[0]?.message?.content?.trim().toUpperCase()
 
-    if (result === "DISCONNECT") {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
-      return "DISCONNECT"
+    if (result === "TERMINATE") {
+      console.log(`🛑 [AUTO-DISPOSITION] ${timer.end()}ms - User wants to terminate call`)
+      return "TERMINATE"
     } else {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
+      console.log(`✅ [AUTO-DISPOSITION] ${timer.end()}ms - User wants to continue`)
       return "CONTINUE"
     }
   } catch (error) {
-    console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    console.log(`❌ [AUTO-DISPOSITION] ${timer.end()}ms - Error: ${error.message}`)
     return "CONTINUE" // Default to continue on error
   }
+}
+
+// Intelligent call disconnection detection using OpenAI (legacy function)
+const detectCallDisconnectionIntent = async (userMessage, conversationHistory, detectedLanguage) => {
+  return await detectAutoDisposition(userMessage, conversationHistory, detectedLanguage)
 }
 
 // Intelligent WhatsApp request detection using OpenAI
@@ -1032,6 +1048,9 @@ class EnhancedCallLogger {
 // Global map to store active call loggers by streamSid
 const activeCallLoggers = new Map()
 
+// Global map to store active WebSocket connections by streamSid
+const activeWebSockets = new Map()
+
 // Track billed streams to avoid double-charging on both stop and close
 const billedStreamSids = new Set()
 
@@ -1105,12 +1124,57 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
   }
 }
 
+// Helper to get SanPBX API token
+const getSanPBXToken = async () => {
+  try {
+    const tokenUrl = `${SANPBX_API_CONFIG.baseUrl}${SANPBX_API_CONFIG.genTokenEndpoint}`
+    const requestBody = {
+      access_key: "mob"
+    }
+
+    console.log(`🔑 [SANPBX-TOKEN] Getting API token from: ${tokenUrl}`)
+
+    const response = await fetch(tokenUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accesstoken": SANPBX_API_CONFIG.accessToken,
+      },
+      body: JSON.stringify(requestBody),
+    })
+
+    const responseData = await response.json()
+    const isOk = response.ok
+
+    console.log(`🔑 [SANPBX-TOKEN] Response Status: ${response.status}`)
+    console.log(`🔑 [SANPBX-TOKEN] Response:`, JSON.stringify(responseData))
+
+    if (isOk && responseData.status === "success" && responseData.Apitoken) {
+      console.log(`✅ [SANPBX-TOKEN] Successfully obtained API token`)
+      return responseData.Apitoken
+    } else {
+      console.log(`❌ [SANPBX-TOKEN] Failed to get API token: ${responseData.msg || 'Unknown error'}`)
+      return null
+    }
+  } catch (error) {
+    console.log(`❌ [SANPBX-TOKEN] Error getting API token:`, error.message)
+    return null
+  }
+}
+
 // Helper to disconnect call via SanPBX API
 const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect') => {
   try {
     if (!callId) {
       console.log("❌ [SANPBX-DISCONNECT] No callId provided for disconnect")
       return { success: false, error: "No callId provided" }
+    }
+
+    // Get fresh API token
+    const apiToken = await getSanPBXToken()
+    if (!apiToken) {
+      console.log("❌ [SANPBX-DISCONNECT] Failed to get API token")
+      return { success: false, error: "Failed to get API token" }
     }
 
     const disconnectUrl = `${SANPBX_API_CONFIG.baseUrl}${SANPBX_API_CONFIG.disconnectEndpoint}`
@@ -1126,7 +1190,7 @@ const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect') => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Apitoken": SANPBX_API_CONFIG.apiToken,
+        "Apitoken": apiToken,
       },
       body: JSON.stringify(requestBody),
     })
@@ -1171,8 +1235,28 @@ const disconnectCallViaAPI = async (callId, reason = 'manual_disconnect') => {
  * Setup unified voice server for SanIPPBX integration
  * @param {WebSocket} ws - The WebSocket connection from SanIPPBX
  */
+// Check if call is already active to prevent multiple WebSocket connections
+const isCallActive = (streamSid) => {
+  return activeWebSockets.has(streamSid)
+}
+
+// Force disconnect existing WebSocket for a streamSid
+const forceDisconnectWebSocket = (streamSid) => {
+  const existingWs = activeWebSockets.get(streamSid)
+  if (existingWs && existingWs.readyState === WebSocket.OPEN) {
+    console.log(`🔗 [SANPBX-WS-FORCE-DISCONNECT] Force closing existing WebSocket for streamSid: ${streamSid}`)
+    existingWs.close()
+    activeWebSockets.delete(streamSid)
+    return true
+  }
+  return false
+}
+
 const setupSanPbxWebSocketServer = (ws) => {
   console.log("🔗 [SANPBX] Setting up SanIPPBX voice server connection")
+  
+  // Track this WebSocket connection
+  let currentStreamSid = null
 
   // Session state for this connection
   let streamId = null
@@ -1219,6 +1303,9 @@ const setupSanPbxWebSocketServer = (ws) => {
   let deepgramReady = false
   let deepgramAudioQueue = []
   let sttTimer = null
+  let lastUserActivity = Date.now()
+  let silenceTimeout = null
+  let autoDispositionEnabled = true
 
   const buildFullTranscript = () => {
     try {
@@ -1257,6 +1344,75 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
     } finally {
       isSipStreaming = false
+    }
+  }
+
+  // Auto disposition and silence timeout handlers
+  const resetSilenceTimeout = () => {
+    if (silenceTimeout) {
+      clearTimeout(silenceTimeout)
+      silenceTimeout = null
+    }
+    lastUserActivity = Date.now()
+    
+    // Set 30-second silence timeout
+    silenceTimeout = setTimeout(async () => {
+      console.log("⏰ [SILENCE-TIMEOUT] 30 seconds of silence detected - terminating call")
+      await terminateCallForSilence()
+    }, 30000)
+  }
+
+  const terminateCallForSilence = async () => {
+    try {
+      console.log("🛑 [AUTO-TERMINATION] Terminating call due to silence timeout")
+      
+      if (callLogger) {
+        callLogger.updateLeadStatus('not_connected')
+        await callLogger.saveToDatabase('not_connected', agentConfig)
+        callLogger.cleanup()
+      }
+      
+      if (callId) {
+        await disconnectCallViaAPI(callId, 'silence_timeout')
+      }
+      
+      // Close WebSocket and cleanup tracking
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close()
+      }
+      if (currentStreamSid) {
+        activeWebSockets.delete(currentStreamSid)
+        console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+      }
+    } catch (error) {
+      console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
+    }
+  }
+
+  const terminateCallForDisposition = async (reason = 'auto_disposition') => {
+    try {
+      console.log(`🛑 [AUTO-TERMINATION] Terminating call due to disposition: ${reason}`)
+      
+      if (callLogger) {
+        callLogger.updateLeadStatus('not_required')
+        await callLogger.saveToDatabase('not_required', agentConfig)
+        callLogger.cleanup()
+      }
+      
+      if (callId) {
+        await disconnectCallViaAPI(callId, reason)
+      }
+      
+      // Close WebSocket and cleanup tracking
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close()
+      }
+      if (currentStreamSid) {
+        activeWebSockets.delete(currentStreamSid)
+        console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+      }
+    } catch (error) {
+      console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
     }
   }
 
@@ -1818,8 +1974,20 @@ const setupSanPbxWebSocketServer = (ws) => {
       console.log("🌐 [USER-UTTERANCE] Detected Language:", detectedLanguage)
 
 
-      // Run all AI detections in parallel for efficiency
-      console.log("🔍 [USER-UTTERANCE] Running AI detections...")
+      // Reset silence timeout on user activity
+      resetSilenceTimeout()
+      
+      // Run auto disposition detection first
+      if (autoDispositionEnabled) {
+        console.log("🔍 [USER-UTTERANCE] Running auto disposition detection...")
+        const dispositionResult = await detectAutoDisposition(text, conversationHistory, detectedLanguage)
+        
+        if (dispositionResult === "TERMINATE") {
+          console.log("🛑 [USER-UTTERANCE] Auto disposition detected - terminating call")
+          await terminateCallForDisposition('user_not_interested')
+          return
+        }
+      }
       
       // Use streaming path immediately (like testing2) so partials can play
       let aiResponse = null
@@ -2669,6 +2837,17 @@ const setupSanPbxWebSocketServer = (ws) => {
           aiResponses = []
           whatsappRequested = false
           whatsappSent = false
+          
+          // Check if call is already active and handle accordingly
+          if (isCallActive(streamId)) {
+            console.log(`⚠️ [SANPBX-WS-CONFLICT] Call already active for streamSid: ${streamId}, force disconnecting existing connection`)
+            forceDisconnectWebSocket(streamId)
+          }
+          
+          // Track this WebSocket connection
+          currentStreamSid = streamId
+          activeWebSockets.set(streamId, ws)
+          console.log(`🔗 [SANPBX-WS-TRACKING] Registered WebSocket for streamSid: ${streamId}`)
 
           // Cache identifiers if provided (prefer start values if present)
           callerIdValue = data.callerId || callerIdValue
@@ -2902,6 +3081,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           // Now connect to Deepgram for speech recognition after greeting
           await connectToDeepgram()
+          
+          // Initialize silence timeout after call setup
+          resetSilenceTimeout()
           break
         }
 
@@ -2961,6 +3143,12 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           if (silenceTimer) {
             clearTimeout(silenceTimer)
+          }
+          
+          // Cleanup WebSocket tracking
+          if (currentStreamSid) {
+            activeWebSockets.delete(currentStreamSid)
+            console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
           }
 
           // Intelligent WhatsApp send based on lead status and user requests
@@ -3229,6 +3417,18 @@ const setupSanPbxWebSocketServer = (ws) => {
       clearTimeout(silenceTimer)
     }
 
+    // Clear silence timeout
+    if (silenceTimeout) {
+      clearTimeout(silenceTimeout)
+      silenceTimeout = null
+    }
+
+    // Cleanup WebSocket tracking
+    if (currentStreamSid) {
+      activeWebSockets.delete(currentStreamSid)
+      console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+    }
+
     // Reset session state
     streamId = null
     callId = null
@@ -3250,6 +3450,9 @@ const setupSanPbxWebSocketServer = (ws) => {
     callDirection = "inbound"
     agentConfig = null
     sttTimer = null
+    lastUserActivity = Date.now()
+    autoDispositionEnabled = true
+    currentStreamSid = null
   })
 
   // Handle errors
@@ -3542,6 +3745,9 @@ module.exports = {
   terminateCallByStreamSid,
   disconnectCallByCallId,
   disconnectCallViaAPI,
+  isCallActive,
+  forceDisconnectWebSocket,
+  activeWebSockets,
   // Export termination methods for external use
   terminationMethods: {
     graceful: (callLogger, message, language) => callLogger?.saveToDatabase(callLogger.currentLeadStatus || "maybe", null),
