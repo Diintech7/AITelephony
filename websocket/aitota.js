@@ -3174,7 +3174,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Run auto disposition detection first
         if (autoDispositionEnabled) {
           console.log("🔍 [USER-UTTERANCE] Running auto disposition detection...")
-          const dispositionResult = await detectAutoDisposition(text, conversationHistory, currentLanguage)
+          const dispositionResult = await detectAutoDisposition(text, history.getConversationHistory(), currentLanguage)
           
           if (dispositionResult === "TERMINATE") {
             console.log("🛑 [USER-UTTERANCE] Auto disposition detected - terminating call")
@@ -3197,7 +3197,7 @@ const setupUnifiedVoiceServer = (wss) => {
         
         aiResponse = await streamingProcessor.processStreamingResponse(
           text,
-          conversationHistory,
+          history.getConversationHistory(),
           userName
         )
         
@@ -3218,8 +3218,8 @@ const setupUnifiedVoiceServer = (wss) => {
         ;(async () => {
           try {
             const [leadStatus, whatsappRequest] = await Promise.all([
-              detectLeadStatusWithOpenAI(text, conversationHistory, currentLanguage),
-              detectWhatsAppRequest(text, conversationHistory, currentLanguage),
+              detectLeadStatusWithOpenAI(text, history.getConversationHistory(), currentLanguage),
+              detectWhatsAppRequest(text, history.getConversationHistory(), currentLanguage),
             ])
             const detectionDuration = Date.now() - detectionStartTime
             console.log(`🔍 [DETECTION-TIMING] Status detection completed in ${detectionDuration}ms`)
@@ -3238,11 +3238,8 @@ const setupUnifiedVoiceServer = (wss) => {
           // Log full AI response once
           try { if (callLogger) { callLogger.logAIResponse(aiResponse) } } catch (_) {}
 
-          conversationHistory.push(
-            { role: "user", content: text },
-            { role: "assistant", content: aiResponse }
-          )
-          if (conversationHistory.length > 10) conversationHistory = conversationHistory.slice(-10)
+          try { history.addUserTranscript(text) } catch (_) {}
+          try { history.addAssistantResponse(aiResponse) } catch (_) {}
           
           // Generate final voice-to-voice latency report
           const report = voiceTiming.getFullReport()
@@ -3820,7 +3817,6 @@ const setupUnifiedVoiceServer = (wss) => {
       
       // Reset state
       streamSid = null
-      conversationHistory = []
       isProcessing = false
       userUtteranceBuffer = ""
       lastProcessedText = ""
