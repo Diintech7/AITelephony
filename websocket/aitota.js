@@ -1161,14 +1161,10 @@ class StreamingLLMProcessor {
         return null
       }
 
-      // Initialize TTS processor
-      this.ttsProcessor = new SimplifiedSmallestTTSProcessor(
-        this.language, 
-        this.ws, 
-        this.streamSid, 
-        this.callLogger, 
-        this.agentConfig
-      )
+        // Initialize or reuse shared Smallest TTS to avoid multiple WS connections
+        if (!this.ttsProcessor || this.ttsProcessor.isInterrupted) {
+          this.ttsProcessor = getOrCreateSharedSmallestTTS()
+        }
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder("utf-8")
@@ -2807,6 +2803,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let userUtteranceBuffer = ""
     let lastProcessedText = ""
     let currentTTS = null
+    // Shared Smallest TTS per call (prevents multiple WS connections / 429)
+    let sharedSmallestTTS = null
     let currentLanguage = undefined
     let processingRequestId = 0
     let callLogger = null
@@ -2936,6 +2934,23 @@ const setupUnifiedVoiceServer = (wss) => {
       } catch (error) {
         // Silent error handling
       }
+    }
+
+    // Single shared Smallest.ai TTS instance per call
+    const getOrCreateSharedSmallestTTS = () => {
+      // Reuse if healthy and not interrupted
+      if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
+        return sharedSmallestTTS
+      }
+      // Create fresh
+      sharedSmallestTTS = new SimplifiedSmallestTTSProcessor(
+        currentLanguage || (agentConfig?.language || "en"),
+        ws,
+        streamSid,
+        callLogger,
+        agentConfig
+      )
+      return sharedSmallestTTS
     }
 
     const handleDeepgramResponse = async (data) => {
@@ -3436,8 +3451,9 @@ const setupUnifiedVoiceServer = (wss) => {
             }
 
             console.log("🎤 [SIP-TTS] Starting greeting TTS...")
-            const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
-            await tts.synthesizeAndStream(greeting)
+            // Preconnect shared TTS like Deepgram and synthesize greeting using it
+            sharedSmallestTTS = getOrCreateSharedSmallestTTS()
+            await sharedSmallestTTS.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
             
             // Initialize silence timeout after call setup
@@ -3564,6 +3580,11 @@ const setupUnifiedVoiceServer = (wss) => {
               currentTTS.interrupt()
               currentTTS = null
             }
+            // Also close shared Smallest WS if exists
+            if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
+              try { sharedSmallestTTS.interrupt() } catch (_) {}
+              sharedSmallestTTS = null
+            }
             
             console.log("🛑 [SIP-STOP] ======================================")
             break
@@ -3660,6 +3681,11 @@ const setupUnifiedVoiceServer = (wss) => {
         currentTTS.interrupt()
         currentTTS = null
       }
+      // Also close shared Smallest WS if exists
+      if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
+        try { sharedSmallestTTS.interrupt() } catch (_) {}
+        sharedSmallestTTS = null
+      }
 
       // Clear silence timeout
       if (silenceTimeout) {
@@ -3685,6 +3711,7 @@ const setupUnifiedVoiceServer = (wss) => {
       currentStreamSid = null
       deepgramAudioQueue = []
       currentTTS = null
+      sharedSmallestTTS = null
       currentLanguage = undefined
       processingRequestId = 0
       callLogger = null
