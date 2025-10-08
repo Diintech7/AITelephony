@@ -149,6 +149,21 @@ const getSarvamLanguage = (language = "hi") => {
   return LANGUAGE_MAPPING[lang] || "hi-IN"
 }
 
+// Replace placeholders like [name] using session/context values
+const resolvePlaceholders = (text, { name } = {}) => {
+  try {
+    const src = String(text || '')
+    if (!src) return ''
+    let out = src
+    if (name && typeof name === 'string' && name.trim()) {
+      out = out.replace(/\[name\]/gi, name.trim())
+    }
+    return out
+  } catch (_) {
+    return String(text || '')
+  }
+}
+
 const getDeepgramLanguage = (language = "hi") => {
   const lang = language?.toLowerCase() || "hi"
   if (lang === "hi") return "hi"
@@ -1060,6 +1075,31 @@ class EnhancedCallLogger {
   }
 }
 
+// Fast user-intent checks to avoid latency
+const shouldTerminateFast = (text) => {
+  try {
+    const t = String(text || '').toLowerCase().trim()
+    if (!t) return false
+    const noPhrases = [
+      'not interested', 'no thanks', 'no thank you', 'stop calling', "don't call", "don't want", 'not needed',
+      'never call', 'remove my number', 'wrong number', 'disconnect', 'hang up', 'bye', 'goodbye', 'stop', 'no'
+    ]
+    return noPhrases.some(p => t === p || t.includes(p))
+  } catch (_) { return false }
+}
+
+const indicatesWaitOrThinking = (text) => {
+  try {
+    const t = String(text || '').toLowerCase().trim()
+    if (!t) return false
+    const waitPhrases = [
+      'hold on', 'please wait', 'wait', 'one minute', 'just a minute', 'give me a minute',
+      'thinking', 'let me think', 'call back later', 'later', 'busy', 'in a meeting'
+    ]
+    return waitPhrases.some(p => t.includes(p))
+  } catch (_) { return false }
+}
+
 // Simplified OpenAI processing
 const processWithOpenAI = async (
   userMessage,
@@ -1073,8 +1113,9 @@ const processWithOpenAI = async (
 
   try {
     // Build a stricter system prompt that embeds firstMessage and sets answering policy
-    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
-    const firstMessage = (agentConfig.firstMessage || "").trim()
+    const callerName = (userName || '').trim()
+    const basePrompt = resolvePlaceholders(agentConfig.systemPrompt || "You are a helpful AI assistant.", { name: callerName })
+    const firstMessage = resolvePlaceholders((agentConfig.firstMessage || "").trim(), { name: callerName })
     const knowledgeBlock = firstMessage
       ? `FirstGreeting: "${firstMessage}"\n`
       : ""
@@ -1090,8 +1131,8 @@ const processWithOpenAI = async (
 
     const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
 
-    const personalizationMessage = userName && userName.trim()
-      ? { role: "system", content: `The user's name is ${userName.trim()}. Address them by name naturally when appropriate.` }
+    const personalizationMessage = callerName
+      ? { role: "system", content: `The user's name is ${callerName}. Address them by name naturally when appropriate.` }
       : null
 
     const messages = [
@@ -1199,8 +1240,9 @@ class StreamingLLMProcessor {
         return null
       }
 
-      const basePrompt = (this.agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
-      const firstMessage = (this.agentConfig?.firstMessage || "").trim()
+      const callerName = (this.userName || '').trim()
+      const basePrompt = resolvePlaceholders((this.agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim(), { name: callerName })
+      const firstMessage = resolvePlaceholders((this.agentConfig?.firstMessage || "").trim(), { name: callerName })
       const detailsText = (this.agentConfig?.details || "").trim()
       const qaItems = Array.isArray(this.agentConfig?.qa) ? this.agentConfig.qa : []
       const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
@@ -1524,8 +1566,9 @@ const processWithOpenAIStream = async (
       return null
     }
 
-    const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
-    const firstMessage = (agentConfig?.firstMessage || "").trim()
+    const callerName = (userName || '').trim()
+    const basePrompt = resolvePlaceholders((agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim(), { name: callerName })
+    const firstMessage = resolvePlaceholders((agentConfig?.firstMessage || "").trim(), { name: callerName })
     const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
     const policyBlock = [
       "Answer strictly using the information provided above.",
@@ -3182,7 +3225,18 @@ const setupUnifiedVoiceServer = (wss) => {
         // Reset silence timeout on user activity
         resetSilenceTimeout()
         
-        // Auto disposition detection (non-blocking, no added latency)
+      // Fast intent: strict NO → immediate termination; wait/thinking → continue
+      if (shouldTerminateFast(text)) {
+        console.log("🛑 [USER-UTTERANCE] Fast intent detected: strict NO → terminate")
+        try { currentTTS?.interrupt?.() } catch (_) {}
+        await terminateCallForDisposition('user_not_interested')
+        return
+      }
+      if (indicatesWaitOrThinking(text)) {
+        console.log("⏳ [USER-UTTERANCE] Wait/Thinking detected → continue without termination")
+      }
+
+      // Auto disposition detection (non-blocking, no added latency)
         if (autoDispositionEnabled) {
           ;(async () => {
             try {

@@ -145,6 +145,21 @@ const splitIntoSentences = (text) => {
   }
 }
 
+// Replace placeholders like [name] using session/context values
+const resolvePlaceholders = (text, { name } = {}) => {
+  try {
+    const src = String(text || '')
+    if (!src) return ''
+    let out = src
+    if (name && typeof name === 'string' && name.trim()) {
+      out = out.replace(/\[name\]/gi, name.trim())
+    }
+    return out
+  } catch (_) {
+    return String(text || '')
+  }
+}
+
 const limitSentences = (text, maxSentences = 3) => {
   try {
     const sentences = splitIntoSentences(text)
@@ -152,6 +167,31 @@ const limitSentences = (text, maxSentences = 3) => {
   } catch (_) {
     return String(text || '').trim()
   }
+}
+
+// Fast user-intent checks to avoid latency
+const shouldTerminateFast = (text) => {
+  try {
+    const t = String(text || '').toLowerCase().trim()
+    if (!t) return false
+    const noPhrases = [
+      'not interested', 'no thanks', 'no thank you', 'stop calling', 'don\'t call', 'don\'t want', 'not needed',
+      'never call', 'remove my number', 'wrong number', 'disconnect', 'hang up', 'bye', 'goodbye', 'stop', 'no'
+    ]
+    return noPhrases.some(p => t === p || t.includes(p))
+  } catch (_) { return false }
+}
+
+const indicatesWaitOrThinking = (text) => {
+  try {
+    const t = String(text || '').toLowerCase().trim()
+    if (!t) return false
+    const waitPhrases = [
+      'hold on', 'please wait', 'wait', 'one minute', 'just a minute', 'give me a minute',
+      'thinking', 'let me think', 'call back later', 'later', 'busy', 'in a meeting'
+    ]
+    return waitPhrases.some(p => t.includes(p))
+  } catch (_) { return false }
 }
 
 const smoothGreeting = (text, maxSentences = 2) => {
@@ -576,18 +616,22 @@ const processWithOpenAI = async (
 
   try {
     // Build a stricter system prompt that embeds firstMessage and sets answering policy
-    const basePrompt = agentConfig.systemPrompt || "You are a helpful AI assistant."
-    const firstMessage = (agentConfig.firstMessage || "").trim()
+    const basePromptRaw = agentConfig.systemPrompt || "You are a helpful AI assistant."
+    const firstMessageRaw = (agentConfig.firstMessage || "").trim()
+    const callerName = (userName || '').trim()
+    const basePrompt = resolvePlaceholders(basePromptRaw, { name: callerName })
+    const firstMessage = resolvePlaceholders(firstMessageRaw, { name: callerName })
     const knowledgeBlock = firstMessage
       ? `FirstGreeting: "${firstMessage}"\n`
       : ""
-    const detailsText = (agentConfig.details || "").trim()
+    const detailsTextRaw = (agentConfig.details || "").trim()
+    const detailsText = resolvePlaceholders(detailsTextRaw, { name: callerName })
     const detailsBlock = detailsText ? `Details:\n${detailsText}\n\n` : ""
     const qaItems = Array.isArray(agentConfig.qa) ? agentConfig.qa : []
     const qaBlock = qaItems.length > 0
       ? `QnA:\n${qaItems.map((item, idx) => {
-          const q = (item?.question || "").toString().trim()
-          const a = (item?.answer || "").toString().trim()
+          const q = resolvePlaceholders((item?.question || "").toString().trim(), { name: callerName })
+          const a = resolvePlaceholders((item?.answer || "").toString().trim(), { name: callerName })
           return q && a ? `${idx + 1}. Q: ${q}\n   A: ${a}` : null
         }).filter(Boolean).join("\n")}\n\n`
       : ""
@@ -1470,16 +1514,17 @@ const setupSanPbxWebSocketServer = (ws) => {
         return null
       }
 
-      const basePrompt = (agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
-      const firstMessage = (agentConfig?.firstMessage || "").trim()
+      const callerName = (userName || '').trim()
+      const basePrompt = resolvePlaceholders((agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim(), { name: callerName })
+      const firstMessage = resolvePlaceholders((agentConfig?.firstMessage || "").trim(), { name: callerName })
       const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
-      const detailsText = (agentConfig?.details || "").trim()
+      const detailsText = resolvePlaceholders((agentConfig?.details || "").trim(), { name: callerName })
       const detailsBlock = detailsText ? `Details:\n${detailsText}\n\n` : ""
       const qaItems = Array.isArray(agentConfig?.qa) ? agentConfig.qa : []
       const qaBlock = qaItems.length > 0
         ? `QnA:\n${qaItems.map((item, idx) => {
-            const q = (item?.question || "").toString().trim()
-            const a = (item?.answer || "").toString().trim()
+            const q = resolvePlaceholders((item?.question || "").toString().trim(), { name: callerName })
+            const a = resolvePlaceholders((item?.answer || "").toString().trim(), { name: callerName })
             return q && a ? `${idx + 1}. Q: ${q}\n   A: ${a}` : null
           }).filter(Boolean).join("\n")}\n\n`
         : ""
@@ -1988,6 +2033,17 @@ const setupSanPbxWebSocketServer = (ws) => {
       // Reset silence timeout on user activity
       resetSilenceTimeout()
       
+      // Immediate intent handling (zero-latency)
+      if (shouldTerminateFast(text)) {
+        console.log("🛑 [USER-UTTERANCE] Fast intent detected: strict NO → terminate")
+        try { currentTTS?.interrupt?.() } catch (_) {}
+        await terminateCallForDisposition('user_not_interested')
+        return
+      }
+      if (indicatesWaitOrThinking(text)) {
+        console.log("⏳ [USER-UTTERANCE] Wait/Thinking detected → continue without termination")
+      }
+      
       // Auto disposition detection (non-blocking, no added latency)
       if (autoDispositionEnabled) {
         ;(async () => {
@@ -2010,6 +2066,20 @@ const setupSanPbxWebSocketServer = (ws) => {
       // Sentence-based streaming (enqueue each complete sentence as it forms)
       let lastLen = 0
       let carry = ""
+      let completeSentences = []
+      const takeBatch = () => {
+        if (completeSentences.length < 2) return null
+        const batch = []
+        batch.push(completeSentences.shift())
+        batch.push(completeSentences.shift())
+        if (completeSentences.length > 0) {
+          const currentLen = batch.reduce((s, t) => s + t.length, 0)
+          if (currentLen + completeSentences[0].length < 150) {
+            batch.push(completeSentences.shift())
+          }
+        }
+        return batch
+      }
       aiResponse = await processWithOpenAIStream(
         text,
         conversationHistory,
@@ -2022,26 +2092,30 @@ const setupSanPbxWebSocketServer = (ws) => {
           const sentences = splitIntoSentences(delta)
           // If delta doesn't end with terminator, keep last as carry
           const endsWithTerminator = /[.!?]\s*$/.test(delta)
-          const complete = endsWithTerminator ? sentences : sentences.slice(0, -1)
-          for (const s of complete) {
+          const full = endsWithTerminator ? sentences : sentences.slice(0, -1)
+          for (const s of full) {
             const trimmed = s.trim()
-            if (trimmed) {
-              try { await tts.enqueueText(trimmed) } catch (_) {}
-            }
+            if (trimmed) completeSentences.push(trimmed)
           }
           carry = endsWithTerminator ? "" : (sentences[sentences.length - 1] || "")
+          // Only send batches of 2–3 sentences; do not send singles during streaming
+          let batch
+          while ((batch = takeBatch())) {
+            const combined = batch.join(' ')
+            try { await tts.enqueueText(combined) } catch (_) {}
+          }
           lastLen = partial.length
         }
       )
 
-      // Final flush for remaining carry as a sentence
-      if (processingRequestId === currentRequestId && carry) {
-        const remaining = splitIntoSentences(carry)
-        for (const s of remaining) {
-          const trimmed = s.trim()
-          if (trimmed) {
-            try { await currentTTS.enqueueText(trimmed) } catch (_) {}
-          }
+      // Final flush: include carry and any remaining sentences as up to 3 combined
+      if (processingRequestId === currentRequestId) {
+        if (carry && carry.trim()) completeSentences.push(carry.trim())
+        if (completeSentences.length > 0) {
+          const batch = []
+          while (batch.length < 3 && completeSentences.length > 0) batch.push(completeSentences.shift())
+          const combined = batch.join(' ')
+          try { await currentTTS.enqueueText(combined) } catch (_) {}
         }
       }
       
@@ -2601,17 +2675,22 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
 
       // Mirror aitota.js prompt structure
-      const basePrompt = (ws.sessionAgentConfig?.systemPrompt || "You are a helpful AI assistant.").trim()
-      const firstMessage = (ws.sessionAgentConfig?.firstMessage || "").trim()
+      const callerName = (sessionUserName || '').trim()
+      const basePrompt = resolvePlaceholders((ws.sessionAgentConfig?.systemPrompt || "You are a helpful AI assistant.").trim(), { name: callerName })
+      const firstMessage = resolvePlaceholders((ws.sessionAgentConfig?.firstMessage || "").trim(), { name: callerName })
       const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
       
       // Get policy block from SystemPrompt database (with fallback)
       const policyBlock = await getSystemPromptWithCache()
       
       const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+      const personalizationMessage = callerName
+        ? { role: "system", content: `The user's name is ${callerName}. Address them by name naturally when appropriate.` }
+        : null
 
       const messages = [
         { role: "system", content: systemPrompt },
+        ...(personalizationMessage ? [personalizationMessage] : []),
         ...conversationHistory.slice(-6),
         { role: "user", content: userMessage },
       ]
