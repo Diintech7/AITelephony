@@ -1419,6 +1419,8 @@ const setupSanPbxWebSocketServer = (ws) => {
   // Simple TTS queue to serialize chunk playback and avoid overlaps
   let ttsQueue = []
   let ttsBusy = false
+  // Shared Smallest TTS per call to avoid multiple WS connections / 429
+  let sharedSmallestTTS = null
   const enqueueTts = async (text, language = "en") => {
     if (!text || !text.trim()) return
     ttsQueue.push({ text: text.trim(), language })
@@ -1433,9 +1435,18 @@ const setupSanPbxWebSocketServer = (ws) => {
       while (ttsQueue.length > 0) {
         const item = ttsQueue.shift()
         try {
-          const tts = createTtsProcessor(ws, streamId, callLogger)
-          currentTTS = tts
-          await tts.synthesizeAndStream(item.text)
+          const provider = (ws.sessionAgentConfig?.voiceServiceProvider || "sarvam").toLowerCase()
+          if (provider === "smallest") {
+            if (!sharedSmallestTTS || sharedSmallestTTS.isInterrupted) {
+              sharedSmallestTTS = new SimplifiedSmallestWSTTSProcessor(ws, streamId, callLogger)
+            }
+            currentTTS = sharedSmallestTTS
+            await sharedSmallestTTS.synthesizeAndStream(item.text)
+          } else {
+            const tts = createTtsProcessor(ws, streamId, callLogger)
+            currentTTS = tts
+            await tts.synthesizeAndStream(item.text)
+          }
         } catch (_) {}
       }
     } finally {
@@ -3104,8 +3115,16 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
 
           console.log("🎤 [SANPBX-TTS] Starting greeting TTS...")
-          currentTTS = createTtsProcessor(ws, streamId, callLogger)
-          await currentTTS.synthesizeAndStream(greeting)
+          if ((ws.sessionAgentConfig?.voiceServiceProvider || "sarvam").toLowerCase() === "smallest") {
+            if (!sharedSmallestTTS || sharedSmallestTTS.isInterrupted) {
+              sharedSmallestTTS = new SimplifiedSmallestWSTTSProcessor(ws, streamId, callLogger)
+            }
+            currentTTS = sharedSmallestTTS
+            await sharedSmallestTTS.synthesizeAndStream(greeting)
+          } else {
+            currentTTS = createTtsProcessor(ws, streamId, callLogger)
+            await currentTTS.synthesizeAndStream(greeting)
+          }
           console.log("✅ [SANPBX-TTS] Greeting TTS completed")
 
           // Now connect to Deepgram for speech recognition after greeting
@@ -3172,6 +3191,12 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           if (silenceTimer) {
             clearTimeout(silenceTimer)
+          }
+          
+          // Close shared Smallest WS if exists
+          if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
+            try { sharedSmallestTTS.interrupt() } catch (_) {}
+            sharedSmallestTTS = null
           }
           
           // Cleanup WebSocket tracking
@@ -3355,6 +3380,12 @@ const setupSanPbxWebSocketServer = (ws) => {
   // Handle connection close
   ws.on("close", async () => {
     console.log("🔌 [SANPBX] WebSocket connection closed")
+
+    // Close shared Smallest WS if exists
+    if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
+      try { sharedSmallestTTS.interrupt() } catch (_) {}
+      sharedSmallestTTS = null
+    }
 
     // Safety: Intelligent WhatsApp send on close if conditions are met
     try {
