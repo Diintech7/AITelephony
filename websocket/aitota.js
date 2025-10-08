@@ -1577,18 +1577,29 @@ Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on th
 }
 
 // Intelligent call disconnection detection using OpenAI
-const detectCallDisconnectionIntent = async (userMessage, conversationHistory, language) => {
-  const timer = createTimer("DISCONNECTION_DETECTION")
+// Enhanced auto disposition detection using OpenAI
+const detectAutoDisposition = async (userMessage, conversationHistory, language) => {
+  const timer = createTimer("AUTO_DISPOSITION_DETECTION")
   try {
-    const disconnectionPrompt = `Analyze if the user wants to end/disconnect the call. Look for:
-- "thank you", "thanks", "bye", "goodbye", "end call", "hang up"
-- "hold on", "wait", "not available", "busy", "call back later"
-- "not interested", "no thanks", "stop calling"
-- Any indication they want to end the conversation
+    const dispositionPrompt = `Analyze the user's response and conversation context to determine if the call should be terminated. Look for:
+
+TERMINATE CALL if user shows:
+- "not interested", "no thanks", "stop calling", "don't want", "not needed"
+- "busy", "hold on", "wait", "call back later", "not available"
+- "bye", "goodbye", "end call", "hang up", "thank you" (as closing)
+- "wrong number", "not the right person"
+- Any clear indication they want to end the conversation
+
+CONTINUE CALL if user shows:
+- Asking questions about the service/product
+- Showing interest or engagement
+- Requesting more information
+- "yes", "maybe", "tell me more", "how does it work"
 
 User message: "${userMessage}"
+Recent conversation: ${conversationHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join(' | ')}
 
-Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they want to continue.`
+Return ONLY: "TERMINATE" if call should be ended, or "CONTINUE" if conversation should continue.`
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -1599,7 +1610,7 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: disconnectionPrompt },
+          { role: "system", content: dispositionPrompt },
         ],
         max_tokens: 10,
         temperature: 0.1,
@@ -1607,24 +1618,28 @@ Return ONLY: "DISCONNECT" if they want to end the call, or "CONTINUE" if they wa
     })
 
     if (!response.ok) {
-      console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${response.status}`)
+      console.log(`❌ [AUTO-DISPOSITION] ${timer.end()}ms - Error: ${response.status}`)
       return "CONTINUE" // Default to continue on error
     }
 
     const data = await response.json()
     const result = data.choices[0]?.message?.content?.trim().toUpperCase()
 
-    if (result === "DISCONNECT") {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to disconnect`)
-      return "DISCONNECT"
+    if (result === "TERMINATE") {
+      console.log(`🛑 [AUTO-DISPOSITION] ${timer.end()}ms - User wants to terminate call`)
+      return "TERMINATE"
     } else {
-      console.log(`🕒 [DISCONNECTION-DETECTION] ${timer.end()}ms - User wants to continue`)
+      console.log(`✅ [AUTO-DISPOSITION] ${timer.end()}ms - User wants to continue`)
       return "CONTINUE"
     }
   } catch (error) {
-    console.log(`❌ [DISCONNECTION-DETECTION] ${timer.end()}ms - Error: ${error.message}`)
+    console.log(`❌ [AUTO-DISPOSITION] ${timer.end()}ms - Error: ${error.message}`)
     return "CONTINUE" // Default to continue on error
   }
+}
+
+const detectCallDisconnectionIntent = async (userMessage, conversationHistory, language) => {
+  return await detectAutoDisposition(userMessage, conversationHistory, language)
 }
 
 // Intelligent WhatsApp request detection using OpenAI
@@ -2756,11 +2771,34 @@ const handleExternalCallDisconnection = async (streamSid, reason = 'external_dis
   }
 }
 
+// Global map to store active WebSocket connections by streamSid
+const activeWebSockets = new Map()
+
+// Check if call is already active to prevent multiple WebSocket connections
+const isCallActive = (streamSid) => {
+  return activeWebSockets.has(streamSid)
+}
+
+// Force disconnect existing WebSocket for a streamSid
+const forceDisconnectWebSocket = (streamSid) => {
+  const existingWs = activeWebSockets.get(streamSid)
+  if (existingWs && existingWs.readyState === WebSocket.OPEN) {
+    console.log(`🔗 [AITOTA-WS-FORCE-DISCONNECT] Force closing existing WebSocket for streamSid: ${streamSid}`)
+    existingWs.close()
+    activeWebSockets.delete(streamSid)
+    return true
+  }
+  return false
+}
+
 // Main WebSocket server setup with enhanced live transcript functionality
 const setupUnifiedVoiceServer = (wss) => {
   wss.on("connection", (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`)
     const urlParams = Object.fromEntries(url.searchParams.entries())
+    
+    // Track this WebSocket connection
+    let currentStreamSid = null
 
     // Session state
     let streamSid = null
@@ -2775,12 +2813,84 @@ const setupUnifiedVoiceServer = (wss) => {
     let callDirection = "inbound"
     let agentConfig = null
     let userName = null
+    let lastUserActivity = Date.now()
+    let silenceTimeout = null
+    let autoDispositionEnabled = true
 
     // Deepgram WebSocket connection
     let deepgramWs = null
     let deepgramReady = false
     let deepgramAudioQueue = []
     let sttTimer = null
+
+    // Auto disposition and silence timeout handlers
+    const resetSilenceTimeout = () => {
+      if (silenceTimeout) {
+        clearTimeout(silenceTimeout)
+        silenceTimeout = null
+      }
+      lastUserActivity = Date.now()
+      
+      // Set 30-second silence timeout
+      silenceTimeout = setTimeout(async () => {
+        console.log("⏰ [SILENCE-TIMEOUT] 30 seconds of silence detected - terminating call")
+        await terminateCallForSilence()
+      }, 30000)
+    }
+
+    const terminateCallForSilence = async () => {
+      try {
+        console.log("🛑 [AUTO-TERMINATION] Terminating call due to silence timeout")
+        
+        if (callLogger) {
+          callLogger.updateLeadStatus('not_connected')
+          await callLogger.saveToDatabase('not_connected', agentConfig)
+          callLogger.cleanup()
+        }
+        
+        if (streamSid && callLogger?.callSid && callLogger?.accountSid) {
+          await disconnectCallViaAWS(streamSid, callLogger.callSid, callLogger.accountSid, 'silence_timeout')
+        }
+        
+        // Close WebSocket and cleanup tracking
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.close()
+        }
+        if (currentStreamSid) {
+          activeWebSockets.delete(currentStreamSid)
+          console.log(`🔗 [AITOTA-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+        }
+      } catch (error) {
+        console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
+      }
+    }
+
+    const terminateCallForDisposition = async (reason = 'auto_disposition') => {
+      try {
+        console.log(`🛑 [AUTO-TERMINATION] Terminating call due to disposition: ${reason}`)
+        
+        if (callLogger) {
+          callLogger.updateLeadStatus('not_required')
+          await callLogger.saveToDatabase('not_required', agentConfig)
+          callLogger.cleanup()
+        }
+        
+        if (streamSid && callLogger?.callSid && callLogger?.accountSid) {
+          await disconnectCallViaAWS(streamSid, callLogger.callSid, callLogger.accountSid, reason)
+        }
+        
+        // Close WebSocket and cleanup tracking
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.close()
+        }
+        if (currentStreamSid) {
+          activeWebSockets.delete(currentStreamSid)
+          console.log(`🔗 [AITOTA-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+        }
+      } catch (error) {
+        console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
+      }
+    }
 
     const connectToDeepgram = async () => {
       try {
@@ -2926,6 +3036,21 @@ const setupUnifiedVoiceServer = (wss) => {
       voiceTiming.checkpoint("PROCESSING_PREPARED")
 
       try {
+        // Reset silence timeout on user activity
+        resetSilenceTimeout()
+        
+        // Run auto disposition detection first
+        if (autoDispositionEnabled) {
+          console.log("🔍 [USER-UTTERANCE] Running auto disposition detection...")
+          const dispositionResult = await detectAutoDisposition(text, conversationHistory, currentLanguage)
+          
+          if (dispositionResult === "TERMINATE") {
+            console.log("🛑 [USER-UTTERANCE] Auto disposition detected - terminating call")
+            await terminateCallForDisposition('user_not_interested')
+            return
+          }
+        }
+
         console.log("🔍 [USER-UTTERANCE] Running AI detections + streaming...")
 
         // Kick off streaming LLM processing with sentence-based TTS
@@ -3031,6 +3156,19 @@ const setupUnifiedVoiceServer = (wss) => {
           case "start": {
             streamSid = data.streamSid || data.start?.streamSid
             const accountSid = data.start?.accountSid
+            
+            // Check if call is already active and handle accordingly
+            if (streamSid && isCallActive(streamSid)) {
+              console.log(`⚠️ [AITOTA-WS-CONFLICT] Call already active for streamSid: ${streamSid}, force disconnecting existing connection`)
+              forceDisconnectWebSocket(streamSid)
+            }
+            
+            // Track this WebSocket connection
+            if (streamSid) {
+              currentStreamSid = streamSid
+              activeWebSockets.set(streamSid, ws)
+              console.log(`🔗 [AITOTA-WS-TRACKING] Registered WebSocket for streamSid: ${streamSid}`)
+            }
 
             // Log all incoming SIP data
             console.log("📞 [SIP-START] ========== CALL START DATA ==========")
@@ -3301,6 +3439,9 @@ const setupUnifiedVoiceServer = (wss) => {
             const tts = new SimplifiedSmallestTTSProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
             await tts.synthesizeAndStream(greeting)
             console.log("✅ [SIP-TTS] Greeting TTS completed")
+            
+            // Initialize silence timeout after call setup
+            resetSilenceTimeout()
             break
           }
 
@@ -3376,6 +3517,12 @@ const setupUnifiedVoiceServer = (wss) => {
             // Handle external call disconnection
             if (streamSid) {
               await handleExternalCallDisconnection(streamSid, 'sip_stop_event')
+            }
+            
+            // Cleanup WebSocket tracking
+            if (currentStreamSid) {
+              activeWebSockets.delete(currentStreamSid)
+              console.log(`🔗 [AITOTA-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
             }
             
             if (callLogger) {
@@ -3514,6 +3661,18 @@ const setupUnifiedVoiceServer = (wss) => {
         currentTTS = null
       }
 
+      // Clear silence timeout
+      if (silenceTimeout) {
+        clearTimeout(silenceTimeout)
+        silenceTimeout = null
+      }
+
+      // Cleanup WebSocket tracking
+      if (currentStreamSid) {
+        activeWebSockets.delete(currentStreamSid)
+        console.log(`🔗 [AITOTA-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+      }
+
       console.log("🔌 [SIP-CLOSE] Resetting session state...")
       
       // Reset state
@@ -3523,12 +3682,15 @@ const setupUnifiedVoiceServer = (wss) => {
       userUtteranceBuffer = ""
       lastProcessedText = ""
       deepgramReady = false
+      currentStreamSid = null
       deepgramAudioQueue = []
       currentTTS = null
       currentLanguage = undefined
       processingRequestId = 0
       callLogger = null
       callDirection = "inbound"
+      lastUserActivity = Date.now()
+      autoDispositionEnabled = true
       agentConfig = null
       sttTimer = null
       
@@ -3622,6 +3784,76 @@ const billWhatsAppCredit = async ({ clientId, mobile, link, callLogId, streamSid
   }
 }
 
+// Helper to disconnect call via AWS API for Aitota
+const disconnectCallViaAWS = async (streamSid, callSid, accountSid, reason = 'manual_disconnect') => {
+  try {
+    if (!streamSid || !callSid || !accountSid) {
+      console.log("❌ [AWS-DISCONNECT] Missing required parameters for disconnect")
+      return { success: false, error: "Missing required parameters" }
+    }
+
+    const awsUrl = "https://3neysomt18.execute-api.us-east-1.amazonaws.com/dev/clicktobot"
+    const requestBody = {
+      event: "stop",
+      sequenceNumber: "5",
+      stop: {
+        accountSid: accountSid,
+        callSid: callSid
+      },
+      streamSid: streamSid
+    }
+
+    console.log(`🛑 [AWS-DISCONNECT] Attempting to disconnect call: ${callSid}`)
+    console.log(`🛑 [AWS-DISCONNECT] API URL: ${awsUrl}`)
+    console.log(`🛑 [AWS-DISCONNECT] Request Body:`, JSON.stringify(requestBody))
+
+    const response = await fetch(awsUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+    })
+
+    const responseText = await response.text()
+    const isOk = response.ok
+
+    console.log(`🛑 [AWS-DISCONNECT] Response Status: ${response.status} ${response.statusText}`)
+    console.log(`🛑 [AWS-DISCONNECT] Response Body: ${responseText}`)
+
+    if (isOk) {
+      console.log(`✅ [AWS-DISCONNECT] Successfully disconnected call: ${callSid}`)
+      return { 
+        success: true, 
+        callSid, 
+        streamSid,
+        reason,
+        status: response.status,
+        response: responseText 
+      }
+    } else {
+      console.log(`❌ [AWS-DISCONNECT] Failed to disconnect call: ${callSid} - Status: ${response.status}`)
+      return { 
+        success: false, 
+        callSid, 
+        streamSid,
+        reason,
+        status: response.status,
+        error: responseText 
+      }
+    }
+  } catch (error) {
+    console.log(`❌ [AWS-DISCONNECT] Error disconnecting call ${callSid}:`, error.message)
+    return { 
+      success: false, 
+      callSid, 
+      streamSid,
+      reason,
+      error: error.message 
+    }
+  }
+}
+
 /**
  * Terminate a call by streamSid
  * @param {string} streamSid - The stream SID to terminate
@@ -3706,6 +3938,9 @@ const terminateCallByStreamSid = async (streamSid, reason = 'manual_termination'
 module.exports = { 
   setupUnifiedVoiceServer, 
   terminateCallByStreamSid,
+  isCallActive,
+  forceDisconnectWebSocket,
+  activeWebSockets,
   // Export termination methods for external use
   terminationMethods: {
     graceful: (callLogger, message, language) => callLogger?.gracefulCallEnd(message, language),

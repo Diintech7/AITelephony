@@ -2321,40 +2321,57 @@ const setupSanPbxWebSocketServer = (ws) => {
     async connectToSmallest() {
       if (this.smallestWs && this.smallestWs.readyState === WebSocket.OPEN) return
       if (!API_KEYS.smallest) throw new Error("Smallest API key not configured")
-      await new Promise((resolve, reject) => {
+
+      // Try a few times with short backoff to mitigate transient timeouts
+      let attempt = 0
+      const maxAttempts = Math.max(this.maxRetries, 3)
+      while (attempt < maxAttempts) {
+        attempt++
         try {
-          const wsConn = new WebSocket("wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream", {
-            headers: { Authorization: `Bearer ${API_KEYS.smallest}` },
-          })
-          this.smallestWs = wsConn
-          const timeout = setTimeout(() => reject(new Error("Smallest WS connect timeout")), 4000)
-          wsConn.onopen = () => {
-            clearTimeout(timeout)
-            this.smallestReady = true
-            this.connectionRetryCount = 0
-            this.startKeepAlive()
-            resolve()
-          }
-          wsConn.onmessage = (evt) => {
-            try { this.handleSmallestMessage(JSON.parse(evt.data)) } catch (_) {}
-          }
-          wsConn.onclose = (event) => {
-            this.smallestReady = false
-            if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
-            this.smallestWs = null
-            // Auto-reconnect within retry limit
-            if (!this.isInterrupted && event.code !== 1000 && this.connectionRetryCount < this.maxRetries) {
-              this.connectionRetryCount++
-              setTimeout(() => {
-                if (!this.isInterrupted) {
-                  this.connectToSmallest().catch(() => {})
+          await new Promise((resolve, reject) => {
+            try {
+              const wsConn = new WebSocket("wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream", {
+                headers: { Authorization: `Bearer ${API_KEYS.smallest}` },
+              })
+              this.smallestWs = wsConn
+              const timeout = setTimeout(() => reject(new Error("Smallest WS connect timeout")), 8000)
+              wsConn.onopen = () => {
+                clearTimeout(timeout)
+                this.smallestReady = true
+                this.connectionRetryCount = 0
+                this.startKeepAlive()
+                resolve()
+              }
+              wsConn.onmessage = (evt) => {
+                try { this.handleSmallestMessage(JSON.parse(evt.data)) } catch (_) {}
+              }
+              wsConn.onclose = (event) => {
+                this.smallestReady = false
+                if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
+                this.smallestWs = null
+                // Auto-reconnect within retry limit
+                if (!this.isInterrupted && event.code !== 1000 && this.connectionRetryCount < this.maxRetries) {
+                  this.connectionRetryCount++
+                  setTimeout(() => {
+                    if (!this.isInterrupted) {
+                      this.connectToSmallest().catch(() => {})
+                    }
+                  }, 2000)
                 }
-              }, 2000)
-            }
+              }
+              wsConn.onerror = () => {}
+            } catch (e) { reject(e) }
+          })
+          // Connected successfully, exit loop
+          return
+        } catch (e) {
+          if (attempt >= maxAttempts) {
+            throw e
           }
-          wsConn.onerror = () => {}
-        } catch (e) { reject(e) }
-      })
+          // Backoff before retrying
+          await new Promise(r => setTimeout(r, 600 * attempt))
+        }
+      }
     }
 
     handleSmallestMessage(msg) {
@@ -2386,7 +2403,19 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
 
     async processSingle(text) {
-      await this.connectToSmallest()
+      // Ensure connection; on failure, fall back to brief silence to keep flow
+      try {
+        await this.connectToSmallest()
+      } catch (connectError) {
+        const id = ++this.requestId
+        return new Promise((resolve, reject) => {
+          const request = { requestId: id, resolve, reject, audioChunks: [], text }
+          this.pendingRequests.set(id, request)
+          console.log(`[SMALLEST-TTS] WS synth error: ${connectError.message}`)
+          this.createFallbackAudio(text || " ", request)
+        })
+      }
+
       const id = ++this.requestId
       return new Promise((resolve, reject) => {
         this.pendingRequests.set(id, { resolve, reject, audioChunks: [], text })
