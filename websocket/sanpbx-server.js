@@ -1359,7 +1359,7 @@ const setupSanPbxWebSocketServer = (ws) => {
     silenceTimeout = setTimeout(async () => {
       console.log("⏰ [SILENCE-TIMEOUT] 30 seconds of silence detected - terminating call")
       await terminateCallForSilence()
-    }, 30000)
+    }, 50000)
   }
 
   const terminateCallForSilence = async () => {
