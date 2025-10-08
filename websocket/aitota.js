@@ -157,6 +157,87 @@ const getDeepgramLanguage = (language = "hi") => {
   return lang
 }
 
+// Latency/interim thresholds for interruption control (aligned with reference)
+const LATENCY_CONFIG = {
+  INTERIM_MIN_WORDS: 1,
+  INTERIM_MIN_LENGTH: 10,
+  INTERIM_DEBOUNCE_MS: 800,
+  CONFIDENCE_THRESHOLD: 0.85,
+}
+
+// Conversation history manager with strict interim handling
+class ConversationHistoryManager {
+  constructor() {
+    this.entries = []
+    this.pendingTranscript = ""
+    this.lastTranscriptTime = 0
+    this.transcriptMergeTimer = null
+    this.lastInterimText = ""
+    this.lastInterimTime = 0
+  }
+
+  addUserTranscript(text, timestamp = Date.now()) {
+    const clean = String(text || "").trim()
+    if (!clean || clean.split(/\s+/).length < 2) return
+    if (this.transcriptMergeTimer) { clearTimeout(this.transcriptMergeTimer); this.transcriptMergeTimer = null }
+    const last = this.entries[this.entries.length - 1]
+    const delta = timestamp - this.lastTranscriptTime
+    if (last && last.role === 'user' && delta < 2000 && !/[.!?]$/.test(last.content)) {
+      last.content = `${last.content} ${clean}`.trim()
+      last.timestamp = timestamp
+    } else {
+      this.entries.push({ role: 'user', content: clean, timestamp })
+    }
+    this.lastTranscriptTime = timestamp
+    this.trim()
+  }
+
+  addAssistantResponse(text, timestamp = Date.now()) {
+    const clean = String(text || "").trim()
+    if (!clean) return
+    this.entries.push({ role: 'assistant', content: clean, timestamp })
+    this.trim()
+  }
+
+  handleInterimTranscript(text, timestamp = Date.now()) {
+    const clean = String(text || "").trim()
+    if (!clean) return false
+    if (clean === this.lastInterimText && (timestamp - this.lastInterimTime) < LATENCY_CONFIG.INTERIM_DEBOUNCE_MS) return false
+    this.lastInterimText = clean
+    this.lastInterimTime = timestamp
+
+    const wordCount = clean.split(/\s+/).length
+    const isLongEnough = clean.length >= LATENCY_CONFIG.INTERIM_MIN_LENGTH
+    const hasEnoughWords = wordCount >= LATENCY_CONFIG.INTERIM_MIN_WORDS
+    const isFiller = /^(um|uh|er|ah|hmm|well|okay|ok|yes|no|yeah|yep|nope|what|huh|sorry)(\s|$)/i.test(clean)
+    const isNoise = /^[^a-zA-Z]*$/.test(clean) || clean.length < 3
+    const isRepeat = /^(.)\1+$/.test(clean)
+    const isOnlyPunct = /^[\p{P}\p{S}\s]+$/u.test(clean)
+    const hasSubstance = isLongEnough && hasEnoughWords && !isFiller && !isNoise && !isRepeat && !isOnlyPunct
+    if (!hasSubstance) return false
+
+    // schedule merge to final if no further speech
+    if (this.transcriptMergeTimer) clearTimeout(this.transcriptMergeTimer)
+    this.pendingTranscript = clean
+    this.lastTranscriptTime = timestamp
+    this.transcriptMergeTimer = setTimeout(() => {
+      if (this.pendingTranscript) {
+        this.addUserTranscript(this.pendingTranscript, this.lastTranscriptTime)
+        this.pendingTranscript = ""
+      }
+    }, 2000)
+    return true
+  }
+
+  getConversationHistory() {
+    return this.entries.map(e => ({ role: e.role, content: e.content }))
+  }
+
+  trim(max = 20) {
+    if (this.entries.length > max) this.entries.splice(0, this.entries.length - max)
+  }
+}
+
 // Valid Sarvam voice options
 const VALID_SARVAM_VOICES = new Set([
   "abhilash",
@@ -2809,7 +2890,8 @@ const setupUnifiedVoiceServer = (wss) => {
 
     // Session state
     let streamSid = null
-    let conversationHistory = []
+    // Conversation history manager for low-latency interim handling
+    const history = new ConversationHistoryManager()
     let isProcessing = false
     let userUtteranceBuffer = ""
     let lastProcessedText = ""
@@ -2844,7 +2926,7 @@ const setupUnifiedVoiceServer = (wss) => {
       silenceTimeout = setTimeout(async () => {
         console.log("⏰ [SILENCE-TIMEOUT] 30 seconds of silence detected - terminating call")
         await terminateCallForSilence()
-      }, 30000)
+      }, 50000)
     }
 
     const terminateCallForSilence = async () => {
@@ -2904,7 +2986,6 @@ const setupUnifiedVoiceServer = (wss) => {
     const connectToDeepgram = async () => {
       try {
         const deepgramLanguage = getDeepgramLanguage(currentLanguage)
-
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
         deepgramUrl.searchParams.append("sample_rate", "8000")
         deepgramUrl.searchParams.append("channels", "1")
@@ -2913,19 +2994,18 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage)
         deepgramUrl.searchParams.append("interim_results", "true")
         deepgramUrl.searchParams.append("smart_format", "true")
-        // Match sanpbx endpointing to get quicker finalization
         deepgramUrl.searchParams.append("endpointing", "300")
 
-        deepgramWs = new WebSocket(deepgramUrl.toString(), {
-          headers: { Authorization: `Token ${API_KEYS.deepgram}` },
-        })
+        deepgramWs = new WebSocket(deepgramUrl.toString(), { headers: { Authorization: `Token ${API_KEYS.deepgram}` } })
 
         deepgramWs.onopen = () => {
           console.log("🎤 [DEEPGRAM] Connection established")
           deepgramReady = true
-          console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
-          deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
-          deepgramAudioQueue = []
+          if (deepgramAudioQueue.length) {
+            console.log("🎤 [DEEPGRAM] Processing queued audio packets:", deepgramAudioQueue.length)
+            deepgramAudioQueue.forEach((buffer) => deepgramWs.send(buffer))
+            deepgramAudioQueue = []
+          }
         }
 
         deepgramWs.onmessage = async (event) => {
@@ -2938,13 +3018,31 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramReady = false
         }
 
-        deepgramWs.onclose = () => {
-          console.log("🔌 [DEEPGRAM] Connection closed")
-          deepgramReady = false
-        }
-      } catch (error) {
-        // Silent error handling
-      }
+      } catch (_) {}
+    }
+
+    // Boot Deepgram with retries and backoff; flush queued audio on open
+    const bootDeepgram = (retryCount = 0) => {
+      const MAX_RETRIES = 3
+      const RETRY_DELAY = 1000 * Math.pow(2, retryCount)
+      console.log(`🎤 [DEEPGRAM-BOOT] attempt=${retryCount + 1}/${MAX_RETRIES + 1}`)
+      connectToDeepgram()
+        .then(() => {
+          if (!deepgramWs) return
+          deepgramWs.onclose = (e) => {
+            deepgramReady = false
+            console.log(`🔌 [DEEPGRAM] closed code=${e?.code} reason="${e?.reason || 'none'}"`)
+            if (e?.code !== 1000 && retryCount < MAX_RETRIES && streamSid) {
+              console.log(`🎤 [DEEPGRAM-RETRY] retrying in ${RETRY_DELAY}ms...`)
+              setTimeout(() => bootDeepgram(retryCount + 1), RETRY_DELAY)
+            }
+          }
+        })
+        .catch(() => {
+          if (retryCount < MAX_RETRIES) {
+            setTimeout(() => bootDeepgram(retryCount + 1), RETRY_DELAY)
+          }
+        })
     }
 
     // Single shared Smallest.ai TTS instance per call
@@ -3006,6 +3104,7 @@ const setupUnifiedVoiceServer = (wss) => {
             if (callLogger && transcript.trim()) {
               callLogger.logUserTranscript(transcript.trim())
             }
+            try { history.addUserTranscript(transcript.trim()) } catch (_) {}
 
             await processUserUtterance(userUtteranceBuffer)
             const utteranceProcessDuration = Date.now() - utteranceStartTime
@@ -3013,6 +3112,13 @@ const setupUnifiedVoiceServer = (wss) => {
             userUtteranceBuffer = ""
           } else {
             sttTimer.checkpoint("STT_INTERIM_RESULT_RECEIVED")
+            // Interim: detect meaningful interruption to reduce latency
+            try {
+              const ok = history.handleInterimTranscript(transcript.trim())
+              if (ok && currentTTS) {
+                currentTTS.interrupt?.()
+              }
+            } catch (_) {}
           }
         }
       } else if (data.type === "UtteranceEnd") {
