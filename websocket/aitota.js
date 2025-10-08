@@ -1075,12 +1075,13 @@ const processWithOpenAI = async (
 
 // Enhanced streaming OpenAI completion with sentence-based TTS processing
 class StreamingLLMProcessor {
-  constructor(language, ws, streamSid, callLogger, agentConfig) {
+  constructor(language, ws, streamSid, callLogger, agentConfig, sharedTTSRef = null) {
     this.language = language
     this.ws = ws
     this.streamSid = streamSid
     this.callLogger = callLogger
     this.agentConfig = agentConfig
+    this.sharedTTSRef = sharedTTSRef
     this.sentenceQueue = [] // FIFO queue for complete sentences
     this.currentBuffer = "" // Buffer for incomplete sentences
     this.isProcessing = false
@@ -1160,10 +1161,20 @@ class StreamingLLMProcessor {
         console.error(`❌ [LLM-STREAM] ${timer.end()}ms - HTTP ${response.status}`)
         return null
       }
-
+      
         // Initialize or reuse shared Smallest TTS to avoid multiple WS connections
         if (!this.ttsProcessor || this.ttsProcessor.isInterrupted) {
-          this.ttsProcessor = getOrCreateSharedSmallestTTS()
+          if (this.sharedTTSRef && !this.sharedTTSRef.isInterrupted) {
+            this.ttsProcessor = this.sharedTTSRef
+          } else {
+            this.ttsProcessor = new SimplifiedSmallestTTSProcessor(
+              this.language, 
+              this.ws, 
+              this.streamSid, 
+              this.callLogger, 
+              this.agentConfig
+            )
+          }
         }
 
       const reader = response.body.getReader()
@@ -3070,7 +3081,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         // Kick off streaming LLM processing with sentence-based TTS
         let aiResponse = null
-        const streamingProcessor = new StreamingLLMProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig)
+        const streamingProcessor = new StreamingLLMProcessor(currentLanguage, ws, streamSid, callLogger, agentConfig, sharedSmallestTTS)
         // Track the processor itself so interrupt() always cancels any in-flight TTS batches
         currentTTS = streamingProcessor
         voiceTiming.checkpoint("STREAMING_PROCESSOR_CREATED")
