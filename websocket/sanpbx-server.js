@@ -1988,16 +1988,19 @@ const setupSanPbxWebSocketServer = (ws) => {
       // Reset silence timeout on user activity
       resetSilenceTimeout()
       
-      // Run auto disposition detection first
+      // Auto disposition detection (non-blocking, no added latency)
       if (autoDispositionEnabled) {
-        console.log("🔍 [USER-UTTERANCE] Running auto disposition detection...")
-        const dispositionResult = await detectAutoDisposition(text, conversationHistory, detectedLanguage)
-        
-        if (dispositionResult === "TERMINATE") {
-          console.log("🛑 [USER-UTTERANCE] Auto disposition detected - terminating call")
-          await terminateCallForDisposition('user_not_interested')
-          return
-        }
+        ;(async () => {
+          try {
+            console.log("🔍 [USER-UTTERANCE] Running auto disposition detection (async)...")
+            const dispositionResult = await detectAutoDisposition(text, conversationHistory, detectedLanguage)
+            if (dispositionResult === "TERMINATE") {
+              console.log("🛑 [USER-UTTERANCE] Auto disposition detected (async) - terminating call")
+              try { currentTTS?.interrupt?.() } catch (_) {}
+              await terminateCallForDisposition('user_not_interested')
+            }
+          } catch (_) {}
+        })()
       }
       
       // Use streaming path immediately (like testing2) so partials can play
