@@ -2771,6 +2771,14 @@ const setupSanPbxWebSocketServer = (ws) => {
               const combined = batch.join(' ')
               try { await tts.enqueueText(combined) } catch (_) {}
             }
+            // If only one sentence is ready and it is sufficiently long, allow sending it alone
+            if (completeSentences.length === 1) {
+              const lone = completeSentences[0]
+              if (lone && lone.length >= 80) {
+                try { await tts.enqueueText(lone) } catch (_) {}
+                completeSentences.shift()
+              }
+            }
           }
         )
 
