@@ -1201,7 +1201,17 @@ class StreamingLLMProcessor {
 
       const basePrompt = (this.agentConfig?.systemPrompt || "You are a helpful AI assistant. Answer concisely.").trim()
       const firstMessage = (this.agentConfig?.firstMessage || "").trim()
+      const detailsText = (this.agentConfig?.details || "").trim()
+      const qaItems = Array.isArray(this.agentConfig?.qa) ? this.agentConfig.qa : []
       const knowledgeBlock = firstMessage ? `FirstGreeting: "${firstMessage}"\n` : ""
+      const detailsBlock = detailsText ? `Details:\n${detailsText}\n\n` : ""
+      const qaBlock = qaItems.length > 0
+        ? `QnA:\n${qaItems.map((item, idx) => {
+            const q = (item?.question || "").toString().trim()
+            const a = (item?.answer || "").toString().trim()
+            return q && a ? `${idx + 1}. Q: ${q}\n   A: ${a}` : null
+          }).filter(Boolean).join("\n")}\n\n`
+        : ""
       const policyBlock = [
         "Answer strictly using the information provided above.",
         "If specifics (address/phone/timings) are missing, say you don't have that info.",
@@ -1212,7 +1222,7 @@ class StreamingLLMProcessor {
         "give follow up question at end of every response in the same language they ask question",
         "Send numbers in words in the response if there is any numbers in it based on the language"
       ].join(" ")
-      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
+      const systemPrompt = `System Prompt:\n${basePrompt}\n\n${detailsBlock}${qaBlock}${knowledgeBlock}${policyBlock}`
       const personalizationMessage = userName && userName.trim()
         ? { role: "system", content: `The user's name is ${userName.trim()}. Address them naturally when appropriate.` }
         : null

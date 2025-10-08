@@ -2725,12 +2725,23 @@ const setupSanPbxWebSocketServer = (ws) => {
         console.log(`[PROCESS] Getting AI response (streaming) for: "${transcript}"`)
 
         let lastLen = 0
-        const shouldFlush = (prev, curr) => {
-          const delta = curr.slice(prev)
-          // Flush only on sentence boundary to avoid mid-sentence cuts
-          if (/[.!?]\s?$/.test(curr)) return true
-          // Fallback: if the delta is very long, allow a flush to prevent latency
-          return delta.length >= 140
+        // Accumulate complete sentences and send in batches of 2-3 like aitota.js
+        let carry = ""
+        let completeSentences = []
+        const takeBatch = () => {
+          if (completeSentences.length < 2) return null
+          const batch = []
+          // Always take 2
+          batch.push(completeSentences.shift())
+          batch.push(completeSentences.shift())
+          // Optionally take a 3rd if total would be short
+          if (completeSentences.length > 0) {
+            const currentLen = batch.reduce((s, t) => s + t.length, 0)
+            if (currentLen + completeSentences[0].length < 150) {
+              batch.push(completeSentences.shift())
+            }
+          }
+          return batch
         }
         const tts = createTtsProcessor(ws, streamSid, callLogger)
         currentTTS = tts
@@ -2743,16 +2754,35 @@ const setupSanPbxWebSocketServer = (ws) => {
           async (partial) => {
             if (!isResponseActive(responseId)) return
             if (!partial || partial.length <= lastLen) return
-            if (!shouldFlush(lastLen, partial)) return
-            const chunk = partial.slice(lastLen)
+            const delta = (carry + partial.slice(lastLen)).trim()
             lastLen = partial.length
-            if (chunk.trim()) {
-              try { await tts.enqueueText(chunk.trim()) } catch (_) {}
+            if (!delta) return
+            const sentences = splitIntoSentences(delta)
+            const endsWithTerminator = /[.!?]\s*$/.test(delta)
+            const full = endsWithTerminator ? sentences : sentences.slice(0, -1)
+            for (const s of full) {
+              const trimmed = s.trim()
+              if (trimmed) completeSentences.push(trimmed)
+            }
+            carry = endsWithTerminator ? "" : (sentences[sentences.length - 1] || "")
+            // Send batches of 2-3 sentences
+            let batch
+            while ((batch = takeBatch())) {
+              const combined = batch.join(' ')
+              try { await tts.enqueueText(combined) } catch (_) {}
             }
           }
         )
 
         if (finalResponse && isResponseActive(responseId)) {
+          // Flush remaining carry and sentences in up to 3-sentence batch
+          if (carry && carry.trim()) completeSentences.push(carry.trim())
+          if (completeSentences.length > 0) {
+            const batch = []
+            while (batch.length < 3 && completeSentences.length > 0) batch.push(completeSentences.shift())
+            const combined = batch.join(' ')
+            try { await currentTTS.enqueueText(combined) } catch (_) {}
+          }
           conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: finalResponse })
           if (conversationHistory.length > 6) {
             conversationHistory = conversationHistory.slice(-6)
