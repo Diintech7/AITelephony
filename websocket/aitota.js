@@ -1209,7 +1209,8 @@ class StreamingLLMProcessor {
         "Keep reply under 100 tokens.",
         "dont give any fornts or styles in it or symbols in it",
         "in which language you get the transcript in same language give response in same language",
-        "give follow up question at end of every response in the same language they ask question"
+        "give follow up question at end of every response in the same language they ask question",
+        "Send numbers in words in the response if there is any numbers in it based on the language"
       ].join(" ")
       const systemPrompt = `System Prompt:\n${basePrompt}\n\n${knowledgeBlock}${policyBlock}`
       const personalizationMessage = userName && userName.trim()
