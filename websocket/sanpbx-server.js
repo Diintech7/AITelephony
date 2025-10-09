@@ -225,6 +225,86 @@ const getDeepgramLanguage = (language = "hi") => {
   return lang
 }
 
+// Latency/interim thresholds for interruption control (aligned with reference)
+const LATENCY_CONFIG = {
+  INTERIM_MIN_WORDS: 1,
+  INTERIM_MIN_LENGTH: 10,
+  INTERIM_DEBOUNCE_MS: 800,
+  CONFIDENCE_THRESHOLD: 0.85,
+}
+
+// Conversation history manager with strict interim handling
+class ConversationHistoryManager {
+  constructor() {
+    this.entries = []
+    this.pendingTranscript = ""
+    this.lastTranscriptTime = 0
+    this.transcriptMergeTimer = null
+    this.lastInterimText = ""
+    this.lastInterimTime = 0
+  }
+
+  addUserTranscript(text, timestamp = Date.now()) {
+    const clean = String(text || "").trim()
+    if (!clean || clean.split(/\s+/).length < 2) return
+    if (this.transcriptMergeTimer) { clearTimeout(this.transcriptMergeTimer); this.transcriptMergeTimer = null }
+    this.entries.push({ role: "user", content: clean, timestamp })
+    this.lastTranscriptTime = timestamp
+    this.trim()
+  }
+
+  addAssistantResponse(text, timestamp = Date.now()) {
+    const clean = String(text || "").trim()
+    if (!clean) return
+    this.entries.push({ role: "assistant", content: clean, timestamp })
+    this.trim()
+  }
+
+  handleInterimTranscript(text, timestamp = Date.now()) {
+    const clean = String(text || "").trim()
+    if (!clean) return false
+    
+    // Filter out filler words and noise
+    const fillerWords = ["um", "uh", "ah", "er", "mm", "hmm", "like", "you know", "so", "well"]
+    const words = clean.toLowerCase().split(/\s+/)
+    const meaningfulWords = words.filter(w => w.length > 1 && !fillerWords.includes(w))
+    
+    if (meaningfulWords.length < LATENCY_CONFIG.INTERIM_MIN_WORDS || 
+        clean.length < LATENCY_CONFIG.INTERIM_MIN_LENGTH) {
+      return false
+    }
+    
+    // Debounce rapid interim updates
+    const timeSinceLastInterim = timestamp - this.lastInterimTime
+    if (timeSinceLastInterim < LATENCY_CONFIG.INTERIM_DEBOUNCE_MS) {
+      return false
+    }
+    
+    this.lastInterimText = clean
+    this.lastInterimTime = timestamp
+    return true
+  }
+
+  getConversationHistory() {
+    return this.entries.map(e => ({ role: e.role, content: e.content }))
+  }
+
+  trim(max = 20) {
+    if (this.entries.length > max) {
+      this.entries = this.entries.slice(-max)
+    }
+  }
+
+  clear() {
+    this.entries = []
+    this.pendingTranscript = ""
+    this.lastTranscriptTime = 0
+    if (this.transcriptMergeTimer) { clearTimeout(this.transcriptMergeTimer); this.transcriptMergeTimer = null }
+    this.lastInterimText = ""
+    this.lastInterimTime = 0
+  }
+}
+
 // Enhanced language detection with better fallback logic
 const detectLanguageWithFranc = (text, fallbackLanguage = "en") => {
   try {
@@ -1312,7 +1392,8 @@ const setupSanPbxWebSocketServer = (ws) => {
   let callerIdValue = ""
   let callDirectionValue = ""
   let didValue = ""
-  let conversationHistory = []
+  // Conversation history manager for low-latency interim handling
+  const history = new ConversationHistoryManager()
   let deepgramWs = null
   let isProcessing = false
   let userUtteranceBuffer = ""
@@ -1487,9 +1568,9 @@ const setupSanPbxWebSocketServer = (ws) => {
             currentTTS = sharedSmallestTTS
             await sharedSmallestTTS.synthesizeAndStream(item.text)
           } else {
-            const tts = createTtsProcessor(ws, streamId, callLogger)
-            currentTTS = tts
-            await tts.synthesizeAndStream(item.text)
+          const tts = createTtsProcessor(ws, streamId, callLogger)
+          currentTTS = tts
+          await tts.synthesizeAndStream(item.text)
           }
         } catch (_) {}
       }
@@ -1972,7 +2053,8 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       if (transcript?.trim()) {
         if (is_final) {
-          // Interrupt TTS only on completed user utterances to prevent cutting AI speech on interim echoes
+          // Only interrupt active TTS on final user utterance to avoid cutting AI speech on interim echoes
+          const interruptStartTime = Date.now()
           if (currentTTS && isProcessing) {
             currentTTS.interrupt()
             isProcessing = false
@@ -1982,30 +2064,22 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
           sttTimer = null
 
-          userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim()
-
-          if (callLogger && transcript.trim()) {
-            callLogger.logUserTranscript(transcript.trim(), (agentConfig?.language || 'en').toLowerCase())
+          // Add to conversation history and process
+          history.addUserTranscript(transcript.trim())
+          await processUserUtterance(transcript.trim())
+        } else {
+          // Handle interim results for low-latency interruption
+          const shouldInterrupt = history.handleInterimTranscript(transcript.trim())
+          if (shouldInterrupt && currentTTS && isProcessing) {
+            console.log(`⚡ [INTERIM-INTERRUPT] Interrupting TTS on interim: "${transcript.trim()}"`)
+            currentTTS.interrupt()
+            isProcessing = false
+            processingRequestId++
           }
-
-          await processUserUtterance(userUtteranceBuffer)
-          userUtteranceBuffer = ""
         }
       }
     } else if (data.type === "UtteranceEnd") {
-      if (sttTimer) {
-        console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${userUtteranceBuffer.trim()}"`)
-        sttTimer = null
-      }
-
-      if (userUtteranceBuffer.trim()) {
-        if (callLogger && userUtteranceBuffer.trim()) {
-          callLogger.logUserTranscript(userUtteranceBuffer.trim(), (agentConfig?.language || 'en').toLowerCase())
-        }
-
-        await processUserUtterance(userUtteranceBuffer)
-        userUtteranceBuffer = ""
-      }
+      console.log("🔄 [DEEPGRAM] Utterance ended")
     }
   }
 
@@ -2049,7 +2123,7 @@ const setupSanPbxWebSocketServer = (ws) => {
         ;(async () => {
           try {
             console.log("🔍 [USER-UTTERANCE] Running auto disposition detection (async)...")
-            const dispositionResult = await detectAutoDisposition(text, conversationHistory, detectedLanguage)
+            const dispositionResult = await detectAutoDisposition(text, history.getConversationHistory(), detectedLanguage)
             if (dispositionResult === "TERMINATE") {
               console.log("🛑 [USER-UTTERANCE] Auto disposition detected (async) - terminating call")
               try { currentTTS?.interrupt?.() } catch (_) {}
@@ -2082,7 +2156,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
       aiResponse = await processWithOpenAIStream(
         text,
-        conversationHistory,
+        history.getConversationHistory(),
         agentConfig,
         userName,
         async (partial) => {
@@ -2149,14 +2223,8 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
         } catch (_) {}
 
-        conversationHistory.push(
-          { role: "user", content: text },
-          { role: "assistant", content: aiResponse }
-        )
-
-        if (conversationHistory.length > 10) {
-          conversationHistory = conversationHistory.slice(-10)
-        }
+        // Add to conversation history
+        history.addAssistantResponse(aiResponse)
         
         console.log("✅ [USER-UTTERANCE] Processing completed")
       } else {
@@ -2416,40 +2484,40 @@ const setupSanPbxWebSocketServer = (ws) => {
       while (attempt < maxAttempts) {
         attempt++
         try {
-          await new Promise((resolve, reject) => {
-            try {
-              const wsConn = new WebSocket("wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream", {
-                headers: { Authorization: `Bearer ${API_KEYS.smallest}` },
-              })
-              this.smallestWs = wsConn
-              const timeout = setTimeout(() => reject(new Error("Smallest WS connect timeout")), 8000)
-              wsConn.onopen = () => {
-                clearTimeout(timeout)
-                this.smallestReady = true
-                this.connectionRetryCount = 0
-                this.startKeepAlive()
-                resolve()
-              }
-              wsConn.onmessage = (evt) => {
-                try { this.handleSmallestMessage(JSON.parse(evt.data)) } catch (_) {}
-              }
-              wsConn.onclose = (event) => {
-                this.smallestReady = false
-                if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
-                this.smallestWs = null
-                // Auto-reconnect within retry limit
-                if (!this.isInterrupted && event.code !== 1000 && this.connectionRetryCount < this.maxRetries) {
-                  this.connectionRetryCount++
-                  setTimeout(() => {
-                    if (!this.isInterrupted) {
-                      this.connectToSmallest().catch(() => {})
-                    }
-                  }, 2000)
-                }
-              }
-              wsConn.onerror = () => {}
-            } catch (e) { reject(e) }
+      await new Promise((resolve, reject) => {
+        try {
+          const wsConn = new WebSocket("wss://waves-api.smallest.ai/api/v1/lightning-v2/get_speech/stream", {
+            headers: { Authorization: `Bearer ${API_KEYS.smallest}` },
           })
+          this.smallestWs = wsConn
+              const timeout = setTimeout(() => reject(new Error("Smallest WS connect timeout")), 8000)
+          wsConn.onopen = () => {
+            clearTimeout(timeout)
+            this.smallestReady = true
+            this.connectionRetryCount = 0
+            this.startKeepAlive()
+            resolve()
+          }
+          wsConn.onmessage = (evt) => {
+            try { this.handleSmallestMessage(JSON.parse(evt.data)) } catch (_) {}
+          }
+          wsConn.onclose = (event) => {
+            this.smallestReady = false
+            if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null }
+            this.smallestWs = null
+            // Auto-reconnect within retry limit
+            if (!this.isInterrupted && event.code !== 1000 && this.connectionRetryCount < this.maxRetries) {
+              this.connectionRetryCount++
+              setTimeout(() => {
+                if (!this.isInterrupted) {
+                  this.connectToSmallest().catch(() => {})
+                }
+              }, 2000)
+            }
+          }
+          wsConn.onerror = () => {}
+        } catch (e) { reject(e) }
+      })
           // Connected successfully, exit loop
           return
         } catch (e) {
@@ -2493,7 +2561,7 @@ const setupSanPbxWebSocketServer = (ws) => {
     async processSingle(text) {
       // Ensure connection; on failure, fall back to brief silence to keep flow
       try {
-        await this.connectToSmallest()
+      await this.connectToSmallest()
       } catch (connectError) {
         const id = ++this.requestId
         return new Promise((resolve, reject) => {
@@ -2606,7 +2674,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           await new Promise(r => setTimeout(r, 20))
         }
       } catch (_) {}
-   	  while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
+  	  while (position < audioBuffer.length && !this.isInterrupted && !streamingSession.interrupt) {
   	    if (currentGeneration !== this.generation) break
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
         const padded = chunk.length < CHUNK_SIZE ? Buffer.concat([chunk, Buffer.alloc(CHUNK_SIZE - chunk.length)]) : chunk
@@ -2783,7 +2851,8 @@ const setupSanPbxWebSocketServer = (ws) => {
 
       if (quickResponse && isResponseActive(responseId)) {
         console.log(`[PROCESS] Quick response found: "${quickResponse}"`)
-        conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: quickResponse })
+        history.addUserTranscript(transcript)
+        history.addAssistantResponse(quickResponse)
         try {
           aiResponses.push({
             type: 'ai',
@@ -2827,7 +2896,7 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         const finalResponse = await processWithOpenAIStream(
           transcript,
-          conversationHistory,
+          history.getConversationHistory(),
           ws.sessionAgentConfig || {},
           sessionUserName,
           async (partial) => {
@@ -2870,10 +2939,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             const combined = batch.join(' ')
             try { await currentTTS.enqueueText(combined) } catch (_) {}
           }
-          conversationHistory.push({ role: "user", content: transcript }, { role: "assistant", content: finalResponse })
-          if (conversationHistory.length > 6) {
-            conversationHistory = conversationHistory.slice(-6)
-          }
+          history.addUserTranscript(transcript)
+          history.addAssistantResponse(finalResponse)
           try {
             aiResponses.push({
               type: 'ai',
@@ -3242,8 +3309,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             currentTTS = sharedSmallestTTS
             await sharedSmallestTTS.synthesizeAndStream(greeting)
           } else {
-            currentTTS = createTtsProcessor(ws, streamId, callLogger)
-            await currentTTS.synthesizeAndStream(greeting)
+          currentTTS = createTtsProcessor(ws, streamId, callLogger)
+          await currentTTS.synthesizeAndStream(greeting)
           }
           console.log("✅ [SANPBX-TTS] Greeting TTS completed")
 
@@ -3613,7 +3680,7 @@ const setupSanPbxWebSocketServer = (ws) => {
     streamId = null
     callId = null
     channelId = null
-    conversationHistory = []
+    history.clear()
     isProcessing = false
     userUtteranceBuffer = ""
     sttFailed = false
