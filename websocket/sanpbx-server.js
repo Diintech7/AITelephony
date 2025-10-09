@@ -2090,6 +2090,12 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           // Add to conversation history and process
           history.addUserTranscript(transcript.trim())
+          
+          // Log to database for persistence
+          if (callLogger && transcript.trim()) {
+            callLogger.logUserTranscript(transcript.trim(), (agentConfig?.language || 'en').toLowerCase())
+          }
+          
           await processUserUtterance(transcript.trim())
         } else {
           // Handle interim results for low-latency interruption
@@ -2883,6 +2889,11 @@ const setupSanPbxWebSocketServer = (ws) => {
         console.log(`[PROCESS] Quick response found: "${quickResponse}"`)
         history.addUserTranscript(transcript)
         history.addAssistantResponse(quickResponse)
+        
+        // Log to database for persistence
+        if (callLogger && transcript.trim()) {
+          callLogger.logUserTranscript(transcript.trim(), (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+        }
         try {
           aiResponses.push({
             type: 'ai',
@@ -2971,6 +2982,11 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
           history.addUserTranscript(transcript)
           history.addAssistantResponse(finalResponse)
+          
+          // Log to database for persistence
+          if (callLogger && transcript.trim()) {
+            callLogger.logUserTranscript(transcript.trim(), (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+          }
           try {
             aiResponses.push({
               type: 'ai',
