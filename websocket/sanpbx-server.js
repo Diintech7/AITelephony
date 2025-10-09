@@ -1674,7 +1674,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       const messages = [
         { role: "system", content: systemPrompt },
         ...(personalizationMessage ? [personalizationMessage] : []),
-        ...conversationHistory.slice(-6),
+        ...conversationHistory.slice(-12),
         { role: "user", content: userMessage },
       ]
 
