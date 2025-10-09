@@ -1448,6 +1448,8 @@ const setupSanPbxWebSocketServer = (ws) => {
   // Central SIP audio FIFO queue to serialize all reverse-media sends
   const sipAudioQueue = []
   let isSipStreaming = false
+  let sipQueueInterrupted = false
+  
   const enqueueSipAudio = async (pcmBase64) => {
     try {
       if (!pcmBase64 || !pcmBase64.trim()) return
@@ -1457,19 +1459,32 @@ const setupSanPbxWebSocketServer = (ws) => {
       }
     } catch (_) {}
   }
+  
   const processSipAudioQueue = async () => {
     if (isSipStreaming) return
     isSipStreaming = true
     try {
-      while (sipAudioQueue.length > 0) {
+      while (sipAudioQueue.length > 0 && !sipQueueInterrupted) {
         const audioItem = sipAudioQueue.shift()
+        if (sipQueueInterrupted) break
         try { await streamAudioToSanIPPBX(audioItem) } catch (_) {}
+        if (sipQueueInterrupted) break
         // tiny gap between items to avoid boundary artifacts
         await new Promise(r => setTimeout(r, 40))
       }
     } finally {
       isSipStreaming = false
     }
+  }
+  
+  const interruptSipQueue = () => {
+    sipQueueInterrupted = true
+    sipAudioQueue.length = 0 // Clear the queue
+    console.log("🛑 [SIP-QUEUE] Interrupted and cleared")
+  }
+  
+  const resetSipQueue = () => {
+    sipQueueInterrupted = false
   }
 
   // Auto disposition and silence timeout handlers
@@ -2057,6 +2072,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           const interruptStartTime = Date.now()
           if (currentTTS && isProcessing) {
             currentTTS.interrupt()
+            interruptSipQueue() // Immediately stop SIP audio queue
             isProcessing = false
             processingRequestId++
           }
@@ -2073,6 +2089,7 @@ const setupSanPbxWebSocketServer = (ws) => {
           if (shouldInterrupt && currentTTS && isProcessing) {
             console.log(`⚡ [INTERIM-INTERRUPT] Interrupting TTS on interim: "${transcript.trim()}"`)
             currentTTS.interrupt()
+            interruptSipQueue() // Immediately stop SIP audio queue
             isProcessing = false
             processingRequestId++
           }
@@ -2093,11 +2110,15 @@ const setupSanPbxWebSocketServer = (ws) => {
     if (currentTTS) {
       console.log("🛑 [USER-UTTERANCE] Interrupting current TTS...")
       currentTTS.interrupt()
+      interruptSipQueue() // Immediately stop SIP audio queue
     }
 
     isProcessing = true
     lastProcessedTranscript = text
     const currentRequestId = ++processingRequestId
+    
+    // Reset SIP queue for new processing
+    resetSipQueue()
 
     try {
       const detectedLanguage = "en"
@@ -2111,6 +2132,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       if (shouldTerminateFast(text)) {
         console.log("🛑 [USER-UTTERANCE] Fast intent detected: strict NO → terminate")
         try { currentTTS?.interrupt?.() } catch (_) {}
+        interruptSipQueue() // Immediately stop SIP audio queue
         await terminateCallForDisposition('user_not_interested')
         return
       }
