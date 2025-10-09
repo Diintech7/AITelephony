@@ -1499,7 +1499,7 @@ const setupSanPbxWebSocketServer = (ws) => {
     silenceTimeout = setTimeout(async () => {
       console.log("⏰ [SILENCE-TIMEOUT] 30 seconds of silence detected - terminating call")
       await terminateCallForSilence()
-    }, 50000)
+    }, 100000)
   }
 
   const terminateCallForSilence = async () => {
