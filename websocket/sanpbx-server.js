@@ -1505,6 +1505,17 @@ const setupSanPbxWebSocketServer = (ws) => {
     }
   }
 
+  // Ensure current streaming halts before allowing new audio; then reset interrupt
+  const waitForSipHaltAndReset = async (timeoutMs = 1000) => {
+    try {
+      const start = Date.now()
+      while (isSipStreaming && (Date.now() - start) < timeoutMs) {
+        await new Promise(r => setTimeout(r, 20))
+      }
+      resetSipQueue()
+    } catch (_) { resetSipQueue() }
+  }
+
   // Auto disposition and silence timeout handlers
   const resetSilenceTimeout = () => {
     if (silenceTimeout) {
@@ -1883,7 +1894,9 @@ const setupSanPbxWebSocketServer = (ws) => {
         position += CHUNK_SIZE
 
         // Wait for chunk duration before sending next chunk
-        if (position < audioBuffer.length && !sipQueueInterrupted) {
+        if (position < audioBuffer.length) {
+          // If interrupted, break immediately so next chunk is not sent
+          if (sipQueueInterrupted) break
           await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
         }
       }
@@ -2108,6 +2121,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             try { currentTTS.interrupt() } catch (_) {}
             isProcessing = false
             processingRequestId++
+            // Wait until current 20ms send finishes, then allow new audio
+            await waitForSipHaltAndReset(500)
           }
 
           console.log(`🕒 [STT-TRANSCRIPTION] ${sttTimer.end()}ms - Text: "${transcript.trim()}"`)
@@ -2132,6 +2147,8 @@ const setupSanPbxWebSocketServer = (ws) => {
             try { currentTTS.interrupt() } catch (_) {}
             isProcessing = false
             processingRequestId++
+            // Wait until current 20ms send finishes, then allow new audio
+            await waitForSipHaltAndReset(500)
           }
         }
       }
