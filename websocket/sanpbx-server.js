@@ -1817,7 +1817,7 @@ const setupSanPbxWebSocketServer = (ws) => {
       let chunksSuccessfullySent = 0
       let firstChunkSpecChecked = false
 
-      while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN) {
+      while (position < audioBuffer.length && ws.readyState === WebSocket.OPEN && !sipQueueInterrupted) {
         const chunk = audioBuffer.slice(position, position + CHUNK_SIZE)
 
         // Pad smaller chunks with silence if needed
@@ -1861,36 +1861,44 @@ const setupSanPbxWebSocketServer = (ws) => {
         position += CHUNK_SIZE
 
         // Wait for chunk duration before sending next chunk
-        if (position < audioBuffer.length) {
+        if (position < audioBuffer.length && !sipQueueInterrupted) {
           await new Promise((resolve) => setTimeout(resolve, CHUNK_DURATION_MS))
         }
       }
 
-      // Add silence buffer at the end to ensure clean audio termination
-      try {
-        for (let i = 0; i < 3; i++) {
-          const silenceChunk = Buffer.alloc(CHUNK_SIZE)
-          const silenceMessage = {
-            event: "reverse-media",
-            payload: silenceChunk.toString("base64"),
-            streamId: streamId,
-            channelId: channelId,
-            callId: callId,
+      // Add silence buffer at the end to ensure clean audio termination (only if not interrupted)
+      if (!sipQueueInterrupted) {
+        try {
+          for (let i = 0; i < 3 && !sipQueueInterrupted; i++) {
+            const silenceChunk = Buffer.alloc(CHUNK_SIZE)
+            const silenceMessage = {
+              event: "reverse-media",
+              payload: silenceChunk.toString("base64"),
+              streamId: streamId,
+              channelId: channelId,
+              callId: callId,
+            }
+            console.log(`[SANPBX-SEND] reverse-media silence chunk #${currentChunk}`)
+            ws.send(JSON.stringify(silenceMessage))
+            currentChunk++
+            await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
           }
-          console.log(`[SANPBX-SEND] reverse-media silence chunk #${currentChunk}`)
-          ws.send(JSON.stringify(silenceMessage))
-          currentChunk++
-          await new Promise(r => setTimeout(r, CHUNK_DURATION_MS))
+        } catch (error) {
+          console.error("[SANPBX-STREAM] Failed to send end silence:", error.message)
         }
-      } catch (error) {
-        console.error("[SANPBX-STREAM] Failed to send end silence:", error.message)
       }
 
       const streamDuration = Date.now() - streamStart
       const completionTime = new Date().toISOString()
-      console.log(
-        `[SANPBX-STREAM-COMPLETE] ${completionTime} - Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`,
-      )
+      if (sipQueueInterrupted) {
+        console.log(
+          `[SANPBX-STREAM-INTERRUPTED] ${completionTime} - Interrupted after ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks`,
+        )
+      } else {
+        console.log(
+          `[SANPBX-STREAM-COMPLETE] ${completionTime} - Completed in ${streamDuration}ms, sent ${chunksSuccessfullySent} chunks successfully`,
+        )
+      }
     } catch (error) {
       console.error("[SANPBX-STREAM] Error:", error.message)
     }
