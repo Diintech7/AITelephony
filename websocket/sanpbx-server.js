@@ -1453,6 +1453,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   
   const enqueueSipAudio = async (pcmBase64) => {
     try {
+      if (sipQueueInterrupted) return // Drop audio while interrupted
       if (!pcmBase64 || !pcmBase64.trim()) return
       sipAudioQueue.push(pcmBase64)
       if (!isSipStreaming) {
@@ -2099,11 +2100,12 @@ const setupSanPbxWebSocketServer = (ws) => {
         // Reset silence timer on any Deepgram transcript activity (interim or final)
         try { resetSilenceTimeout() } catch (_) {}
         if (is_final) {
-          // Only interrupt active TTS on final user utterance to avoid cutting AI speech on interim echoes
+          // Immediate interruption on final user utterance
           const interruptStartTime = Date.now()
           if (currentTTS && isProcessing) {
-            currentTTS.interrupt()
-            interruptSipQueue() // Immediately stop SIP audio queue
+            // Stop SIP queue first to drop any pending audio instantly
+            interruptSipQueue()
+            try { currentTTS.interrupt() } catch (_) {}
             isProcessing = false
             processingRequestId++
           }
@@ -2121,12 +2123,13 @@ const setupSanPbxWebSocketServer = (ws) => {
           
           await processUserUtterance(transcript.trim())
         } else {
-          // Handle interim results for low-latency interruption
-          const shouldInterrupt = history.handleInterimTranscript(transcript.trim())
-          if (shouldInterrupt && currentTTS && isProcessing) {
-            console.log(`⚡ [INTERIM-INTERRUPT] Interrupting TTS on interim: "${transcript.trim()}"`)
-            currentTTS.interrupt()
-            interruptSipQueue() // Immediately stop SIP audio queue
+          // Immediate interrupt on ANY meaningful interim to stop current response
+          try { history.handleInterimTranscript(transcript.trim()) } catch (_) {}
+          if (currentTTS && isProcessing) {
+            console.log(`⚡ [INTERIM-INTERRUPT] Immediate stop on interim: "${transcript.trim()}"`)
+            // Stop SIP queue first to drop any pending audio instantly
+            interruptSipQueue()
+            try { currentTTS.interrupt() } catch (_) {}
             isProcessing = false
             processingRequestId++
           }
