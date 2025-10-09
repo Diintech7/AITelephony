@@ -1433,6 +1433,94 @@ const setupSanPbxWebSocketServer = (ws) => {
   let silenceTimeout = null
   let autoDispositionEnabled = true
 
+  // Closing/termination state for Cancer Healer Center flows
+  let closingState = {
+    isClosing: false,
+    finalMessageSent: false,
+    lastIntent: null, // Interested_Now | Interested_Later | Not_Interested | null
+    closeTimer: null,
+    closeSilenceTimer: null,
+    ignoreFurtherInputs: false
+  }
+
+  // Closing triggers and ignore keywords
+  const CLOSING_TRIGGER_PATTERNS = [
+    /धन्यवाद\s+sir\/?ma'?am[,!\s]*\s*cancer\s+healer\s+center\s+चुनने के लिए/i,
+    /consulting\s+team\s+आपसे\s+जल्द\s+ही\s+संपर्क करेगी/i,
+    /धन्यवाद\s+आपका\s+समय\s+देने\s+के\s+लिए/i,
+    /मैं\s+आपको\s+details\s+whatsapp\/?\s*sms\s+कर देती हूँ/i,
+    /आपका\s+दिन\s+शुभ\s+हो/i,
+    /thank you[,!\s]*\s*have a good day/i,
+    /धन्यवाद\s+sir\/?ma'?am/i,
+  ]
+
+  const POST_GOODBYE_IGNORE_REGEX = /^(ok(ay)?|bye|th(i|ee)k\s*hai|thanks|thank\s*you|done|hmm|acha)\b/i
+
+  // Map lead status to intents for forced-end logic
+  const mapLeadStatusToIntent = (status) => {
+    const s = (status || '').toLowerCase()
+    if (s === 'vvi' || s === 'enrolled') return 'Interested_Now'
+    if (['hot_followup','cold_followup','schedule'].includes(s)) return 'Interested_Later'
+    if (['decline','not_required','junk_lead','not_eligible','wrong_number','not_connected'].includes(s)) return 'Not_Interested'
+    return null
+  }
+
+  const performCallEnd = async (reason = 'close_call') => {
+    try {
+      // Ensure any pending reverse-media finishes quickly, but do not alter chunking
+      await waitForSipQueueDrain(800)
+      if (callLogger) {
+        await callLogger.saveToDatabase(callLogger.currentLeadStatus || 'maybe', agentConfig)
+        callLogger.cleanup()
+      }
+      if (callId) {
+        await disconnectCallViaAPI(callId, reason)
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close()
+      }
+      if (currentStreamSid) {
+        activeWebSockets.delete(currentStreamSid)
+        console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+      }
+    } catch (_) {}
+  }
+
+  const startClosingFlow = async ({ reason = 'close_call', politeDelayMs = 2000, finalTone = "कॉल समाप्त की जा रही है। धन्यवाद।" } = {}) => {
+    if (closingState.isClosing) return
+    closingState.isClosing = true
+    closingState.ignoreFurtherInputs = true
+    console.log(`🛑 [CLOSING] Initiated closing flow: ${reason}`)
+
+    // Schedule polite closing tone/message just before hangup
+    try {
+      // Send the polite tone/message without changing SIP chunk sizes
+      await enqueueTts(finalTone, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+      closingState.finalMessageSent = true
+    } catch (_) {}
+
+    // After final message, enforce 4s silence fallback end
+    if (closingState.closeSilenceTimer) { clearTimeout(closingState.closeSilenceTimer) }
+    closingState.closeSilenceTimer = setTimeout(async () => {
+      console.log('⏰ [CLOSING] 4s silence after final message → ending call')
+      await performCallEnd('silence_after_closing')
+    }, 4000)
+
+    // Forced end after confirmation intents: 2.5s; otherwise 2s
+    const waitMs = ['Interested_Now','Interested_Later','Not_Interested'].includes(closingState.lastIntent) ? 2500 : politeDelayMs
+    if (closingState.closeTimer) { clearTimeout(closingState.closeTimer) }
+    closingState.closeTimer = setTimeout(async () => {
+      console.log(`🛑 [CLOSING] Finalizing call end after ${waitMs}ms`)
+      await performCallEnd(reason)
+    }, waitMs)
+  }
+
+  const textTriggersClosing = (text) => {
+    if (!text) return false
+    const t = String(text).toLowerCase()
+    return CLOSING_TRIGGER_PATTERNS.some((re) => re.test(t))
+  }
+
   const buildFullTranscript = () => {
     try {
       const all = [...userTranscripts, ...aiResponses].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
@@ -2156,6 +2244,16 @@ const setupSanPbxWebSocketServer = (ws) => {
   }
 
   const processUserUtterance = async (text) => {
+      // If we already triggered closing, ignore any further inputs. If it's just an ACK, end immediately.
+      if (closingState.ignoreFurtherInputs) {
+        if (POST_GOODBYE_IGNORE_REGEX.test(text || '')) {
+          console.log('🛑 [POST-CLOSING] Ack/bye detected → immediate hangup')
+          await performCallEnd('post_goodbye_ack')
+        } else {
+          console.log('🛑 [POST-CLOSING] Ignoring user input after closing trigger')
+        }
+        return
+      }
     if (!text.trim() || text === lastProcessedTranscript) return
 
     console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
@@ -2998,7 +3096,13 @@ const setupSanPbxWebSocketServer = (ws) => {
             // Send batches of 2-3 sentences
             let batch
             while ((batch = takeBatch())) {
+              if (closingState.isClosing) return
               const combined = batch.join(' ')
+              // If combined contains closing triggers, start closing flow in parallel
+              if (textTriggersClosing(combined)) {
+                console.log('🛑 [CLOSING-DETECT] Trigger phrase detected in AI response batch')
+                startClosingFlow({ reason: 'close_call_detected' }).catch(() => {})
+              }
               try { await tts.enqueueText(combined) } catch (_) {}
             }
             // If only one sentence is ready and it is sufficiently long, allow sending it alone
@@ -3019,6 +3123,10 @@ const setupSanPbxWebSocketServer = (ws) => {
             const batch = []
             while (batch.length < 3 && completeSentences.length > 0) batch.push(completeSentences.shift())
             const combined = batch.join(' ')
+            if (textTriggersClosing(combined)) {
+              console.log('🛑 [CLOSING-DETECT] Trigger phrase detected in final AI batch')
+              startClosingFlow({ reason: 'close_call_detected' }).catch(() => {})
+            }
             try { await currentTTS.enqueueText(combined) } catch (_) {}
           }
           history.addUserTranscript(transcript)
@@ -3042,6 +3150,18 @@ const setupSanPbxWebSocketServer = (ws) => {
             }
           } catch (_) {}
           await updateLiveCallLog()
+
+          // Non-blocking lead status detection to set lastIntent for forced end timing
+          ;(async () => {
+            try {
+              const lead = await detectLeadStatusWithOpenAI(transcript, history.getConversationHistory(), (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+              const intent = mapLeadStatusToIntent(lead)
+              if (intent) {
+                closingState.lastIntent = intent
+                console.log(`📊 [INTENT] Mapped lead status "${lead}" → ${intent}`)
+              }
+            } catch (_) {}
+          })()
         }
       }
 
