@@ -569,25 +569,26 @@ Return ONLY the status code (e.g., "vvi", "maybe", "enrolled", etc.) based on th
 const detectAutoDisposition = async (userMessage, conversationHistory, detectedLanguage) => {
   const timer = createTimer("AUTO_DISPOSITION_DETECTION")
   try {
-    const dispositionPrompt = `Analyze the user's response and conversation context to determine if the call should be terminated. Look for:
+    const dispositionPrompt = `You must decide whether to continue or terminate the call based on engagement.
 
-TERMINATE CALL if user shows:
-- "not interested", "no thanks", "stop calling", "don't want", "not needed"
-- "busy", "hold on", "wait", "call back later", "not available"
-- "bye", "goodbye", "end call", "hang up", "thank you" (as closing)
-- "wrong number", "not the right person"
-- Any clear indication they want to end the conversation
+TERMINATE only if the user clearly wants to end or block the call:
+- Explicit rejections: "not interested", "no thanks", "don't call", "stop calling", "not needed"
+- End-of-call intent: "bye", "goodbye", "hang up", "end call"
+- Wrong party: "wrong number", "not the right person"
+- Unavailable with request to end the call now
 
-CONTINUE CALL if user shows:
-- Asking questions about the service/product
-- Showing interest or engagement
-- Requesting more information
-- "yes", "maybe", "tell me more", "how does it work"
+IMPORTANT: Do not treat polite phrases like "thank you" by themselves as termination unless accompanied by an end-of-call intent (e.g., "thank you, bye").
+
+CONTINUE when the user is engaged or progressing the conversation:
+- Asking questions, requesting information, or saying they don't know specifics but are willing to proceed
+- Providing details (name, age, condition) or answering questions
+- Agreeing to next steps such as booking/appointment/consultation
+- Expressing interest ("yes", "okay", "please proceed")
 
 User message: "${userMessage}"
 Recent conversation: ${conversationHistory.slice(-3).map(msg => `${msg.role}: ${msg.content}`).join(' | ')}
 
-Return ONLY: "TERMINATE" if call should be ended, or "CONTINUE" if conversation should continue.`
+Return ONLY: "TERMINATE" if the call should be ended now, or "CONTINUE" if the conversation should continue.`
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -2075,6 +2076,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       const is_final = data.is_final
 
       if (transcript?.trim()) {
+        // Reset silence timer on any Deepgram transcript activity (interim or final)
+        try { resetSilenceTimeout() } catch (_) {}
         if (is_final) {
           // Only interrupt active TTS on final user utterance to avoid cutting AI speech on interim echoes
           const interruptStartTime = Date.now()
