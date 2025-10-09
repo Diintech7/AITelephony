@@ -1488,6 +1488,22 @@ const setupSanPbxWebSocketServer = (ws) => {
     sipQueueInterrupted = false
   }
 
+  // Wait until SIP queue has fully drained (all reverse-media sent) or timeout
+  const waitForSipQueueDrain = async (timeoutMs = 2000) => {
+    try {
+      const start = Date.now()
+      while ((Date.now() - start) < timeoutMs) {
+        if (sipAudioQueue.length === 0 && !isSipStreaming) {
+          return true
+        }
+        await new Promise(r => setTimeout(r, 50))
+      }
+      return sipAudioQueue.length === 0 && !isSipStreaming
+    } catch (_) {
+      return false
+    }
+  }
+
   // Auto disposition and silence timeout handlers
   const resetSilenceTimeout = () => {
     if (silenceTimeout) {
@@ -1506,6 +1522,8 @@ const setupSanPbxWebSocketServer = (ws) => {
   const terminateCallForSilence = async () => {
     try {
       console.log("🛑 [AUTO-TERMINATION] Terminating call due to silence timeout")
+      // Ensure last TTS/audio is delivered before termination
+      await waitForSipQueueDrain(2500)
       
       if (callLogger) {
         callLogger.updateLeadStatus('not_connected')
@@ -1533,6 +1551,8 @@ const setupSanPbxWebSocketServer = (ws) => {
   const terminateCallForDisposition = async (reason = 'auto_disposition') => {
     try {
       console.log(`🛑 [AUTO-TERMINATION] Terminating call due to disposition: ${reason}`)
+      // Ensure last TTS/audio is delivered before termination
+      await waitForSipQueueDrain(2500)
       
       if (callLogger) {
         callLogger.updateLeadStatus('not_required')
@@ -3420,6 +3440,9 @@ const setupSanPbxWebSocketServer = (ws) => {
 
         case "stop":
           console.log("🛑 [SANPBX] Call ended")
+
+          // Ensure last TTS/audio is delivered before termination
+          await waitForSipQueueDrain(2500)
 
           if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
             deepgramWs.close()
