@@ -2079,9 +2079,9 @@ class SimplifiedSmallestTTSProcessor {
       // Wait for connection to be ready
       await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
-          console.log("❌ [SMALLEST-TTS] Connection timeout after 5 seconds")
+          console.log("❌ [SMALLEST-TTS] Connection timeout after 10 seconds")
           reject(new Error("Connection timeout"))
-        }, 5000)
+        }, 10000)
 
         this.smallestWs.onopen = () => {
           console.log("🎤 [SMALLEST-TTS] WebSocket connection established")
@@ -2128,7 +2128,9 @@ class SimplifiedSmallestTTSProcessor {
           try {
             const data = JSON.parse(event.data)
             // Log only essential info, not full response with base64
-            console.log(`📨 [SMALLEST-TTS] Response: ${data.status} for request ${data.request_id}`)
+            const rid = data.request_id || data?.requestId || 'unknown'
+            const status = data.status || data.type || 'unknown'
+            console.log(`📨 [SMALLEST-TTS] Response: ${status} for request ${rid}`)
             this.handleSmallestResponse(data)
           } catch (error) {
             console.log("❌ [SMALLEST-TTS] Error parsing response:", error.message)
@@ -2370,8 +2372,8 @@ class SimplifiedSmallestTTSProcessor {
       // Clear any pending requests to prevent conflicts
       this.pendingRequests.clear()
       
-      // Wait a bit to ensure previous requests are cleared
-      await new Promise(resolve => setTimeout(resolve, 50))
+        // Wait a bit to ensure previous requests are cleared
+        await new Promise(resolve => setTimeout(resolve, 100))
 
       const requestId = ++this.requestId
       
@@ -2448,15 +2450,19 @@ class SimplifiedSmallestTTSProcessor {
         
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 5 seconds`)
+            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} (buffer) timed out after 10 seconds`)
             this.pendingRequests.delete(requestId)
             reject(new Error("TTS request timeout"))
           }
-        }, 5000)
+        }, 10000)
       })
 
       const audioBase64 = await audioPromise
       console.log(`🕒 [SMALLEST-TTS-PREPARE] ${timer.end()}ms - Audio prepared`)
+      try {
+        const keys = Array.from(this.pendingRequests.keys())
+        console.log(`🧭 [SMALLEST-TTS] Pending map size=${this.pendingRequests.size} keys=${JSON.stringify(keys)}`)
+      } catch (_) {}
     return audioBase64
 
     } catch (error) {
@@ -2598,7 +2604,7 @@ class SimplifiedSmallestTTSProcessor {
         const requestWithId = { ...request, request_id: String(requestId) }
         
         timer.checkpoint("TTS_REQUEST_SENDING")
-        console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${item.text.substring(0, 30)}..."`)
+        console.log(`📤 [SMALLEST-TTS] Sending request ${requestId} for text: "${item.text.substring(0, 120)}..."`)
         
         // Check WebSocket state before sending
         if (this.smallestWs.readyState !== WebSocket.OPEN) {
@@ -2618,12 +2624,12 @@ class SimplifiedSmallestTTSProcessor {
           return
         }
         
-        // Adaptive timeout: if chunks were received, treat timeout as completed
+        // Adaptive timeout: if chunks were received, treat timeout as completed (longer window)
         setTimeout(() => {
           const req = this.pendingRequests.get(requestId)
           if (!req) return
           const hadChunks = Array.isArray(req.audioChunks) && req.audioChunks.length > 0
-          console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 12 seconds (hadChunks=${hadChunks})`)
+          console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 15 seconds (hadChunks=${hadChunks}, chunks=${(req.audioChunks||[]).length})`)
           timer.checkpoint("TTS_REQUEST_TIMEOUT")
           this.pendingRequests.delete(requestId)
           if (hadChunks) {
@@ -2631,7 +2637,7 @@ class SimplifiedSmallestTTSProcessor {
           } else {
             reject(new Error("TTS request timeout"))
           }
-        }, 12000)
+        }, 15000)
       })
 
       const audioBase64 = await audioPromise
