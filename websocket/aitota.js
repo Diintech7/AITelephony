@@ -2618,15 +2618,20 @@ class SimplifiedSmallestTTSProcessor {
           return
         }
         
-        // Timeout after 8 seconds for better reliability
+        // Adaptive timeout: if chunks were received, treat timeout as completed
         setTimeout(() => {
-          if (this.pendingRequests.has(requestId)) {
-            console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 8 seconds`)
-            timer.checkpoint("TTS_REQUEST_TIMEOUT")
-            this.pendingRequests.delete(requestId)
+          const req = this.pendingRequests.get(requestId)
+          if (!req) return
+          const hadChunks = Array.isArray(req.audioChunks) && req.audioChunks.length > 0
+          console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 12 seconds (hadChunks=${hadChunks})`)
+          timer.checkpoint("TTS_REQUEST_TIMEOUT")
+          this.pendingRequests.delete(requestId)
+          if (hadChunks) {
+            try { resolve("COMPLETED") } catch (_) {}
+          } else {
             reject(new Error("TTS request timeout"))
           }
-        }, 8000)
+        }, 12000)
       })
 
       const audioBase64 = await audioPromise
