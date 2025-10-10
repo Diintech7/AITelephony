@@ -2018,6 +2018,9 @@ class SimplifiedSmallestTTSProcessor {
     this.lastActivity = Date.now() // Track last activity
     this.connectionRetryCount = 0 // Track connection retry attempts
     this.maxRetries = 3 // Maximum retry attempts
+    this.lastRequestedText = null
+    this.lastRequestTime = 0
+    this.unknownCompleteFallbackCount = 0
   }
 
   interrupt() {
@@ -2289,6 +2292,20 @@ class SimplifiedSmallestTTSProcessor {
         }
       } else if (status === "complete" || status === "success") {
         console.log(`⚠️ [SMALLEST-TTS] Received ${status} for unknown request_id: ${request_id} - no audio present`)
+        // Fallback: if provider finalized without audio and request_id mismatched, retry once with the last requested text
+        try {
+          const withinWindow = (Date.now() - this.lastRequestTime) < 4000
+          if (withinWindow && this.lastRequestedText && this.unknownCompleteFallbackCount < 1 && !this.isInterrupted) {
+            this.unknownCompleteFallbackCount++
+            console.log(`🔄 [SMALLEST-TTS] Retrying once with last text due to unknown complete: "${String(this.lastRequestedText).slice(0, 60)}..."`)
+            this.synthesizeToBuffer(this.lastRequestedText)
+              .then((audioBase64) => {
+                if (!audioBase64) return
+                return this.streamAudioOptimizedForSIP(audioBase64)
+              })
+              .catch((e) => console.log(`❌ [SMALLEST-TTS] Fallback re-synthesis failed: ${e.message}`))
+          }
+        } catch (_) {}
       } else if (status === "error") {
         console.log(`⚠️ [SMALLEST-TTS] Received error for unknown request_id: ${request_id} - ${data.message || 'Unknown error'}`)
       }
@@ -2572,6 +2589,11 @@ class SimplifiedSmallestTTSProcessor {
       // Send request and wait for response
       const audioPromise = new Promise((resolve, reject) => {
         this.pendingRequests.set(requestId, { resolve, reject, text: item.text, audioChunks: [], timing: timer })
+        // Track last requested text for unknown-id fallbacks
+        try {
+          this.lastRequestedText = item.text
+          this.lastRequestTime = Date.now()
+        } catch (_) {}
         
         const requestWithId = { ...request, request_id: String(requestId) }
         
