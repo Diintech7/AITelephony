@@ -2334,6 +2334,7 @@ class SimplifiedSmallestTTSProcessor {
         return
       }
     }
+    console.log("smallest wssss : ",  this.smallestWs)
 
     // Add to queue instead of processing immediately
     return new Promise((resolve, reject) => {
