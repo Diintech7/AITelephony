@@ -2619,6 +2619,10 @@ const setupSanPbxWebSocketServer = (ws) => {
   	  this.recentTexts = new Set()
   	  this.lastQueuedText = null
   	  this.generation = 0
+      this.lastRequestedText = null
+      this.lastRequestTime = 0
+      this.unknownChunkSeen = false
+      this.unknownCompleteFallbackCount = 0
     }
 
     interrupt() {
@@ -2665,7 +2669,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             headers: { Authorization: `Bearer ${API_KEYS.smallest}` },
           })
           this.smallestWs = wsConn
-              const timeout = setTimeout(() => reject(new Error("Smallest WS connect timeout")), 8000)
+              const timeout = setTimeout(() => reject(new Error("Smallest WS connect timeout")), 10000)
           wsConn.onopen = () => {
             clearTimeout(timeout)
             this.smallestReady = true
@@ -2707,28 +2711,68 @@ const setupSanPbxWebSocketServer = (ws) => {
 
     handleSmallestMessage(msg) {
       const rid = msg?.request_id
-      if (!rid) return
+      const status = msg?.status || msg?.type
+      try { if (status) console.log(`[SMALLEST-TTS] onmessage status=${status} rid=${rid || 'unknown'}`) } catch (_) {}
+
+      const streamIncomingAudio = (base64) => {
+        try {
+          const pcmChunk = extractPcmLinear16Mono8kBase64(base64)
+          enqueueSipAudio(pcmChunk).catch(() => {})
+        } catch (_) {}
+      }
+
+      if (!rid || !this.pendingRequests.has(Number(rid))) {
+        // Unknown request_id: still stream chunks/success audio
+        if (status === 'audio_chunk' || status === 'chunk') {
+          const incomingAudio = (typeof msg.audio === 'string') ? msg.audio : (typeof msg.data?.audio === 'string' ? msg.data.audio : null)
+          if (incomingAudio) {
+            this.unknownChunkSeen = true
+            streamIncomingAudio(incomingAudio)
+            try { console.log(`⚠️ [SMALLEST-TTS] Streamed CHUNK for unknown request_id: ${rid || 'unknown'}`) } catch (_) {}
+          }
+          return
+        }
+        if ((status === 'completed' || status === 'complete' || status === 'done' || status === 'success')) {
+          const successAudio = (typeof msg.audio === 'string') ? msg.audio : (typeof msg.data?.audio === 'string' ? msg.data.audio : null)
+          if (successAudio) {
+            streamIncomingAudio(successAudio)
+            try { console.log(`⚠️ [SMALLEST-TTS] Streamed SUCCESS for unknown request_id: ${rid || 'unknown'}`) } catch (_) {}
+            return
+          }
+          // No audio present: optionally retry last text once within window
+          try {
+            const withinWindow = (Date.now() - this.lastRequestTime) < 4000
+            if (withinWindow && this.lastRequestedText && this.unknownCompleteFallbackCount < 1 && !this.isInterrupted && !this.unknownChunkSeen) {
+              this.unknownCompleteFallbackCount++
+              console.log(`🔄 [SMALLEST-TTS] Unknown complete without audio → retry last text once: "${String(this.lastRequestedText).slice(0, 60)}..."`)
+              this.enqueueText(this.lastRequestedText)
+            } else {
+              console.log(`⚠️ [SMALLEST-TTS] Unknown ${status} without audio; skipping retry (window/met conditions false)`) 
+            }
+          } catch (_) {}
+          return
+        }
+        if (status === 'error') {
+          try { console.log(`⚠️ [SMALLEST-TTS] Error for unknown request_id: ${rid || 'unknown'} - ${msg?.message || 'Unknown error'}`) } catch (_) {}
+        }
+        return
+      }
+
+      // Known request_id flow
       const req = this.pendingRequests.get(Number(rid))
       if (!req) return
-      const status = msg?.status || msg?.type
-      // Minimal visibility
-      try { if (status) console.log(`[SMALLEST-TTS] onmessage status=${status} rid=${rid}`) } catch (_) {}
+
       if (status === 'audio_chunk' || status === 'chunk') {
-        // Stream chunk immediately (support both msg.audio and msg.data.audio)
         const incomingAudio = (typeof msg.audio === 'string') ? msg.audio : (typeof msg.data?.audio === 'string' ? msg.data.audio : null)
         if (incomingAudio) {
           if (!req.audioChunks) req.audioChunks = []
           req.audioChunks.push(incomingAudio)
-          // Route through central SIP queue
-          const pcmChunk = extractPcmLinear16Mono8kBase64(incomingAudio)
-          enqueueSipAudio(pcmChunk).catch(() => {})
+          streamIncomingAudio(incomingAudio)
         }
-  	  } else if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
-  	    // We already streamed chunks live; avoid double-streaming the combined audio
-  	    try { req.resolve('ALREADY_STREAMED') } catch (_) {}
+	  } else if (status === 'completed' || status === 'complete' || status === 'done' || status === 'success') {
+	    try { req.resolve('ALREADY_STREAMED') } catch (_) {}
         this.pendingRequests.delete(Number(rid))
       } else if (status === 'error') {
-        // Retry once per policy
         this.retryRequest(Number(rid), req)
       }
     }
@@ -2777,6 +2821,24 @@ const setupSanPbxWebSocketServer = (ws) => {
         }
         try { console.log(`[SMALLEST-TTS] send request ${payload.request_id}, voice_id=${payload.voice_id}, lang=${payload.language}`) } catch (_) {}
         try { this.smallestWs.send(JSON.stringify(payload)) } catch (e) { reject(e) }
+
+        // Track last text/time for unknown-id fallback
+        try { this.lastRequestedText = text; this.lastRequestTime = Date.now() } catch (_) {}
+
+        // Adaptive timeout: if we streamed any chunks (known or unknown), treat as completed
+        setTimeout(() => {
+          const req = this.pendingRequests.get(id)
+          if (!req) return
+          const hadChunks = Array.isArray(req.audioChunks) && req.audioChunks.length > 0
+          const unknownSeen = this.unknownChunkSeen === true
+          try { console.log(`⏰ [SMALLEST-TTS] Request ${id} timed out after 15000ms (hadChunks=${hadChunks}, unknownChunksSeen=${unknownSeen}, chunks=${(req.audioChunks||[]).length})`) } catch (_) {}
+          this.pendingRequests.delete(id)
+          if (hadChunks || unknownSeen) {
+            try { resolve('ALREADY_STREAMED') } catch (_) {}
+          } else {
+            reject(new Error('TTS request timeout'))
+          }
+        }, 15000)
       })
     }
 
