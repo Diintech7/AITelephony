@@ -2284,7 +2284,16 @@ class SimplifiedSmallestTTSProcessor {
       }
     } else {
       // Handle responses for unknown request IDs more gracefully
-      if ((status === "complete" || status === "success") && responseData?.audio) {
+      if (status === "chunk" && responseData?.audio) {
+        // Stream chunk even if request_id doesn't match our numeric counter
+        try {
+          this.streamAudioOptimizedForSIP(responseData.audio)
+            .then(() => console.log(`⚠️ [SMALLEST-TTS] Streamed CHUNK for unknown request_id: ${request_id}`))
+            .catch((e) => console.log(`❌ [SMALLEST-TTS] Failed streaming unknown CHUNK: ${e.message}`))
+        } catch (e) {
+          console.log(`❌ [SMALLEST-TTS] Error streaming unknown CHUNK: ${e.message}`)
+        }
+      } else if ((status === "complete" || status === "success") && responseData?.audio) {
         // Some servers may send a terminal success with audio without matching request_id; stream it anyway
         try {
           this.streamAudioOptimizedForSIP(responseData.audio)
@@ -2626,15 +2635,16 @@ class SimplifiedSmallestTTSProcessor {
           return
         }
         
-        // Adaptive timeout: if chunks were received, treat timeout as completed (longer window)
+        // Adaptive timeout: if chunks were received OR we saw any unknown-id chunks, treat timeout as completed
         setTimeout(() => {
           const req = this.pendingRequests.get(requestId)
           if (!req) return
           const hadChunks = Array.isArray(req.audioChunks) && req.audioChunks.length > 0
-          console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 15 seconds (hadChunks=${hadChunks}, chunks=${(req.audioChunks||[]).length})`)
+          const unknownChunksSeen = this.unknownCompleteFallbackCount > 0
+          console.log(`⏰ [SMALLEST-TTS] Request ${requestId} timed out after 15 seconds (hadChunks=${hadChunks}, unknownChunksSeen=${unknownChunksSeen}, chunks=${(req.audioChunks||[]).length})`)
           timer.checkpoint("TTS_REQUEST_TIMEOUT")
           this.pendingRequests.delete(requestId)
-          if (hadChunks) {
+          if (hadChunks || unknownChunksSeen) {
             try { resolve("COMPLETED") } catch (_) {}
           } else {
             reject(new Error("TTS request timeout"))
