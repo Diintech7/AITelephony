@@ -2237,6 +2237,7 @@ class SimplifiedSmallestTTSProcessor {
 
   handleSmallestResponse(data) {
     const { request_id, status, data: responseData } = data
+    console.log(data)
     
     // Convert request_id to number for lookup since we store as numbers
     const numericRequestId = parseInt(request_id)
