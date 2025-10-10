@@ -2278,8 +2278,17 @@ class SimplifiedSmallestTTSProcessor {
       }
     } else {
       // Handle responses for unknown request IDs more gracefully
-      if (status === "complete" || status === "success") {
-        console.log(`⚠️ [SMALLEST-TTS] Received ${status} for unknown request_id: ${request_id} - ignoring`)
+      if ((status === "complete" || status === "success") && responseData?.audio) {
+        // Some servers may send a terminal success with audio without matching request_id; stream it anyway
+        try {
+          this.streamAudioOptimizedForSIP(responseData.audio)
+            .then(() => console.log(`⚠️ [SMALLEST-TTS] Streamed audio for unknown request_id: ${request_id}`))
+            .catch((e) => console.log(`❌ [SMALLEST-TTS] Failed streaming unknown request_id audio: ${e.message}`))
+        } catch (e) {
+          console.log(`❌ [SMALLEST-TTS] Failed streaming unknown request_id audio: ${e.message}`)
+        }
+      } else if (status === "complete" || status === "success") {
+        console.log(`⚠️ [SMALLEST-TTS] Received ${status} for unknown request_id: ${request_id} - no audio present`)
       } else if (status === "error") {
         console.log(`⚠️ [SMALLEST-TTS] Received error for unknown request_id: ${request_id} - ${data.message || 'Unknown error'}`)
       }
