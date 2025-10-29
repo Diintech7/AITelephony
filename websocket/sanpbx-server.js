@@ -15,6 +15,9 @@ const API_KEYS = {
   smallest: process.env.SMALLEST_API_KEY,
 }
 
+// Optional base URL to build full WAV URLs from SanPBX rec_path values
+const RECORDING_BASE_URL = process.env.SANPBX_RECORDING_BASE_URL || null
+
 // SanPBX API configuration
 const SANPBX_API_CONFIG = {
   baseUrl: "https://clouduat28.sansoftwares.com/pbxadmin/sanpbxapi",
@@ -105,6 +108,23 @@ const createTimer = (label) => {
     start,
     end: () => Date.now() - start,
     checkpoint: (checkpointName) => Date.now() - start,
+  }
+}
+
+// Resolve a full recording URL from a relative rec_path if possible
+const resolveRecordingUrl = (recPath) => {
+  try {
+    if (!recPath || typeof recPath !== 'string') return null
+    const trimmed = recPath.trim()
+    if (!trimmed) return null
+    if (/^https?:\/\//i.test(trimmed)) return trimmed
+    if (!RECORDING_BASE_URL) return trimmed
+    const base = RECORDING_BASE_URL
+    const sep = base.endsWith('/') ? '' : '/'
+    const path = trimmed.replace(/^\/+/, '')
+    return `${base}${sep}${path}`
+  } catch (_) {
+    return recPath
   }
 }
 
@@ -1432,6 +1452,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   let lastUserActivity = Date.now()
   let silenceTimeout = null
   let autoDispositionEnabled = true
+  let sessionRecordingPath = null
 
   // Closing/termination state for Cancer Healer Center flows
   let closingState = {
@@ -3282,14 +3303,60 @@ const setupSanPbxWebSocketServer = (ws) => {
           try {
             if (data.extraParams && typeof data.extraParams === 'object') {
               sessionCustomParams = { ...sessionCustomParams, ...data.extraParams }
-              if (data.extraParams.name && !sessionCustomParams.contact_name) {
-                sessionCustomParams.contact_name = data.extraParams.contact_name || data.extraParams.name
+            } else if (data.extraParams && typeof data.extraParams === 'string') {
+              try {
+                const decoded = Buffer.from(String(data.extraParams).trim(), 'base64').toString('utf8')
+                const parsed = JSON.parse(decoded)
+                sessionCustomParams = { ...sessionCustomParams, ...parsed }
+              } catch (_) {}
+            }
+            if (sessionCustomParams && typeof sessionCustomParams === 'object') {
+              if (sessionCustomParams.name && !sessionCustomParams.contact_name) {
+                sessionCustomParams.contact_name = sessionCustomParams.contact_name || sessionCustomParams.name
               }
-              if (!sessionUserName && (data.extraParams.name || data.extraParams.contact_name)) {
-                sessionUserName = data.extraParams.name || data.extraParams.contact_name
+              if (!sessionUserName && (sessionCustomParams.name || sessionCustomParams.contact_name)) {
+                sessionUserName = sessionCustomParams.name || sessionCustomParams.contact_name
               }
-              if (!sessionUniqueId && (data.extraParams.uniqueid || data.extraParams.uniqueId)) {
-                sessionUniqueId = data.extraParams.uniqueid || data.extraParams.uniqueId
+              if (!sessionUniqueId && (sessionCustomParams.uniqueid || sessionCustomParams.uniqueId)) {
+                sessionUniqueId = sessionCustomParams.uniqueid || sessionCustomParams.uniqueId
+              }
+              if (!sessionRecordingPath && typeof sessionCustomParams.rec_path === 'string') {
+                sessionRecordingPath = sessionCustomParams.rec_path
+                const resolved = resolveRecordingUrl(sessionRecordingPath)
+                try {
+                  console.log('🎙️ [SANPBX-RECORDING] rec_path detected (connected):', sessionRecordingPath)
+                  if (resolved) console.log('🎙️ [SANPBX-RECORDING] Resolved URL:', resolved)
+                } catch (_) {}
+              }
+            }
+          } catch (_) {}
+          try {
+            if (data.extraParams && typeof data.extraParams === 'object') {
+              sessionCustomParams = { ...sessionCustomParams, ...data.extraParams }
+            } else if (data.extraParams && typeof data.extraParams === 'string') {
+              try {
+                const decoded = Buffer.from(String(data.extraParams).trim(), 'base64').toString('utf8')
+                const parsed = JSON.parse(decoded)
+                sessionCustomParams = { ...sessionCustomParams, ...parsed }
+              } catch (_) {}
+            }
+            if (sessionCustomParams && typeof sessionCustomParams === 'object') {
+              if (sessionCustomParams.name && !sessionCustomParams.contact_name) {
+                sessionCustomParams.contact_name = sessionCustomParams.contact_name || sessionCustomParams.name
+              }
+              if (!sessionUserName && (sessionCustomParams.name || sessionCustomParams.contact_name)) {
+                sessionUserName = sessionCustomParams.name || sessionCustomParams.contact_name
+              }
+              if (!sessionUniqueId && (sessionCustomParams.uniqueid || sessionCustomParams.uniqueId)) {
+                sessionUniqueId = sessionCustomParams.uniqueid || sessionCustomParams.uniqueId
+              }
+              if (!sessionRecordingPath && typeof sessionCustomParams.rec_path === 'string') {
+                sessionRecordingPath = sessionCustomParams.rec_path
+                const resolved = resolveRecordingUrl(sessionRecordingPath)
+                try {
+                  console.log('🎙️ [SANPBX-RECORDING] rec_path detected (start):', sessionRecordingPath)
+                  if (resolved) console.log('🎙️ [SANPBX-RECORDING] Resolved URL:', resolved)
+                } catch (_) {}
               }
             }
           } catch (_) {}
@@ -3528,6 +3595,7 @@ const setupSanPbxWebSocketServer = (ws) => {
                 mediaFormat: data.mediaFormat || {},
                 from: (data.start && data.start.from) || data.from || null,
                 to: (data.start && data.start.to) || data.to || null,
+                rec_path: sessionRecordingPath || null,
               }
               if (callLogger.callLogId) {
                 await CallLog.findByIdAndUpdate(callLogger.callLogId, {
@@ -3536,6 +3604,8 @@ const setupSanPbxWebSocketServer = (ws) => {
                     'metadata.customParams': { ...(callLogger.customParams || {}), ...(data.extraParams || {}) },
                     'metadata.callerId': data.callerId || callLogger.callerId || undefined,
                     'metadata.lastUpdated': new Date(),
+                    ...(sessionRecordingPath ? { 'metadata.recording.rec_path': sessionRecordingPath } : {}),
+                    ...(sessionRecordingPath && resolveRecordingUrl(sessionRecordingPath) ? { audioUrl: resolveRecordingUrl(sessionRecordingPath) } : {}),
                   },
                 })
               }
@@ -3666,6 +3736,21 @@ const setupSanPbxWebSocketServer = (ws) => {
 
           // Intelligent WhatsApp send based on lead status and user requests
           try {
+            // If we have a recording path from session, surface a resolved URL in logs and into the call log
+            try {
+              if (sessionRecordingPath) {
+                const resolved = resolveRecordingUrl(sessionRecordingPath)
+                console.log('🎙️ [SANPBX-RECORDING] stop-event session rec_path:', sessionRecordingPath)
+                if (resolved) console.log('🎙️ [SANPBX-RECORDING] stop-event resolved URL:', resolved)
+                if (callLogger?.callLogId && resolved) {
+                  try {
+                    await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                      $set: { audioUrl: resolved, 'metadata.recording.rec_path': sessionRecordingPath, 'metadata.lastUpdated': new Date() }
+                    })
+                  } catch (_) {}
+                }
+              }
+            } catch (_) {}
             // Recompute WhatsApp request at end-of-call using full history
             if (callLogger && agentConfig?.whatsappEnabled) {
               try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
@@ -3830,9 +3915,17 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
           if (data.recordingPath) {
             console.log("🎙️ [SANPBX-RECORDING] Recording Path:", data.recordingPath)
+            const resolved = resolveRecordingUrl(data.recordingPath)
+            if (resolved) console.log("🎙️ [SANPBX-RECORDING] Resolved URL:", resolved)
           }
           if (data.audioUrl) {
             console.log("🎙️ [SANPBX-RECORDING] Audio URL:", data.audioUrl)
+          }
+          if (!data.audioUrl && !data.recordingUrl && (data.rec_path || sessionRecordingPath)) {
+            const fromPath = data.rec_path || sessionRecordingPath
+            const resolved = resolveRecordingUrl(fromPath)
+            if (fromPath) console.log("🎙️ [SANPBX-RECORDING] rec_path:", fromPath)
+            if (resolved) console.log("🎙️ [SANPBX-RECORDING] Resolved URL:", resolved)
           }
           if (data.audioBase64) {
             const base64Length = data.audioBase64.length
@@ -3925,6 +4018,11 @@ const setupSanPbxWebSocketServer = (ws) => {
               
               if (data.recordingUrl || data.audioUrl) {
                 updateData.audioUrl = data.recordingUrl || data.audioUrl
+              }
+              if (!updateData.audioUrl && (data.recordingPath || data.rec_path || sessionRecordingPath)) {
+                const rp = data.recordingPath || data.rec_path || sessionRecordingPath
+                const resolved = resolveRecordingUrl(rp)
+                if (resolved) updateData.audioUrl = resolved
               }
               
               if (data.audioBase64 || data.wavFile || data.audioData) {
@@ -4174,6 +4272,21 @@ const setupSanPbxWebSocketServer = (ws) => {
     if (callLogger) {
       const stats = callLogger.getStats()
       console.log("🔌 [SANPBX-CLOSE] Final Call Stats:", JSON.stringify(stats, null, 2))
+      // Surface session recording path (if any) on close
+      try {
+        if (sessionRecordingPath) {
+          const resolved = resolveRecordingUrl(sessionRecordingPath)
+          console.log('🎙️ [SANPBX-RECORDING] close-event session rec_path:', sessionRecordingPath)
+          if (resolved) console.log('🎙️ [SANPBX-RECORDING] close-event resolved URL:', resolved)
+          if (resolved && callLogger?.callLogId) {
+            try {
+              await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                $set: { audioUrl: resolved, 'metadata.recording.rec_path': sessionRecordingPath, 'metadata.lastUpdated': new Date() }
+              })
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
       // Bill credits on close as safety (guarded by billedStreamSids)
       const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
       await billCallCredits({
