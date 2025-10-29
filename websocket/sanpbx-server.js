@@ -3813,22 +3813,295 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("=".repeat(60))
           break
 
-        default:
-          console.log(`[SANPBX] Unknown event: ${data.event}`)
+        case "recording":
+        case "call-recording":
+        case "audio-recording":
+        case "recording-complete":
+          console.log("🎙️ [SANPBX-RECORDING] ========== CALL RECORDING RECEIVED ==========")
+          console.log("=".repeat(80))
+          console.log("🎙️ [SANPBX-RECORDING] Event type:", data.event)
+          console.log("🎙️ [SANPBX-RECORDING] Call ID:", data.callId || callId || "N/A")
+          console.log("🎙️ [SANPBX-RECORDING] Stream ID:", data.streamId || streamId || "N/A")
+          console.log("🎙️ [SANPBX-RECORDING] Channel ID:", data.channelId || channelId || "N/A")
           
-          // Log ALL data received from SIP team for unknown events
-          console.log("=".repeat(60))
-          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] COMPLETE DATA RECEIVED FROM SIP TEAM:`)
-          console.log("=".repeat(60))
-          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] Raw data object:`, JSON.stringify(data, null, 2))
-          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] Event type:`, data.event)
-          console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] All Properties:`)
+          // Log recording-specific fields
+          if (data.recordingUrl) {
+            console.log("🎙️ [SANPBX-RECORDING] Recording URL:", data.recordingUrl)
+          }
+          if (data.recordingPath) {
+            console.log("🎙️ [SANPBX-RECORDING] Recording Path:", data.recordingPath)
+          }
+          if (data.audioUrl) {
+            console.log("🎙️ [SANPBX-RECORDING] Audio URL:", data.audioUrl)
+          }
+          if (data.audioBase64) {
+            const base64Length = data.audioBase64.length
+            const estimatedSizeKB = Math.round((base64Length * 3) / 4 / 1024)
+            console.log("🎙️ [SANPBX-RECORDING] Audio Base64 Length:", base64Length, "characters")
+            console.log("🎙️ [SANPBX-RECORDING] Estimated WAV Size:", estimatedSizeKB, "KB (~", Math.round(estimatedSizeKB / 1024 * 10) / 10, "MB)")
+            console.log("🎙️ [SANPBX-RECORDING] Audio Base64 Preview (first 100 chars):", data.audioBase64.substring(0, 100) + "...")
+          }
+          if (data.audioData) {
+            const audioDataLength = typeof data.audioData === 'string' ? data.audioData.length : JSON.stringify(data.audioData).length
+            console.log("🎙️ [SANPBX-RECORDING] Audio Data Length:", audioDataLength, "characters")
+            console.log("🎙️ [SANPBX-RECORDING] Audio Data Type:", typeof data.audioData)
+            if (typeof data.audioData === 'string') {
+              console.log("🎙️ [SANPBX-RECORDING] Audio Data Preview (first 100 chars):", data.audioData.substring(0, 100) + "...")
+            }
+          }
+          if (data.wavFile) {
+            const wavLength = typeof data.wavFile === 'string' ? data.wavFile.length : JSON.stringify(data.wavFile).length
+            console.log("🎙️ [SANPBX-RECORDING] WAV File Length:", wavLength, "characters")
+            console.log("🎙️ [SANPBX-RECORDING] WAV File Type:", typeof data.wavFile)
+            if (typeof data.wavFile === 'string') {
+              const estimatedSizeKB = Math.round((wavLength * 3) / 4 / 1024)
+              console.log("🎙️ [SANPBX-RECORDING] Estimated WAV Size:", estimatedSizeKB, "KB (~", Math.round(estimatedSizeKB / 1024 * 10) / 10, "MB)")
+              console.log("🎙️ [SANPBX-RECORDING] WAV File Preview (first 100 chars):", data.wavFile.substring(0, 100) + "...")
+            }
+          }
+          if (data.fileName) {
+            console.log("🎙️ [SANPBX-RECORDING] File Name:", data.fileName)
+          }
+          if (data.fileSize) {
+            console.log("🎙️ [SANPBX-RECORDING] File Size:", data.fileSize, "bytes")
+          }
+          if (data.duration) {
+            console.log("🎙️ [SANPBX-RECORDING] Recording Duration:", data.duration, "seconds")
+          }
+          if (data.format) {
+            console.log("🎙️ [SANPBX-RECORDING] Audio Format:", data.format)
+          }
+          if (data.sampleRate) {
+            console.log("🎙️ [SANPBX-RECORDING] Sample Rate:", data.sampleRate, "Hz")
+          }
+          if (data.channels) {
+            console.log("🎙️ [SANPBX-RECORDING] Channels:", data.channels)
+          }
+          if (data.timestamp) {
+            console.log("🎙️ [SANPBX-RECORDING] Timestamp:", data.timestamp)
+          }
+          if (data.status) {
+            console.log("🎙️ [SANPBX-RECORDING] Status:", data.status)
+          }
+          if (data.message) {
+            console.log("🎙️ [SANPBX-RECORDING] Message:", data.message)
+          }
           
-          // Log all properties for unknown events
+          // Log all additional properties
+          console.log("🎙️ [SANPBX-RECORDING] All Properties:")
+          const recordingKnownProps = ['event', 'callId', 'streamId', 'channelId', 'recordingUrl', 'recordingPath', 'audioUrl', 'audioBase64', 'audioData', 'wavFile', 'fileName', 'fileSize', 'duration', 'format', 'sampleRate', 'channels', 'timestamp', 'status', 'message']
           Object.keys(data).forEach(key => {
-            console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] ${key}:`, data[key])
+            if (!recordingKnownProps.includes(key)) {
+              const value = data[key]
+              const valueType = typeof value
+              if (valueType === 'string' && value.length > 200) {
+                console.log(`🎙️ [SANPBX-RECORDING] ${key}:`, value.substring(0, 200) + "... (truncated, total length: " + value.length + ")")
+              } else {
+                console.log(`🎙️ [SANPBX-RECORDING] ${key}:`, value)
+              }
+            }
           })
-          console.log("=".repeat(60))
+          
+          // Log complete raw data object (truncate large base64 strings)
+          const rawDataCopy = { ...data }
+          if (rawDataCopy.audioBase64 && rawDataCopy.audioBase64.length > 500) {
+            rawDataCopy.audioBase64 = rawDataCopy.audioBase64.substring(0, 500) + "... (truncated, total length: " + rawDataCopy.audioBase64.length + ")"
+          }
+          if (rawDataCopy.audioData && typeof rawDataCopy.audioData === 'string' && rawDataCopy.audioData.length > 500) {
+            rawDataCopy.audioData = rawDataCopy.audioData.substring(0, 500) + "... (truncated, total length: " + rawDataCopy.audioData.length + ")"
+          }
+          if (rawDataCopy.wavFile && typeof rawDataCopy.wavFile === 'string' && rawDataCopy.wavFile.length > 500) {
+            rawDataCopy.wavFile = rawDataCopy.wavFile.substring(0, 500) + "... (truncated, total length: " + rawDataCopy.wavFile.length + ")"
+          }
+          console.log("🎙️ [SANPBX-RECORDING] Raw data object (truncated for large fields):", JSON.stringify(rawDataCopy, null, 2))
+          
+          // Try to update call log with recording information if available
+          if (callLogger && callLogger.callLogId) {
+            try {
+              const CallLog = require("../models/CallLog")
+              const updateData = {
+                'metadata.lastUpdated': new Date(),
+              }
+              
+              if (data.recordingUrl || data.audioUrl) {
+                updateData.audioUrl = data.recordingUrl || data.audioUrl
+              }
+              
+              if (data.audioBase64 || data.wavFile || data.audioData) {
+                updateData['metadata.recording'] = {
+                  received: true,
+                  receivedAt: new Date(),
+                  hasAudioData: !!(data.audioBase64 || data.wavFile || data.audioData),
+                  format: data.format || 'wav',
+                  fileSize: data.fileSize || null,
+                  duration: data.duration || null,
+                }
+              }
+              
+              await CallLog.findByIdAndUpdate(callLogger.callLogId, updateData)
+              console.log("✅ [SANPBX-RECORDING] Updated call log with recording information")
+            } catch (updateError) {
+              console.log("⚠️ [SANPBX-RECORDING] Failed to update call log:", updateError.message)
+            }
+          }
+          
+          console.log("=".repeat(80))
+          console.log("🎙️ [SANPBX-RECORDING] =============================================")
+          break
+
+        default:
+          // Check if this unknown event contains recording data
+          const hasRecordingData = !!(data.audioBase64 || data.wavFile || data.audioData || data.recordingUrl || data.audioUrl || data.recordingPath)
+          
+          if (hasRecordingData) {
+            console.log(`🎙️ [SANPBX-RECORDING] Received recording data in event: ${data.event}`)
+            console.log("🎙️ [SANPBX-RECORDING] ========== CALL RECORDING RECEIVED ==========")
+            console.log("=".repeat(80))
+            console.log("🎙️ [SANPBX-RECORDING] Event type:", data.event)
+            console.log("🎙️ [SANPBX-RECORDING] Call ID:", data.callId || callId || "N/A")
+            console.log("🎙️ [SANPBX-RECORDING] Stream ID:", data.streamId || streamId || "N/A")
+            console.log("🎙️ [SANPBX-RECORDING] Channel ID:", data.channelId || channelId || "N/A")
+            
+            // Log recording-specific fields
+            if (data.recordingUrl) {
+              console.log("🎙️ [SANPBX-RECORDING] Recording URL:", data.recordingUrl)
+            }
+            if (data.recordingPath) {
+              console.log("🎙️ [SANPBX-RECORDING] Recording Path:", data.recordingPath)
+            }
+            if (data.audioUrl) {
+              console.log("🎙️ [SANPBX-RECORDING] Audio URL:", data.audioUrl)
+            }
+            if (data.audioBase64) {
+              const base64Length = data.audioBase64.length
+              const estimatedSizeKB = Math.round((base64Length * 3) / 4 / 1024)
+              console.log("🎙️ [SANPBX-RECORDING] Audio Base64 Length:", base64Length, "characters")
+              console.log("🎙️ [SANPBX-RECORDING] Estimated WAV Size:", estimatedSizeKB, "KB (~", Math.round(estimatedSizeKB / 1024 * 10) / 10, "MB)")
+              console.log("🎙️ [SANPBX-RECORDING] Audio Base64 Preview (first 100 chars):", data.audioBase64.substring(0, 100) + "...")
+            }
+            if (data.audioData) {
+              const audioDataLength = typeof data.audioData === 'string' ? data.audioData.length : JSON.stringify(data.audioData).length
+              console.log("🎙️ [SANPBX-RECORDING] Audio Data Length:", audioDataLength, "characters")
+              console.log("🎙️ [SANPBX-RECORDING] Audio Data Type:", typeof data.audioData)
+              if (typeof data.audioData === 'string') {
+                console.log("🎙️ [SANPBX-RECORDING] Audio Data Preview (first 100 chars):", data.audioData.substring(0, 100) + "...")
+              }
+            }
+            if (data.wavFile) {
+              const wavLength = typeof data.wavFile === 'string' ? data.wavFile.length : JSON.stringify(data.wavFile).length
+              console.log("🎙️ [SANPBX-RECORDING] WAV File Length:", wavLength, "characters")
+              console.log("🎙️ [SANPBX-RECORDING] WAV File Type:", typeof data.wavFile)
+              if (typeof data.wavFile === 'string') {
+                const estimatedSizeKB = Math.round((wavLength * 3) / 4 / 1024)
+                console.log("🎙️ [SANPBX-RECORDING] Estimated WAV Size:", estimatedSizeKB, "KB (~", Math.round(estimatedSizeKB / 1024 * 10) / 10, "MB)")
+                console.log("🎙️ [SANPBX-RECORDING] WAV File Preview (first 100 chars):", data.wavFile.substring(0, 100) + "...")
+              }
+            }
+            if (data.fileName) {
+              console.log("🎙️ [SANPBX-RECORDING] File Name:", data.fileName)
+            }
+            if (data.fileSize) {
+              console.log("🎙️ [SANPBX-RECORDING] File Size:", data.fileSize, "bytes")
+            }
+            if (data.duration) {
+              console.log("🎙️ [SANPBX-RECORDING] Recording Duration:", data.duration, "seconds")
+            }
+            if (data.format) {
+              console.log("🎙️ [SANPBX-RECORDING] Audio Format:", data.format)
+            }
+            if (data.sampleRate) {
+              console.log("🎙️ [SANPBX-RECORDING] Sample Rate:", data.sampleRate, "Hz")
+            }
+            if (data.channels) {
+              console.log("🎙️ [SANPBX-RECORDING] Channels:", data.channels)
+            }
+            if (data.timestamp) {
+              console.log("🎙️ [SANPBX-RECORDING] Timestamp:", data.timestamp)
+            }
+            if (data.status) {
+              console.log("🎙️ [SANPBX-RECORDING] Status:", data.status)
+            }
+            if (data.message) {
+              console.log("🎙️ [SANPBX-RECORDING] Message:", data.message)
+            }
+            
+            // Log all additional properties
+            console.log("🎙️ [SANPBX-RECORDING] All Properties:")
+            const recordingKnownProps = ['event', 'callId', 'streamId', 'channelId', 'recordingUrl', 'recordingPath', 'audioUrl', 'audioBase64', 'audioData', 'wavFile', 'fileName', 'fileSize', 'duration', 'format', 'sampleRate', 'channels', 'timestamp', 'status', 'message']
+            Object.keys(data).forEach(key => {
+              if (!recordingKnownProps.includes(key)) {
+                const value = data[key]
+                const valueType = typeof value
+                if (valueType === 'string' && value.length > 200) {
+                  console.log(`🎙️ [SANPBX-RECORDING] ${key}:`, value.substring(0, 200) + "... (truncated, total length: " + value.length + ")")
+                } else {
+                  console.log(`🎙️ [SANPBX-RECORDING] ${key}:`, value)
+                }
+              }
+            })
+            
+            // Log complete raw data object (truncate large base64 strings)
+            const rawDataCopy = { ...data }
+            if (rawDataCopy.audioBase64 && rawDataCopy.audioBase64.length > 500) {
+              rawDataCopy.audioBase64 = rawDataCopy.audioBase64.substring(0, 500) + "... (truncated, total length: " + rawDataCopy.audioBase64.length + ")"
+            }
+            if (rawDataCopy.audioData && typeof rawDataCopy.audioData === 'string' && rawDataCopy.audioData.length > 500) {
+              rawDataCopy.audioData = rawDataCopy.audioData.substring(0, 500) + "... (truncated, total length: " + rawDataCopy.audioData.length + ")"
+            }
+            if (rawDataCopy.wavFile && typeof rawDataCopy.wavFile === 'string' && rawDataCopy.wavFile.length > 500) {
+              rawDataCopy.wavFile = rawDataCopy.wavFile.substring(0, 500) + "... (truncated, total length: " + rawDataCopy.wavFile.length + ")"
+            }
+            console.log("🎙️ [SANPBX-RECORDING] Raw data object (truncated for large fields):", JSON.stringify(rawDataCopy, null, 2))
+            
+            // Try to update call log with recording information if available
+            if (callLogger && callLogger.callLogId) {
+              try {
+                const CallLog = require("../models/CallLog")
+                const updateData = {
+                  'metadata.lastUpdated': new Date(),
+                }
+                
+                if (data.recordingUrl || data.audioUrl) {
+                  updateData.audioUrl = data.recordingUrl || data.audioUrl
+                }
+                
+                if (data.audioBase64 || data.wavFile || data.audioData) {
+                  updateData['metadata.recording'] = {
+                    received: true,
+                    receivedAt: new Date(),
+                    hasAudioData: !!(data.audioBase64 || data.wavFile || data.audioData),
+                    format: data.format || 'wav',
+                    fileSize: data.fileSize || null,
+                    duration: data.duration || null,
+                  }
+                }
+                
+                await CallLog.findByIdAndUpdate(callLogger.callLogId, updateData)
+                console.log("✅ [SANPBX-RECORDING] Updated call log with recording information")
+              } catch (updateError) {
+                console.log("⚠️ [SANPBX-RECORDING] Failed to update call log:", updateError.message)
+              }
+            }
+            
+            console.log("=".repeat(80))
+            console.log("🎙️ [SANPBX-RECORDING] =============================================")
+          } else {
+            console.log(`[SANPBX] Unknown event: ${data.event}`)
+            
+            // Log ALL data received from SIP team for unknown events
+            console.log("=".repeat(60))
+            console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] COMPLETE DATA RECEIVED FROM SIP TEAM:`)
+            console.log("=".repeat(60))
+            console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] Raw data object:`, JSON.stringify(data, null, 2))
+            console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] Event type:`, data.event)
+            console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] All Properties:`)
+            
+            // Log all properties for unknown events
+            Object.keys(data).forEach(key => {
+              console.log(`[SANPBX-UNKNOWN-${data.event?.toUpperCase() || 'EVENT'}] ${key}:`, data[key])
+            })
+            console.log("=".repeat(60))
+          }
           break
       }
     } catch (error) {
