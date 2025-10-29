@@ -3948,7 +3948,6 @@ const setupSanPbxWebSocketServer = (ws) => {
           console.log("=".repeat(80))
           console.log("🎙️ [SANPBX-RECORDING] =============================================")
           break
-
         default:
           // Check if this unknown event contains recording data
           const hasRecordingData = !!(data.audioBase64 || data.wavFile || data.audioData || data.recordingUrl || data.audioUrl || data.recordingPath)
