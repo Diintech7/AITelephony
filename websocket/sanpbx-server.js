@@ -3708,129 +3708,204 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
           break
 
-        case "stop":
-          console.log("🛑 [SANPBX] Call ended")
 
-          // Ensure last TTS/audio is delivered before termination
-          await waitForSipQueueDrain(2500)
+      case "stop":
+        console.log("\n" + "=".repeat(100))
+        console.log("🛑".repeat(25) + " STOP EVENT TRIGGERED " + "🛑".repeat(25))
+        console.log("=".repeat(100))
+        console.log("📞 [SANPBX-STOP] ==================== CALL ENDED ====================")
+        console.log("📞 [SANPBX-STOP] Timestamp:", new Date().toISOString())
+        console.log("📞 [SANPBX-STOP] StreamID:", streamId)
+        console.log("📞 [SANPBX-STOP] CallID:", callId)
+        console.log("📞 [SANPBX-STOP] ChannelID:", channelId)
+        console.log("=".repeat(100))
+        
+        // Log ALL data received from SIP team during stop event
+        console.log("📋 [SANPBX-STOP-DATA] COMPLETE DATA RECEIVED FROM SIP TEAM:")
+        console.log("📋 [SANPBX-STOP-DATA]", JSON.stringify(data, null, 2))
+        console.log("=".repeat(100))
 
-          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            deepgramWs.close()
-          }
+        // Cleanup Deepgram connection
+        if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+          console.log("🎤 [SANPBX-STOP-CLEANUP] Closing Deepgram WebSocket connection...")
+          deepgramWs.close()
+          console.log("✅ [SANPBX-STOP-CLEANUP] Deepgram connection closed")
+        }
 
-          if (silenceTimer) {
-            clearTimeout(silenceTimer)
-          }
+        if (silenceTimer) {
+          console.log("⏱️ [SANPBX-STOP-CLEANUP] Clearing silence timer...")
+          clearTimeout(silenceTimer)
+          console.log("✅ [SANPBX-STOP-CLEANUP] Silence timer cleared")
+        }
+
+        // WhatsApp Message Logic - Highlighted Section
+        console.log("\n" + "📨".repeat(50))
+        console.log("📨 [WHATSAPP-LOGIC-START] ==================== WHATSAPP MESSAGE EVALUATION ====================")
+        console.log("📨".repeat(50))
+        
+        try {
+          console.log("📨 [WHATSAPP-CHECK] Evaluating WhatsApp send conditions...")
+          console.log("📨 [WHATSAPP-CHECK] ├─ Call Logger Present:", !!callLogger)
+          console.log("📨 [WHATSAPP-CHECK] ├─ WhatsApp Enabled:", agentConfig?.whatsappEnabled)
+          console.log("📨 [WHATSAPP-CHECK] ├─ Should Send (Logic Result):", callLogger?.shouldSendWhatsApp())
+          console.log("📨 [WHATSAPP-CHECK] ├─ Lead Status:", callLogger?.currentLeadStatus)
+          console.log("📨 [WHATSAPP-CHECK] ├─ Already Sent:", callLogger?.whatsappSent)
+          console.log("📨 [WHATSAPP-CHECK] └─ User Requested:", callLogger?.whatsappRequested)
           
-          // Close shared Smallest WS if exists
-          if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
-            try { sharedSmallestTTS.interrupt() } catch (_) {}
-            sharedSmallestTTS = null
-          }
-          
-          // Cleanup WebSocket tracking
-          if (currentStreamSid) {
-            activeWebSockets.delete(currentStreamSid)
-            console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
-          }
-
-          // Intelligent WhatsApp send based on lead status and user requests
-          try {
-            // If we have a recording path from session, surface a resolved URL in logs and into the call log
-            try {
-              if (sessionRecordingPath) {
-                const resolved = resolveRecordingUrl(sessionRecordingPath)
-                console.log('🎙️ [SANPBX-RECORDING] stop-event session rec_path:', sessionRecordingPath)
-                if (resolved) console.log('🎙️ [SANPBX-RECORDING] stop-event resolved URL:', resolved)
-                if (callLogger?.callLogId && resolved) {
-                  try {
-                    await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                      $set: { audioUrl: resolved, 'metadata.recording.rec_path': sessionRecordingPath, 'metadata.lastUpdated': new Date() }
-                    })
-                  } catch (_) {}
-                }
-              }
-            } catch (_) {}
-            // Recompute WhatsApp request at end-of-call using full history
-            if (callLogger && agentConfig?.whatsappEnabled) {
-              try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
-            }
-            if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
-              const waLink = getAgentWhatsappLink(agentConfig)
-              const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
-              const waApiUrl = agentConfig?.whatsapplink
-              console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
-              if (waLink && waNumber && waApiUrl) {
-                sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
-                  .then(async (r) => {
-                    console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
-                    if (r?.ok) {
-                      await billWhatsAppCredit({
-                        clientId: agentConfig.clientId,
-                        mobile: callLogger?.mobile || null,
-                        link: waLink,
-                        callLogId: callLogger?.callLogId,
-                        streamSid: streamId,
-                      })
-                      callLogger.markWhatsAppSent()
-                      try {
-                        if (callLogger?.callLogId) {
-                          await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                            'metadata.whatsappMessageSent': true,
-                            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
-                            'metadata.lastUpdated': new Date(),
-                          })
-                        }
-                      } catch (_) {}
-                    }
-                  })
-                  .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
-              } else {
-                console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
-              }
-            } else {
-              console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
-                hasCallLogger: !!callLogger,
-                whatsappEnabled: agentConfig?.whatsappEnabled,
-                shouldSend: callLogger?.shouldSendWhatsApp(),
-                leadStatus: callLogger?.currentLeadStatus,
-                alreadySent: callLogger?.whatsappSent,
-                requested: callLogger?.whatsappRequested
-              })
-            }
-          } catch (waErr) {
-            console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
-          }
-          
-          if (callLogger) {
-            const stats = callLogger.getStats()
-            console.log("🛑 [SANPBX-STOP] Call Stats:", JSON.stringify(stats, null, 2))
-            // Bill credits at end of call (decimal precision)
-            const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
-            await billCallCredits({
-              clientId: callLogger.clientId,
-              durationSeconds,
-              callDirection,
-              mobile: callLogger.mobile,
-              callLogId: callLogger.callLogId,
-              streamSid: streamId,
-              uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
-            })
+          if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+            const waLink = getAgentWhatsappLink(agentConfig)
+            const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+            const waApiUrl = agentConfig?.whatsapplink
             
-            try {
-              console.log("💾 [SANPBX-STOP] Saving final call log to database...")
-              const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
-              console.log("📊 [SANPBX-STOP] Final lead status:", finalLeadStatus)
-              const savedLog = await callLogger.saveToDatabase(finalLeadStatus, agentConfig)
-              console.log("✅ [SANPBX-STOP] Final call log saved with ID:", savedLog._id)
-            } catch (error) {
-              console.log("❌ [SANPBX-STOP] Error saving final call log:", error.message)
-            } finally {
-              callLogger.cleanup()
+            console.log("\n📨 [WHATSAPP-CONFIG] WhatsApp Configuration Details:")
+            console.log("📨 [WHATSAPP-CONFIG] ├─ WhatsApp Link:", waLink || "❌ NOT FOUND")
+            console.log("📨 [WHATSAPP-CONFIG] ├─ API URL:", waApiUrl || "❌ NOT CONFIGURED")
+            console.log("📨 [WHATSAPP-CONFIG] ├─ Original Mobile:", callLogger?.mobile)
+            console.log("📨 [WHATSAPP-CONFIG] └─ Normalized Mobile:", waNumber || "❌ INVALID")
+            
+            if (waLink && waNumber && waApiUrl) {
+              console.log("\n📨 [WHATSAPP-SEND] ✅ ALL CONDITIONS MET - SENDING WHATSAPP MESSAGE...")
+              console.log("📨 [WHATSAPP-SEND] Target Number:", waNumber)
+              console.log("📨 [WHATSAPP-SEND] Link to Send:", waLink)
+              console.log("📨 [WHATSAPP-SEND] API Endpoint:", waApiUrl)
+              
+              sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+                .then(async (r) => {
+                  console.log("\n📨 [WHATSAPP-RESULT] ========== SEND RESULT ==========")
+                  console.log("📨 [WHATSAPP-RESULT] Status:", r?.ok ? "✅ SUCCESS" : "❌ FAILED")
+                  console.log("📨 [WHATSAPP-RESULT] HTTP Status:", r?.status || "N/A")
+                  console.log("📨 [WHATSAPP-RESULT] Response Body:", r?.body || "N/A")
+                  console.log("📨 [WHATSAPP-RESULT] Error:", r?.error || "None")
+                  console.log("📨 [WHATSAPP-RESULT] ================================")
+                  
+                  if (r?.ok) {
+                    console.log("💰 [WHATSAPP-BILLING] Initiating credit deduction...")
+                    await billWhatsAppCredit({
+                      clientId: agentConfig.clientId,
+                      mobile: callLogger?.mobile || null,
+                      link: waLink,
+                      callLogId: callLogger?.callLogId,
+                      streamSid,
+                    })
+                    console.log("✅ [WHATSAPP-BILLING] Credit deduction completed")
+                    
+                    callLogger.markWhatsAppSent()
+                    console.log("✅ [WHATSAPP-TRACKING] Marked as sent in call logger")
+                  } else {
+                    console.log("❌ [WHATSAPP-RESULT] WhatsApp message failed - no billing applied")
+                  }
+                })
+                .catch((e) => {
+                  console.log("❌ [WHATSAPP-ERROR] Exception during send:", e.message)
+                  console.log("❌ [WHATSAPP-ERROR] Stack:", e.stack)
+                })
+            } else {
+              console.log("\n📨 [WHATSAPP-SKIP] ❌ MISSING REQUIRED CONFIGURATION:")
+              if (!waLink) console.log("📨 [WHATSAPP-SKIP] ├─ ❌ WhatsApp Link is missing")
+              if (!waNumber) console.log("📨 [WHATSAPP-SKIP] ├─ ❌ Valid mobile number is missing")
+              if (!waApiUrl) console.log("📨 [WHATSAPP-SKIP] └─ ❌ API URL is missing")
+            }
+          } else {
+            console.log("\n📨 [WHATSAPP-SKIP] ❌ CONDITIONS NOT MET - WHATSAPP MESSAGE NOT SENT")
+            console.log("📨 [WHATSAPP-SKIP] Reason Analysis:")
+            if (!callLogger) {
+              console.log("📨 [WHATSAPP-SKIP] ├─ ❌ Call logger not available")
+            }
+            if (!agentConfig?.whatsappEnabled) {
+              console.log("📨 [WHATSAPP-SKIP] ├─ ❌ WhatsApp not enabled for this agent")
+            }
+            if (callLogger && !callLogger.shouldSendWhatsApp()) {
+              console.log("📨 [WHATSAPP-SKIP] ├─ ❌ Lead status/request criteria not met")
+              console.log("📨 [WHATSAPP-SKIP] │  ├─ Lead Status:", callLogger.currentLeadStatus, "(needs: 'vvi' or user request)")
+              console.log("📨 [WHATSAPP-SKIP] │  ├─ User Requested:", callLogger.whatsappRequested)
+              console.log("📨 [WHATSAPP-SKIP] │  └─ Already Sent:", callLogger.whatsappSent)
             }
           }
-          break
+        } catch (waErr) {
+          console.log("\n❌ [WHATSAPP-ERROR] UNEXPECTED ERROR IN WHATSAPP LOGIC:")
+          console.log("❌ [WHATSAPP-ERROR] Message:", waErr.message)
+          console.log("❌ [WHATSAPP-ERROR] Stack:", waErr.stack)
+        }
+        
+        console.log("📨".repeat(50))
+        console.log("📨 [WHATSAPP-LOGIC-END] ==================== WHATSAPP EVALUATION COMPLETE ====================")
+        console.log("📨".repeat(50) + "\n")
 
+        // Call Statistics and Billing - Highlighted Section
+        console.log("\n" + "📊".repeat(50))
+        console.log("📊 [CALL-STATS-START] ==================== CALL STATISTICS & BILLING ====================")
+        console.log("📊".repeat(50))
+        
+        if (callLogger) {
+          const stats = callLogger.getStats()
+          console.log("📊 [CALL-STATS] Call Statistics Summary:")
+          console.log("📊 [CALL-STATS] ├─ Duration:", stats.duration, "seconds")
+          console.log("📊 [CALL-STATS] ├─ User Messages:", stats.userMessages)
+          console.log("📊 [CALL-STATS] ├─ AI Responses:", stats.aiResponses)
+          console.log("📊 [CALL-STATS] ├─ Languages Used:", stats.languages.join(", ") || "None")
+          console.log("📊 [CALL-STATS] ├─ Start Time:", stats.startTime.toISOString())
+          console.log("📊 [CALL-STATS] ├─ Call Direction:", stats.callDirection)
+          console.log("📊 [CALL-STATS] ├─ Call Log ID:", stats.callLogId)
+          console.log("📊 [CALL-STATS] ├─ Pending Transcripts:", stats.pendingTranscripts)
+          console.log("📊 [CALL-STATS] ├─ Lead Status:", stats.currentLeadStatus)
+          console.log("📊 [CALL-STATS] ├─ WhatsApp Sent:", stats.whatsappSent ? "✅ Yes" : "❌ No")
+          console.log("📊 [CALL-STATS] └─ WhatsApp Requested:", stats.whatsappRequested ? "✅ Yes" : "❌ No")
+          
+          // Bill credits at end of call (decimal precision)
+          const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
+          console.log("\n💰 [CALL-BILLING-START] Initiating call credit billing...")
+          console.log("💰 [CALL-BILLING] Duration to Bill:", durationSeconds, "seconds")
+          console.log("💰 [CALL-BILLING] Client ID:", callLogger.clientId)
+          console.log("💰 [CALL-BILLING] Call Direction:", callDirection)
+          console.log("💰 [CALL-BILLING] Mobile:", callLogger.mobile)
+          console.log("💰 [CALL-BILLING] Stream SID:", streamSid)
+          
+          await billCallCredits({
+            clientId: callLogger.clientId,
+            durationSeconds,
+            callDirection,
+            mobile: callLogger.mobile,
+            callLogId: callLogger.callLogId,
+            streamSid,
+            uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
+          })
+          console.log("✅ [CALL-BILLING-END] Call credit billing completed")
+          
+          // Save final call log
+          console.log("\n💾 [DATABASE-SAVE-START] Saving final call log to database...")
+          try {
+            const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
+            console.log("💾 [DATABASE-SAVE] Final Lead Status:", finalLeadStatus)
+            console.log("💾 [DATABASE-SAVE] Call Log ID:", callLogger.callLogId)
+            
+            const savedLog = await callLogger.saveToDatabase(finalLeadStatus)
+            
+            console.log("✅ [DATABASE-SAVE-SUCCESS] Call log saved successfully!")
+            console.log("✅ [DATABASE-SAVE-SUCCESS] Saved Log ID:", savedLog._id)
+            console.log("✅ [DATABASE-SAVE-SUCCESS] Duration:", savedLog.duration, "seconds")
+            console.log("✅ [DATABASE-SAVE-SUCCESS] Lead Status:", savedLog.leadStatus)
+            console.log("✅ [DATABASE-SAVE-SUCCESS] Transcript Length:", savedLog.transcript?.length || 0, "characters")
+          } catch (error) {
+            console.log("❌ [DATABASE-SAVE-ERROR] Failed to save final call log")
+            console.log("❌ [DATABASE-SAVE-ERROR] Error:", error.message)
+            console.log("❌ [DATABASE-SAVE-ERROR] Stack:", error.stack)
+          } finally {
+            console.log("\n🧹 [CLEANUP-START] Cleaning up call logger resources...")
+            callLogger.cleanup()
+            console.log("✅ [CLEANUP-END] Call logger cleanup completed")
+          }
+        } else {
+          console.log("⚠️ [CALL-STATS] No call logger available - statistics unavailable")
+        }
+        
+        console.log("📊".repeat(50))
+        console.log("📊 [CALL-STATS-END] ==================== STATISTICS & BILLING COMPLETE ====================")
+        console.log("📊".repeat(50) + "\n")
+        
+        console.log("=".repeat(100))
+        console.log("✅".repeat(25) + " STOP EVENT COMPLETE " + "✅".repeat(25))
+        console.log("=".repeat(100) + "\n")
+        break
         case "dtmf":
           console.log("[SANPBX] DTMF received:", data.digit)
           
