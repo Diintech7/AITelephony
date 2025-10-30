@@ -33,6 +33,9 @@ if (!API_KEYS.deepgram || !API_KEYS.openai || (!API_KEYS.sarvam && !API_KEYS.sma
 }
 
 const fetch = globalThis.fetch || require("node-fetch")
+const fs = require('fs')
+const path = require('path')
+const { uploadBufferToS3, buildRecordingKey } = require('../utils/s3')
 
 // WhatsApp send-info API config (will be retrieved from agent config)
 let WHATSAPP_API_URL = null
@@ -125,6 +128,45 @@ const resolveRecordingUrl = (recPath) => {
     return `${base}${sep}${path}`
   } catch (_) {
     return recPath
+  }
+}
+
+// Download a recording into Buffer from either HTTP(S) URL or local path
+const fetchRecordingBuffer = async (recordingPathOrUrl) => {
+  try {
+    if (!recordingPathOrUrl) return null
+    const value = String(recordingPathOrUrl).trim()
+    if (!value) return null
+    if (/^https?:\/\//i.test(value)) {
+      const res = await fetch(value)
+      if (!res.ok) return null
+      const arrBuf = await res.arrayBuffer()
+      return Buffer.from(arrBuf)
+    }
+    // Try reading from local filesystem (relative to process cwd)
+    const abs = path.isAbsolute(value) ? value : path.join(process.cwd(), value)
+    if (fs.existsSync(abs)) {
+      return fs.readFileSync(abs)
+    }
+    return null
+  } catch (_) {
+    return null
+  }
+}
+
+// Upload SanPBX recording to S3 and return its URL
+const uploadRecordingToS3 = async (recordingPath) => {
+  try {
+    const bucket = process.env.AWS_S3_BUCKET || process.env.AWS_BUCKET_NAME
+    if (!bucket) return null
+    const resolved = resolveRecordingUrl(recordingPath)
+    const buffer = await fetchRecordingBuffer(resolved || recordingPath)
+    if (!buffer) return null
+    const key = buildRecordingKey(recordingPath)
+    const url = await uploadBufferToS3(buffer, bucket, key, 'audio/wav')
+    return url
+  } catch (_) {
+    return null
   }
 }
 
@@ -3747,16 +3789,22 @@ const setupSanPbxWebSocketServer = (ws) => {
                   console.log('🎙️ [SANPBX-RECORDING] stop-event session rec_path:', sessionRecordingPath)
                   console.log('🎙️ [SANPBX-RECORDING] stop-event using:', recordingPath)
                   if (resolved) console.log('🎙️ [SANPBX-RECORDING] stop-event resolved URL:', resolved)
+
+                  // Attempt S3 upload if configured
+                  let s3Url = null
+                  try { s3Url = await uploadRecordingToS3(recordingPath) } catch (_) {}
+                  const audioUrlToSave = s3Url || resolved || recordingPath
+                  const recordingUpdate = {
+                    $set: { 
+                      audioUrl: audioUrlToSave,
+                      'metadata.recording.rec_path': recordingPath,
+                      'metadata.recording.rec_file': data.rec_file,
+                      'metadata.lastUpdated': new Date() 
+                    }
+                  }
                   if (callLogger?.callLogId && resolved) {
                     try {
-                      await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                        $set: { 
-                          audioUrl: resolved, 
-                          'metadata.recording.rec_path': recordingPath,
-                          'metadata.recording.rec_file': data.rec_file,
-                          'metadata.lastUpdated': new Date() 
-                        }
-                      })
+                      await CallLog.findByIdAndUpdate(callLogger.callLogId, recordingUpdate)
                       console.log('✅ [SANPBX-RECORDING] Updated call log with recording URL')
                     } catch (updateErr) {
                       console.log('❌ [SANPBX-RECORDING] Failed to update call log:', updateErr.message)
