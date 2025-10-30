@@ -3708,129 +3708,147 @@ const setupSanPbxWebSocketServer = (ws) => {
           }
           break
 
-        case "stop":
-          console.log("🛑 [SANPBX] Call ended")
-
-          // Ensure last TTS/audio is delivered before termination
-          await waitForSipQueueDrain(2500)
-
-          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            deepgramWs.close()
-          }
-
-          if (silenceTimer) {
-            clearTimeout(silenceTimer)
-          }
+          case "stop":
+            console.log("🛑 [SANPBX] Call ended")
           
-          // Close shared Smallest WS if exists
-          if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
-            try { sharedSmallestTTS.interrupt() } catch (_) {}
-            sharedSmallestTTS = null
-          }
+            // Ensure last TTS/audio is delivered before termination
+            await waitForSipQueueDrain(2500)
           
-          // Cleanup WebSocket tracking
-          if (currentStreamSid) {
-            activeWebSockets.delete(currentStreamSid)
-            console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
-          }
-
-          // Intelligent WhatsApp send based on lead status and user requests
-          try {
-            // If we have a recording path from session, surface a resolved URL in logs and into the call log
-            try {
-              if (sessionRecordingPath) {
-                const resolved = resolveRecordingUrl(sessionRecordingPath)
-                console.log('🎙️ [SANPBX-RECORDING] stop-event session rec_path:', sessionRecordingPath)
-                if (resolved) console.log('🎙️ [SANPBX-RECORDING] stop-event resolved URL:', resolved)
-                if (callLogger?.callLogId && resolved) {
-                  try {
-                    await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                      $set: { audioUrl: resolved, 'metadata.recording.rec_path': sessionRecordingPath, 'metadata.lastUpdated': new Date() }
-                    })
-                  } catch (_) {}
-                }
-              }
-            } catch (_) {}
-            // Recompute WhatsApp request at end-of-call using full history
-            if (callLogger && agentConfig?.whatsappEnabled) {
-              try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
+            if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+              deepgramWs.close()
             }
-            if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
-              const waLink = getAgentWhatsappLink(agentConfig)
-              const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
-              const waApiUrl = agentConfig?.whatsapplink
-              console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
-              if (waLink && waNumber && waApiUrl) {
-                sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
-                  .then(async (r) => {
-                    console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
-                    if (r?.ok) {
-                      await billWhatsAppCredit({
-                        clientId: agentConfig.clientId,
-                        mobile: callLogger?.mobile || null,
-                        link: waLink,
-                        callLogId: callLogger?.callLogId,
-                        streamSid: streamId,
-                      })
-                      callLogger.markWhatsAppSent()
-                      try {
-                        if (callLogger?.callLogId) {
-                          await CallLog.findByIdAndUpdate(callLogger.callLogId, {
-                            'metadata.whatsappMessageSent': true,
-                            'metadata.whatsappRequested': !!callLogger.whatsappRequested,
-                            'metadata.lastUpdated': new Date(),
-                          })
-                        }
-                      } catch (_) {}
-                    }
-                  })
-                  .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
-              } else {
-                console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
-              }
-            } else {
-              console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
-                hasCallLogger: !!callLogger,
-                whatsappEnabled: agentConfig?.whatsappEnabled,
-                shouldSend: callLogger?.shouldSendWhatsApp(),
-                leadStatus: callLogger?.currentLeadStatus,
-                alreadySent: callLogger?.whatsappSent,
-                requested: callLogger?.whatsappRequested
-              })
-            }
-          } catch (waErr) {
-            console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
-          }
           
-          if (callLogger) {
-            const stats = callLogger.getStats()
-            console.log("🛑 [SANPBX-STOP] Call Stats:", JSON.stringify(stats, null, 2))
-            // Bill credits at end of call (decimal precision)
-            const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
-            await billCallCredits({
-              clientId: callLogger.clientId,
-              durationSeconds,
-              callDirection,
-              mobile: callLogger.mobile,
-              callLogId: callLogger.callLogId,
-              streamSid: streamId,
-              uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
-            })
+            if (silenceTimer) {
+              clearTimeout(silenceTimer)
+            }
             
-            try {
-              console.log("💾 [SANPBX-STOP] Saving final call log to database...")
-              const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
-              console.log("📊 [SANPBX-STOP] Final lead status:", finalLeadStatus)
-              const savedLog = await callLogger.saveToDatabase(finalLeadStatus, agentConfig)
-              console.log("✅ [SANPBX-STOP] Final call log saved with ID:", savedLog._id)
-            } catch (error) {
-              console.log("❌ [SANPBX-STOP] Error saving final call log:", error.message)
-            } finally {
-              callLogger.cleanup()
+            // Close shared Smallest WS if exists
+            if (sharedSmallestTTS && !sharedSmallestTTS.isInterrupted) {
+              try { sharedSmallestTTS.interrupt() } catch (_) {}
+              sharedSmallestTTS = null
             }
-          }
-          break
-
+            
+            // Cleanup WebSocket tracking
+            if (currentStreamSid) {
+              activeWebSockets.delete(currentStreamSid)
+              console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
+            }
+          
+            // Intelligent WhatsApp send based on lead status and user requests
+            try {
+              // Extract recording path from stop event payload or fall back to session variable
+              const recordingPath = data.rec_file || sessionRecordingPath
+              
+              // If we have a recording path, surface a resolved URL in logs and into the call log
+              try {
+                if (recordingPath) {
+                  const resolved = resolveRecordingUrl(recordingPath)
+                  console.log('🎙️ [SANPBX-RECORDING] stop-event rec_file:', data.rec_file)
+                  console.log('🎙️ [SANPBX-RECORDING] stop-event session rec_path:', sessionRecordingPath)
+                  console.log('🎙️ [SANPBX-RECORDING] stop-event using:', recordingPath)
+                  if (resolved) console.log('🎙️ [SANPBX-RECORDING] stop-event resolved URL:', resolved)
+                  if (callLogger?.callLogId && resolved) {
+                    try {
+                      await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                        $set: { 
+                          audioUrl: resolved, 
+                          'metadata.recording.rec_path': recordingPath,
+                          'metadata.recording.rec_file': data.rec_file,
+                          'metadata.lastUpdated': new Date() 
+                        }
+                      })
+                      console.log('✅ [SANPBX-RECORDING] Updated call log with recording URL')
+                    } catch (updateErr) {
+                      console.log('❌ [SANPBX-RECORDING] Failed to update call log:', updateErr.message)
+                    }
+                  }
+                } else {
+                  console.log('⚠️ [SANPBX-RECORDING] No recording path available in stop event')
+                }
+              } catch (recErr) {
+                console.log('❌ [SANPBX-RECORDING] Error processing recording:', recErr.message)
+              }
+              
+              // Recompute WhatsApp request at end-of-call using full history
+              if (callLogger && agentConfig?.whatsappEnabled) {
+                try { await detectWhatsAppRequestedAtEnd() } catch (_) {}
+              }
+              
+              if (callLogger && agentConfig?.whatsappEnabled && callLogger.shouldSendWhatsApp()) {
+                const waLink = getAgentWhatsappLink(agentConfig)
+                const waNumber = normalizeIndianMobile(callLogger?.mobile || null)
+                const waApiUrl = agentConfig?.whatsapplink
+                console.log("📨 [WHATSAPP] stop-event check → enabled=", agentConfig.whatsappEnabled, ", link=", waLink, ", apiUrl=", waApiUrl, ", normalized=", waNumber, ", leadStatus=", callLogger.currentLeadStatus, ", requested=", callLogger.whatsappRequested)
+                if (waLink && waNumber && waApiUrl) {
+                  sendWhatsAppTemplateMessage(waNumber, waLink, waApiUrl)
+                    .then(async (r) => {
+                      console.log("📨 [WHATSAPP] stop-event result:", r?.ok ? "OK" : "FAIL", r?.status || r?.reason || r?.error || "")
+                      if (r?.ok) {
+                        await billWhatsAppCredit({
+                          clientId: agentConfig.clientId,
+                          mobile: callLogger?.mobile || null,
+                          link: waLink,
+                          callLogId: callLogger?.callLogId,
+                          streamSid: streamId,
+                        })
+                        callLogger.markWhatsAppSent()
+                        try {
+                          if (callLogger?.callLogId) {
+                            await CallLog.findByIdAndUpdate(callLogger.callLogId, {
+                              'metadata.whatsappMessageSent': true,
+                              'metadata.whatsappRequested': !!callLogger.whatsappRequested,
+                              'metadata.lastUpdated': new Date(),
+                            })
+                          }
+                        } catch (_) {}
+                      }
+                    })
+                    .catch((e) => console.log("❌ [WHATSAPP] stop-event error:", e.message))
+                } else {
+                  console.log("📨 [WHATSAPP] stop-event skipped → missing:", !waLink ? "link" : "", !waNumber ? "number" : "", !waApiUrl ? "apiUrl" : "")
+                }
+              } else {
+                console.log("📨 [WHATSAPP] stop-event skipped → conditions not met:", {
+                  hasCallLogger: !!callLogger,
+                  whatsappEnabled: agentConfig?.whatsappEnabled,
+                  shouldSend: callLogger?.shouldSendWhatsApp(),
+                  leadStatus: callLogger?.currentLeadStatus,
+                  alreadySent: callLogger?.whatsappSent,
+                  requested: callLogger?.whatsappRequested
+                })
+              }
+            } catch (waErr) {
+              console.log("❌ [WHATSAPP] stop-event unexpected:", waErr.message)
+            }
+            
+            if (callLogger) {
+              const stats = callLogger.getStats()
+              console.log("🛑 [SANPBX-STOP] Call Stats:", JSON.stringify(stats, null, 2))
+              // Bill credits at end of call (decimal precision)
+              const durationSeconds = Math.round((new Date() - callLogger.callStartTime) / 1000)
+              await billCallCredits({
+                clientId: callLogger.clientId,
+                durationSeconds,
+                callDirection,
+                mobile: callLogger.mobile,
+                callLogId: callLogger.callLogId,
+                streamSid: streamId,
+                uniqueid: callLogger.uniqueid || agentConfig?.uniqueid || null
+              })
+              
+              try {
+                console.log("💾 [SANPBX-STOP] Saving final call log to database...")
+                const finalLeadStatus = callLogger.currentLeadStatus || "maybe"
+                console.log("📊 [SANPBX-STOP] Final lead status:", finalLeadStatus)
+                const savedLog = await callLogger.saveToDatabase(finalLeadStatus, agentConfig)
+                console.log("✅ [SANPBX-STOP] Final call log saved with ID:", savedLog._id)
+              } catch (error) {
+                console.log("❌ [SANPBX-STOP] Error saving final call log:", error.message)
+              } finally {
+                callLogger.cleanup()
+              }
+            }
+            break
         case "dtmf":
           console.log("[SANPBX] DTMF received:", data.digit)
           
