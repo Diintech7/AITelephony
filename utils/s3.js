@@ -21,7 +21,14 @@ const getS3Client = () => {
  */
 const uploadBufferToS3 = async (buffer, bucket, key, contentType = 'audio/wav') => {
   const client = getS3Client()
-  const cmd = new PutObjectCommand({ Bucket: bucket, Key: key, Body: buffer, ContentType: contentType })
+  const isPublic = String(process.env.AWS_S3_PUBLIC_READ || '').toLowerCase() === 'true'
+  const cmd = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType,
+    ...(isPublic ? { ACL: 'public-read' } : {}),
+  })
   await client.send(cmd)
   const base = process.env.AWS_S3_PUBLIC_BASE_URL
   if (base) {
