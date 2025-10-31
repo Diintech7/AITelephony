@@ -31,7 +31,6 @@ const uploadBufferToS3 = async (buffer, bucket, key, contentType = 'audio/wav') 
   // Fallback conventional public URL
   return `https://${bucket}.s3.${process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION}.amazonaws.com/${key}`
 }
-
 /**
  * Build an S3 key using optional prefix and the recording filename
  */
