@@ -1,4 +1,5 @@
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3')
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3')
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner')
 const path = require('path')
 
 // Lazily create S3 client to avoid startup errors if envs are missing
@@ -30,12 +31,17 @@ const uploadBufferToS3 = async (buffer, bucket, key, contentType = 'audio/wav') 
     ...(isPublic ? { ACL: 'public-read' } : {}),
   })
   await client.send(cmd)
+  const wantSigned = String(process.env.AWS_S3_RETURN_SIGNED_URL || '').toLowerCase() === 'true'
+  if (wantSigned || !isPublic) {
+    const expires = Number(process.env.AWS_S3_SIGNED_URL_EXPIRES || 3600)
+    const signed = await getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn: expires })
+    return signed
+  }
   const base = process.env.AWS_S3_PUBLIC_BASE_URL
   if (base) {
     const sep = base.endsWith('/') ? '' : '/'
     return `${base}${sep}${key}`
   }
-  // Fallback conventional public URL
   return `https://${bucket}.s3.${process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION}.amazonaws.com/${key}`
 }
 /**
