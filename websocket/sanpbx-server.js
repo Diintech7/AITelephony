@@ -1549,34 +1549,34 @@ const setupSanPbxWebSocketServer = (ws) => {
     } catch (_) {}
   }
 
-  const startClosingFlow = async ({ reason = 'close_call', politeDelayMs = 2000, finalTone = "कॉल समाप्त की जा रही है। धन्यवाद।" } = {}) => {
-    if (closingState.isClosing) return
-    closingState.isClosing = true
-    closingState.ignoreFurtherInputs = true
-    console.log(`🛑 [CLOSING] Initiated closing flow: ${reason}`)
+  // const startClosingFlow = async ({ reason = 'close_call', politeDelayMs = 2000, finalTone = "कॉल समाप्त की जा रही है। धन्यवाद।" } = {}) => {
+  //   if (closingState.isClosing) return
+  //   closingState.isClosing = true
+  //   closingState.ignoreFurtherInputs = true
+  //   console.log(`🛑 [CLOSING] Initiated closing flow: ${reason}`)
 
-    // Schedule polite closing tone/message just before hangup
-    try {
-      // Send the polite tone/message without changing SIP chunk sizes
-      await enqueueTts(finalTone, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
-      closingState.finalMessageSent = true
-    } catch (_) {}
+  //   // Schedule polite closing tone/message just before hangup
+  //   try {
+  //     // Send the polite tone/message without changing SIP chunk sizes
+  //     await enqueueTts(finalTone, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+  //     closingState.finalMessageSent = true
+  //   } catch (_) {}
 
-    // After final message, enforce 4s silence fallback end
-    if (closingState.closeSilenceTimer) { clearTimeout(closingState.closeSilenceTimer) }
-    closingState.closeSilenceTimer = setTimeout(async () => {
-      console.log('⏰ [CLOSING] 4s silence after final message → ending call')
-      await performCallEnd('silence_after_closing')
-    }, 4000)
+  //   // After final message, enforce 4s silence fallback end
+  //   if (closingState.closeSilenceTimer) { clearTimeout(closingState.closeSilenceTimer) }
+  //   closingState.closeSilenceTimer = setTimeout(async () => {
+  //     console.log('⏰ [CLOSING] 4s silence after final message → ending call')
+  //     await performCallEnd('silence_after_closing')
+  //   }, 4000)
 
-    // Forced end after confirmation intents: 2.5s; otherwise 2s
-    const waitMs = ['Interested_Now','Interested_Later','Not_Interested'].includes(closingState.lastIntent) ? 2500 : politeDelayMs
-    if (closingState.closeTimer) { clearTimeout(closingState.closeTimer) }
-    closingState.closeTimer = setTimeout(async () => {
-      console.log(`🛑 [CLOSING] Finalizing call end after ${waitMs}ms`)
-      await performCallEnd(reason)
-    }, waitMs)
-  }
+  //   // Forced end after confirmation intents: 2.5s; otherwise 2s
+  //   const waitMs = ['Interested_Now','Interested_Later','Not_Interested'].includes(closingState.lastIntent) ? 2500 : politeDelayMs
+  //   if (closingState.closeTimer) { clearTimeout(closingState.closeTimer) }
+  //   closingState.closeTimer = setTimeout(async () => {
+  //     console.log(`🛑 [CLOSING] Finalizing call end after ${waitMs}ms`)
+  //     await performCallEnd(reason)
+  //   }, waitMs)
+  // }
 
   const textTriggersClosing = (text) => {
     if (!text) return false
@@ -2308,15 +2308,15 @@ const setupSanPbxWebSocketServer = (ws) => {
 
   const processUserUtterance = async (text) => {
       // If we already triggered closing, ignore any further inputs. If it's just an ACK, end immediately.
-      if (closingState.ignoreFurtherInputs) {
-        if (POST_GOODBYE_IGNORE_REGEX.test(text || '')) {
-          console.log('🛑 [POST-CLOSING] Ack/bye detected → immediate hangup')
-          await performCallEnd('post_goodbye_ack')
-        } else {
-          console.log('🛑 [POST-CLOSING] Ignoring user input after closing trigger')
-        }
-        return
-      }
+      // if (closingState.ignoreFurtherInputs) {
+      //   if (POST_GOODBYE_IGNORE_REGEX.test(text || '')) {
+      //     console.log('🛑 [POST-CLOSING] Ack/bye detected → immediate hangup')
+      //     await performCallEnd('post_goodbye_ack')
+      //   } else {
+      //     console.log('🛑 [POST-CLOSING] Ignoring user input after closing trigger')
+      //   }
+      //   return
+      // }
     if (!text.trim() || text === lastProcessedTranscript) return
 
     console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
