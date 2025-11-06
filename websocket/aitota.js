@@ -3014,7 +3014,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let userName = null
     let lastUserActivity = Date.now()
     let silenceTimeout = null
-    let autoDispositionEnabled = true
+    let autoDispositionEnabled = false
 
     // Deepgram WebSocket connection
     let deepgramWs = null
@@ -3029,66 +3029,19 @@ const setupUnifiedVoiceServer = (wss) => {
         silenceTimeout = null
       }
       lastUserActivity = Date.now()
-      
-      // Set 30-second silence timeout
-      silenceTimeout = setTimeout(async () => {
-        console.log("⏰ [SILENCE-TIMEOUT] 30 seconds of silence detected - terminating call")
-        await terminateCallForSilence()
-      }, 50000)
+      // Auto-silence termination disabled; not scheduling a termination timeout
     }
 
     const terminateCallForSilence = async () => {
-      try {
-        console.log("🛑 [AUTO-TERMINATION] Terminating call due to silence timeout")
-        
-        if (callLogger) {
-          callLogger.updateLeadStatus('not_connected')
-          await callLogger.saveToDatabase('not_connected', agentConfig)
-          callLogger.cleanup()
-        }
-        
-        if (streamSid && callLogger?.callSid && callLogger?.accountSid) {
-          await disconnectCallViaAWS(streamSid, callLogger.callSid, callLogger.accountSid, 'silence_timeout')
-        }
-        
-        // Close WebSocket and cleanup tracking
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.close()
-        }
-        if (currentStreamSid) {
-          activeWebSockets.delete(currentStreamSid)
-          console.log(`🔗 [AITOTA-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
-        }
-      } catch (error) {
-        console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
-      }
+      // Auto termination on silence disabled
+      try { console.log("🛑 [AUTO-TERMINATION] Silence handler invoked but auto termination is disabled") } catch (_) {}
+      return
     }
 
     const terminateCallForDisposition = async (reason = 'auto_disposition') => {
-      try {
-        console.log(`🛑 [AUTO-TERMINATION] Terminating call due to disposition: ${reason}`)
-        
-        if (callLogger) {
-          callLogger.updateLeadStatus('not_required')
-          await callLogger.saveToDatabase('not_required', agentConfig)
-          callLogger.cleanup()
-        }
-        
-        if (streamSid && callLogger?.callSid && callLogger?.accountSid) {
-          await disconnectCallViaAWS(streamSid, callLogger.callSid, callLogger.accountSid, reason)
-        }
-        
-        // Close WebSocket and cleanup tracking
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.close()
-        }
-        if (currentStreamSid) {
-          activeWebSockets.delete(currentStreamSid)
-          console.log(`🔗 [AITOTA-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
-        }
-      } catch (error) {
-        console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
-      }
+      // Auto termination on disposition disabled
+      try { console.log(`🛑 [AUTO-TERMINATION] Disposition handler invoked (${reason}) but auto termination is disabled`) } catch (_) {}
+      return
     }
 
     const connectToDeepgram = async () => {
@@ -3281,10 +3234,8 @@ const setupUnifiedVoiceServer = (wss) => {
         
       // Fast intent: strict NO → immediate termination; wait/thinking → continue
       if (shouldTerminateFast(text)) {
-        console.log("🛑 [USER-UTTERANCE] Fast intent detected: strict NO → terminate")
-        try { currentTTS?.interrupt?.() } catch (_) {}
-        await terminateCallForDisposition('user_not_interested')
-        return
+        console.log("🛑 [USER-UTTERANCE] Fast intent detected, but auto termination is disabled → continuing conversation")
+        // Do not terminate; continue the flow
       }
       if (indicatesWaitOrThinking(text)) {
         console.log("⏳ [USER-UTTERANCE] Wait/Thinking detected → continue without termination")
@@ -3297,10 +3248,7 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("🔍 [USER-UTTERANCE] Running auto disposition detection (async)...")
               const dispositionResult = await detectAutoDisposition(text, history.getConversationHistory(), currentLanguage)
               if (dispositionResult === "TERMINATE") {
-                console.log("🛑 [USER-UTTERANCE] Auto disposition detected (async) - terminating call")
-                // Interrupt any current TTS/streaming quickly
-                try { currentTTS?.interrupt?.() } catch (_) {}
-                await terminateCallForDisposition('user_not_interested')
+                console.log("🛑 [USER-UTTERANCE] Auto disposition detected (async), but auto termination is disabled → continuing conversation")
               }
             } catch (_) {}
           })()
