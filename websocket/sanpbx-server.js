@@ -1493,7 +1493,7 @@ const setupSanPbxWebSocketServer = (ws) => {
   let sttTimer = null
   let lastUserActivity = Date.now()
   let silenceTimeout = null
-  let autoDispositionEnabled = true
+  let autoDispositionEnabled = false
   let sessionRecordingPath = null
 
   // Closing/termination state for Cancer Healer Center flows
@@ -1549,34 +1549,11 @@ const setupSanPbxWebSocketServer = (ws) => {
     } catch (_) {}
   }
 
-  // const startClosingFlow = async ({ reason = 'close_call', politeDelayMs = 2000, finalTone = "कॉल समाप्त की जा रही है। धन्यवाद।" } = {}) => {
-  //   if (closingState.isClosing) return
-  //   closingState.isClosing = true
-  //   closingState.ignoreFurtherInputs = true
-  //   console.log(`🛑 [CLOSING] Initiated closing flow: ${reason}`)
-
-  //   // Schedule polite closing tone/message just before hangup
-  //   try {
-  //     // Send the polite tone/message without changing SIP chunk sizes
-  //     await enqueueTts(finalTone, (ws.sessionAgentConfig?.language || 'en').toLowerCase())
-  //     closingState.finalMessageSent = true
-  //   } catch (_) {}
-
-  //   // After final message, enforce 4s silence fallback end
-  //   if (closingState.closeSilenceTimer) { clearTimeout(closingState.closeSilenceTimer) }
-  //   closingState.closeSilenceTimer = setTimeout(async () => {
-  //     console.log('⏰ [CLOSING] 4s silence after final message → ending call')
-  //     await performCallEnd('silence_after_closing')
-  //   }, 4000)
-
-  //   // Forced end after confirmation intents: 2.5s; otherwise 2s
-  //   const waitMs = ['Interested_Now','Interested_Later','Not_Interested'].includes(closingState.lastIntent) ? 2500 : politeDelayMs
-  //   if (closingState.closeTimer) { clearTimeout(closingState.closeTimer) }
-  //   closingState.closeTimer = setTimeout(async () => {
-  //     console.log(`🛑 [CLOSING] Finalizing call end after ${waitMs}ms`)
-  //     await performCallEnd(reason)
-  //   }, waitMs)
-  // }
+  const startClosingFlow = async ({ reason = 'close_call', politeDelayMs = 2000, finalTone = "कॉल समाप्त की जा रही है। धन्यवाद।" } = {}) => {
+    // Automatic closing disabled; do nothing
+    try { console.log(`🛑 [CLOSING] startClosingFlow invoked (${reason}) but auto closing is disabled`) } catch (_) {}
+    return
+  }
 
   const textTriggersClosing = (text) => {
     if (!text) return false
@@ -1674,70 +1651,19 @@ const setupSanPbxWebSocketServer = (ws) => {
       silenceTimeout = null
     }
     lastUserActivity = Date.now()
-    
-    // Set 30-second silence timeout
-    silenceTimeout = setTimeout(async () => {
-      console.log("⏰ [SILENCE-TIMEOUT] 30 seconds of silence detected - terminating call")
-      await terminateCallForSilence()
-    }, 100000)
+    // Auto-silence termination disabled; not scheduling a termination timeout
   }
 
   const terminateCallForSilence = async () => {
-    try {
-      console.log("🛑 [AUTO-TERMINATION] Terminating call due to silence timeout")
-      // Ensure last TTS/audio is delivered before termination
-      await waitForSipQueueDrain(2500)
-      
-      if (callLogger) {
-        callLogger.updateLeadStatus('not_connected')
-        await callLogger.saveToDatabase('not_connected', agentConfig)
-        callLogger.cleanup()
-      }
-      
-      if (callId) {
-        await disconnectCallViaAPI(callId, 'silence_timeout')
-      }
-      
-      // Close WebSocket and cleanup tracking
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close()
-      }
-      if (currentStreamSid) {
-        activeWebSockets.delete(currentStreamSid)
-        console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
-      }
-    } catch (error) {
-      console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
-    }
+    // Auto termination on silence disabled
+    try { console.log("🛑 [AUTO-TERMINATION] Silence handler invoked but auto termination is disabled") } catch (_) {}
+    return
   }
 
   const terminateCallForDisposition = async (reason = 'auto_disposition') => {
-    try {
-      console.log(`🛑 [AUTO-TERMINATION] Terminating call due to disposition: ${reason}`)
-      // Ensure last TTS/audio is delivered before termination
-      await waitForSipQueueDrain(2500)
-      
-      if (callLogger) {
-        callLogger.updateLeadStatus('not_required')
-        await callLogger.saveToDatabase('not_required', agentConfig)
-        callLogger.cleanup()
-      }
-      
-      if (callId) {
-        await disconnectCallViaAPI(callId, reason)
-      }
-      
-      // Close WebSocket and cleanup tracking
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close()
-      }
-      if (currentStreamSid) {
-        activeWebSockets.delete(currentStreamSid)
-        console.log(`🔗 [SANPBX-WS-TRACKING] Removed WebSocket for streamSid: ${currentStreamSid}`)
-      }
-    } catch (error) {
-      console.log("❌ [AUTO-TERMINATION] Error terminating call:", error.message)
-    }
+    // Auto termination on disposition disabled
+    try { console.log(`🛑 [AUTO-TERMINATION] Disposition handler invoked (${reason}) but auto termination is disabled`) } catch (_) {}
+    return
   }
 
   // Simple TTS queue to serialize chunk playback and avoid overlaps
@@ -2308,15 +2234,15 @@ const setupSanPbxWebSocketServer = (ws) => {
 
   const processUserUtterance = async (text) => {
       // If we already triggered closing, ignore any further inputs. If it's just an ACK, end immediately.
-      // if (closingState.ignoreFurtherInputs) {
-      //   if (POST_GOODBYE_IGNORE_REGEX.test(text || '')) {
-      //     console.log('🛑 [POST-CLOSING] Ack/bye detected → immediate hangup')
-      //     await performCallEnd('post_goodbye_ack')
-      //   } else {
-      //     console.log('🛑 [POST-CLOSING] Ignoring user input after closing trigger')
-      //   }
-      //   return
-      // }
+      if (closingState.ignoreFurtherInputs) {
+        if (POST_GOODBYE_IGNORE_REGEX.test(text || '')) {
+          console.log('🛑 [POST-CLOSING] Ack/bye detected → immediate hangup')
+          await performCallEnd('post_goodbye_ack')
+        } else {
+          console.log('🛑 [POST-CLOSING] Ignoring user input after closing trigger')
+        }
+        return
+      }
     if (!text.trim() || text === lastProcessedTranscript) return
 
     console.log("🗣️ [USER-UTTERANCE] ========== USER SPEECH ==========")
@@ -2346,11 +2272,8 @@ const setupSanPbxWebSocketServer = (ws) => {
       
       // Immediate intent handling (zero-latency)
       if (shouldTerminateFast(text)) {
-        console.log("🛑 [USER-UTTERANCE] Fast intent detected: strict NO → terminate")
-        try { currentTTS?.interrupt?.() } catch (_) {}
-        interruptSipQueue() // Immediately stop SIP audio queue
-        await terminateCallForDisposition('user_not_interested')
-        return
+        console.log("🛑 [USER-UTTERANCE] Fast intent detected, but auto termination is disabled → continuing conversation")
+        // Do not terminate; continue the flow
       }
       if (indicatesWaitOrThinking(text)) {
         console.log("⏳ [USER-UTTERANCE] Wait/Thinking detected → continue without termination")
@@ -2363,9 +2286,7 @@ const setupSanPbxWebSocketServer = (ws) => {
             console.log("🔍 [USER-UTTERANCE] Running auto disposition detection (async)...")
             const dispositionResult = await detectAutoDisposition(text, history.getConversationHistory(), detectedLanguage)
             if (dispositionResult === "TERMINATE") {
-              console.log("🛑 [USER-UTTERANCE] Auto disposition detected (async) - terminating call")
-              try { currentTTS?.interrupt?.() } catch (_) {}
-              await terminateCallForDisposition('user_not_interested')
+              console.log("🛑 [USER-UTTERANCE] Auto disposition detected (async), but auto termination is disabled → continuing conversation")
             }
           } catch (_) {}
         })()
