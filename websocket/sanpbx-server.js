@@ -191,6 +191,29 @@ const QUICK_RESPONSES = {
   "that's it": "Great! Feel free to call back if you need anything else.",
 }
 
+const isWhatsAppRequestText = (text = "") => {
+  try {
+    if (!text) return false
+    const normalized = String(text).toLowerCase()
+    const hasWhatsAppWord = /wh\s*a\s*t\s*s?\s*app|w?ats\s*app|whatapp|व्हाट्सऐप|व्हाट्सअप/.test(normalized)
+    if (hasWhatsAppWord) return true
+
+    const waVariants = ["whatsapp", "watsapp", "whatapp", "wa message", "wa number", "wa link"]
+    if (waVariants.some((variant) => normalized.includes(variant))) return true
+
+    if (normalized.includes(" wa ") || normalized.endsWith(" wa") || normalized.startsWith("wa ")) {
+      const intentWords = ["send", "share", "message", "details", "info", "contact", "number", "link"]
+      if (intentWords.some((intent) => normalized.includes(intent))) {
+        return true
+      }
+    }
+
+    return false
+  } catch (_) {
+    return false
+  }
+}
+
 // Sentence utilities
 const splitIntoSentences = (text) => {
   try {
@@ -698,6 +721,11 @@ const detectCallDisconnectionIntent = async (userMessage, conversationHistory, d
 const detectWhatsAppRequest = async (userMessage, conversationHistory, detectedLanguage) => {
   const timer = createTimer("WHATSAPP_REQUEST_DETECTION")
   try {
+    if (isWhatsAppRequestText(userMessage)) {
+      console.log(`🕒 [WHATSAPP-REQUEST-DETECTION] ${timer.end()}ms - Keyword match`)
+      return "WHATSAPP_REQUEST"
+    }
+
     const whatsappPrompt = `Analyze if the user is asking for WhatsApp information, link, or contact details. Look for:
 - "WhatsApp", "whatsapp", "WA", "wa"
 - "send me", "share", "link", "contact", "number"
@@ -2279,6 +2307,23 @@ const setupSanPbxWebSocketServer = (ws) => {
         console.log("⏳ [USER-UTTERANCE] Wait/Thinking detected → continue without termination")
       }
       
+      // Detect WhatsApp request early to ensure follow-up messaging
+      if (!whatsappRequested) {
+        try {
+          const waResult = await detectWhatsAppRequest(text, history.getConversationHistory(), detectedLanguage)
+          if (waResult === "WHATSAPP_REQUEST") {
+            whatsappRequested = true
+            console.log("📨 [USER-UTTERANCE] User requested WhatsApp details")
+            if (callLogger) {
+              callLogger.markWhatsAppRequested()
+              await updateLiveCallLog().catch(() => {})
+            }
+          }
+        } catch (err) {
+          console.log("⚠️ [USER-UTTERANCE] WhatsApp detection error:", err.message)
+        }
+      }
+      
       // Auto disposition detection (non-blocking, no added latency)
       if (autoDispositionEnabled) {
         ;(async () => {
@@ -3201,6 +3246,9 @@ const setupSanPbxWebSocketServer = (ws) => {
           ;(async () => {
             try {
               const lead = await detectLeadStatusWithOpenAI(transcript, history.getConversationHistory(), (ws.sessionAgentConfig?.language || 'en').toLowerCase())
+              if (lead && callLogger) {
+                callLogger.updateLeadStatus(lead)
+              }
               const intent = mapLeadStatusToIntent(lead)
               if (intent) {
                 closingState.lastIntent = intent
